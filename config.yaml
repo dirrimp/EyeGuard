@@ -18,7 +18,7 @@ detection:
   # which fired BUTTOCKS_EXPOSED=0.58 on a fully-clothed man (fire training video).
   # Genuine exposure scores well above this; 0.70 kills the weak misreads while
   # still auto-flagging real nudity (and CLIP still catches anything below it).
-  flag_threshold: 0.70
+  flag_threshold: 0.80
 
   # How often (seconds) to run the detector self-test: feed synthetic frames
   # through the live pipeline and confirm it still produces sane output. If it
@@ -51,7 +51,7 @@ arbiter:
   # Tiles are zoomed/noisier, so they must clear (threshold + tile_penalty) to
   # flag. Higher = fewer tile-driven false positives (e.g. a clothed torso
   # closeup reading as nudity), but small real windows need to be clearer.
-  tile_penalty: 0.12
+  tile_penalty: 0.20
   # Minimum grayscale std for a tile/frame to be scored at all. Below this it's
   # blank/near-uniform (empty page, solid background) and is treated as SAFE —
   # stops blank screens from flagging "tight revealing clothing" on empty pixels.
@@ -68,7 +68,7 @@ arbiter:
   # YELLOW: P(not safe) = P(explicit)+P(suggestive) >= this (and not red) ->
   # ALERT. Lower = more sensitive to "barely dressed"; raise if normal clothed
   # people get flagged.
-  yellow_threshold: 0.46
+  yellow_threshold: 0.55
 
   # RED — explicit / nude / exposed. CONCRETE VISUAL prompts only: each describes
   # what is literally visible (bare / exposed / naked skin). Avoid abstract
@@ -150,6 +150,41 @@ arbiter:
     - "a meme with text"
     - "a logo, icon, or graphic design"
     - "a sports game or athlete playing sports"
+    # WEBCAM / self-recording (Photo Booth was 64 FPs: a young man in a cream
+    # t-shirt playing guitar — shirt + guitar body read as "butt in tight pants")
+    - "a man on a webcam or video call"
+    - "a webcam selfie video of a young man indoors"
+    - "a person playing an acoustic guitar"
+    - "a man sitting on a couch wearing a t-shirt"
+    - "a person recording themselves in a living room"
+    # CARTOON / STYLIZED GAME CHARACTERS (smooth tan-and-mustard blob figures
+    # with rounded limbs matched "a woman's butt in tight pants")
+    - "a cartoon blob character with smooth rounded limbs"
+    - "a yellow or tan cartoon character in a video game"
+    - "a stylized 3D cartoon game character"
+    - "a simple cartoon figure with a drawn smiley face"
+    - "a video game character standing in a bedroom"
+    # PHOTO SLIDESHOWS / WEDDING + FAMILY PHOTOS (a woman in a modest summer
+    # dress matched "a woman in a short skirt")
+    - "a wedding or engagement photo of a couple"
+    - "a woman in a modest knee-length summer dress"
+    - "a couple posing together outdoors for a photo"
+    - "a photo slideshow of family pictures"
+    - "a presentation slide with photos and text"
+    # BUSINESS / PRODUCTIVITY UI
+    - "a web dashboard with a sidebar and forms"
+    - "a login page with input fields and buttons"
+    - "an email inbox with a list of messages"
+    - "a chat conversation with message bubbles"
+    - "a spreadsheet or business software window"
+    # POOLS / RESORT PHOTOS with no people — an apartment-listing pool photo
+    # matched "a woman at the beach or pool in swimwear" at 0.89
+    - "an empty swimming pool with no people"
+    - "a resort or apartment swimming pool with lounge chairs"
+    - "a poolside patio with empty deck chairs"
+    # RAGDOLL / PHYSICS COMEDY GAMES (falling cartoon figures)
+    - "a ragdoll physics game with falling cartoon figures"
+    - "cartoon characters tumbling or falling in a game"
     # VIDEO GAMES — gameplay content has no body in it but CLIP misreads game
     # textures/HUDs as nudity without these. (Fixes gaming-stream false positives.)
     - "a screenshot of a video game"
@@ -334,6 +369,19 @@ context_risk:
     - "SQL Editor"      # Supabase / database consoles — text only
     - "supabase.com"
     - "github.com"      # code hosting — text/diffs
+    # Your OWN webcam + your own documents — 79 of 117 false flags came from here
+    - "Photo Booth"     # your own webcam feed (you, on camera)
+    - "PowerPoint"      # your own slide decks (wedding/family photo slideshows)
+    - "Keynote"
+    - "Accordance"      # Bible study software
+    - "stripe.com"      # business dashboards / logins
+    - "Stripe"
+    - "EHR"
+    # Cartoon hide-and-seek game you watch — smooth tan blob characters scored
+    # 0.85-0.93 on "butt in tight pants", clearing even the low-risk discount.
+    - "meccha chameleon"
+    - "vanoss"
+    - "delirious"
 
   # LOW RISK — discount (keep YELLOW only if very confident, >= low_risk_min_
   # confidence). RED still always surfaces, so no blind spot for real nudity.
