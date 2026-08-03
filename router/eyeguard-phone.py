@@ -191,18 +191,22 @@ def cycle(state):
             "no_image": True, "is_nudity": False},
             prefer="resolution=merge-duplicates,return=minimal")
 
-    # phone liveness. Preferred signal = WireGuard rx-byte counter: it climbs on
-    # every keepalive while the tunnel is up, so a SLEEPING-but-tethered phone
-    # still reads alive (this is how we "parse out sleep" like the Mac does).
-    # Only a tunnel that's actually down (VPN off / phone off / no signal) makes
-    # it flatline. Falls back to DNS activity if wg_interface isn't configured.
+    # phone liveness = EITHER signal, whichever is fresher:
+    #  (a) DNS activity through AdGuard -> covers the phone on home wifi, where
+    #      it's a plain LAN client and NOT on the WG tunnel at all.
+    #  (b) WireGuard rx-byte counter -> covers the phone AWAY on the tunnel: with
+    #      Persistent Keepalive the counter climbs every ~25s even while asleep,
+    #      so sleep is parsed out and only a truly-down tunnel goes dark.
+    # OR-combining them means "home + browsing", "home + idle-with-DNS", and
+    # "away + asleep-on-tunnel" all read alive; only genuine silence on BOTH
+    # (phone off / off-network / VPN killed while away) trips dark.
+    if mine:
+        state["last_activity"] = time.time()
     rx = wg_rx_bytes()
     if rx is not None:
         if rx > state.get("last_rx", -1):
             state["last_activity"] = time.time()
         state["last_rx"] = rx
-    elif mine:  # no WG signal available -> old DNS-activity heuristic
-        state["last_activity"] = time.time()
     dark_secs = time.time() - state.get("last_activity", 0)
     if dark_secs > DARK and not state.get("dark_alerted"):
         sb_post("/rest/v1/flags", {
