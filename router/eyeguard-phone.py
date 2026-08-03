@@ -65,6 +65,35 @@ def sb_upsert_phone(row):
             prefer="resolution=merge-duplicates,return=minimal")
 
 
+def wg_rx_bytes():
+    """Total received-bytes for the phone's WireGuard peer, or None if WG isn't
+    being used as the liveness signal. Climbs every keepalive interval while the
+    tunnel is up (even with the phone asleep) -> lets us parse out sleep the way
+    the Mac parses out its own sleep. Requires Persistent Keepalive on the peer."""
+    iface = CONF.get("wg_interface")
+    if not iface:
+        return None
+    try:
+        out = subprocess.run(["wg", "show", iface, "transfer"],
+                             capture_output=True, text=True).stdout
+    except Exception:
+        return None
+    peer = (CONF.get("wg_peer") or "").strip()
+    total, found = 0, False
+    for line in out.splitlines():
+        cols = line.split("\t")
+        if len(cols) >= 3:
+            pk, rx = cols[0].strip(), cols[1].strip()
+            if peer and pk != peer:
+                continue
+            try:
+                total += int(rx)
+                found = True
+            except ValueError:
+                pass
+    return total if found else None
+
+
 def adguard_log():
     """Recent query-log entries (newest first). Adjust for your AdGuard auth."""
     args = [f"{AG}/control/querylog?limit=200"]
@@ -162,15 +191,23 @@ def cycle(state):
             "no_image": True, "is_nudity": False},
             prefer="resolution=merge-duplicates,return=minimal")
 
-    # phone liveness: any phone query recently = tunnel up. Gap > DARK = dark.
-    active = bool(mine) or (time.time() - state.get("last_activity", 0) < DARK)
-    if mine:
+    # phone liveness. Preferred signal = WireGuard rx-byte counter: it climbs on
+    # every keepalive while the tunnel is up, so a SLEEPING-but-tethered phone
+    # still reads alive (this is how we "parse out sleep" like the Mac does).
+    # Only a tunnel that's actually down (VPN off / phone off / no signal) makes
+    # it flatline. Falls back to DNS activity if wg_interface isn't configured.
+    rx = wg_rx_bytes()
+    if rx is not None:
+        if rx > state.get("last_rx", -1):
+            state["last_activity"] = time.time()
+        state["last_rx"] = rx
+    elif mine:  # no WG signal available -> old DNS-activity heuristic
         state["last_activity"] = time.time()
     dark_secs = time.time() - state.get("last_activity", 0)
     if dark_secs > DARK and not state.get("dark_alerted"):
         sb_post("/rest/v1/flags", {
             "flagged_at": now_iso(), "verdict": "flagged",
-            "reason": f"phone-dark: no activity through AdGuard for {int(dark_secs)}s",
+            "reason": f"phone-dark: tunnel silent for {int(dark_secs)}s (VPN off / phone off / no signal)",
             "app": "iPhone", "url": None, "window_title": "phone went dark",
             "grade": "Likely", "risk": "high", "no_image": True,
             "is_nudity": False},

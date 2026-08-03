@@ -38,8 +38,26 @@ cp eyeguard-phone.py /usr/bin/eyeguard-phone.py && chmod 755 /usr/bin/eyeguard-p
 - `adguard_user` / `adguard_pass` — your AdGuard Home admin login.
 - `phone_clients` — how the phone appears in **AdGuard → Settings → Client
   Settings** (a name), and/or its LAN / WireGuard IP. Add every form.
+- `wg_interface` — the phone's WireGuard interface on the router (e.g. `wg0`).
+  This is the **sleep-aware liveness signal** (see below). Leave empty to fall
+  back to DNS-activity, which false-alarms on a normal sleeping phone.
 - Leave `explicit_terms`, `noise_domains`, `app_map` as-is; **tune `noise_domains`
   after a day** — whatever junk shows up in the green trail, add its domain here.
+
+### Parse out sleep (like the Mac does) — one WireGuard setting
+The Mac knows the difference between "asleep" and "killed" because it runs *on*
+the Mac and macOS warns it before sleeping. The router runs *off* the phone, so
+by default a sleeping phone looks the same as a disabled VPN — both go quiet.
+
+The fix: watch the **WireGuard tunnel**, not DNS. In the Flint 2 GUI set the
+phone's peer **Persistent Keepalive = 25** (seconds). The phone then sends a tiny
+packet every 25s *even while asleep*, so its rx-byte counter keeps climbing while
+the tunnel is up. The connector reads that (`wg show <iface> transfer`) and only
+calls "dark" when the counter **flatlines** — i.e. the tunnel is genuinely down
+(VPN off, phone off, or no signal), not merely asleep. Set `wg_interface`
+accordingly. The one case it still can't separate is a real power-off vs
+tampering — both flatline identically (iOS, unlike macOS, gives the router no
+clean-shutdown signal) — but a monitored phone being *off* is worth knowing too.
 
 ### Run it as a service (so it restarts on boot / crash)
 Create `/etc/init.d/eyeguard-phone`:
@@ -64,6 +82,10 @@ python3 /usr/bin/eyeguard-phone.py      # run in the foreground, watch the outpu
   dashboard within ~15s. If not: check `phone_clients` matches AdGuard's client.
 - Toggle WireGuard **off** on the phone, wait 30s → a **📵 phone went dark**
   email. Toggle back on → entries resume.
+- **Sleep test** (only meaningful once keepalive is set): lock the phone and
+  leave it idle > 30s with the VPN **on** → it should stay green, *no* dark email.
+  If it still goes dark, keepalive isn't set on the peer or `wg_interface` is
+  wrong — check `wg show <iface> transfer` climbs while the phone sits locked.
 - Watch for green-trail noise (CDNs/telemetry) → add those domains to
   `noise_domains` and restart the service.
 
@@ -72,7 +94,9 @@ python3 /usr/bin/eyeguard-phone.py      # run in the foreground, watch the outpu
 - **App usage is inferred from domains**, not true foreground tracking (iOS
   forbids that to any third party). "Instagram" means the phone talked to
   Instagram's servers, which is the practical A2Y-equivalent.
-- **30s dark buffer is aggressive** — a phone legitimately drops off (signal,
-  sleep, airplane mode) and will fire this. If it's noisy, raise
-  `dark_buffer_seconds`; the truly robust fix is an **MDM always-on VPN** so the
-  phone *can't* leave the tunnel, making "dark" mean only "phone off."
+- **30s dark buffer** — with WireGuard keepalive liveness (above), normal sleep
+  no longer trips it; only a truly-down tunnel does. Without keepalive it falls
+  back to DNS-activity and *will* fire on a sleeping phone — raise
+  `dark_buffer_seconds` or set keepalive. The most robust form is an **MDM
+  always-on VPN** so the phone *can't* leave the tunnel at all — then "dark"
+  means only "phone genuinely off."
