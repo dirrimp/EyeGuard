@@ -1,0 +1,40 @@
+{
+  "_comment": "Copy to /etc/eyeguard/phone.json and fill in the CAPS values.",
+
+  "supabase_url": "https://ucgldleacehxjjwwqomk.supabase.co",
+  "secret_file": "/etc/eyeguard/.supabase_secret",
+
+  "adguard_url": "http://127.0.0.1:3000",
+  "adguard_user": "ADGUARD_ADMIN_USERNAME",
+  "adguard_pass": "ADGUARD_ADMIN_PASSWORD",
+
+  "_phone_clients": "How the phone shows up in AdGuard -> Settings -> Client Settings, OR its IP / WireGuard IP. Add every form it might appear as.",
+  "phone_clients": ["iphone", "10.0.0.2", "Jonah-iPhone"],
+
+  "poll_seconds": 15,
+  "dark_buffer_seconds": 30,
+  "green_repeat_seconds": 900,
+
+  "_terms": "Reuse the Mac's text.terms watchlist — an explicit domain = red/yellow.",
+  "explicit_terms": ["porn","pornhub","xvideos","xhamster","xnxx","redtube",
+    "youporn","brazzers","onlyfans","chaturbate","spankbang","xxx","nude",
+    "naked","hentai","rule34","camgirl","escort","fetish"],
+
+  "_noise": "DNS noise to DROP so the green trail is browsing, not telemetry. Add to this as junk leaks through.",
+  "noise_domains": ["googleapis.com","gstatic.com","google-analytics.com",
+    "googletagmanager.com","doubleclick.net","googlesyndication.com",
+    "cloudfront.net","akamai.net","akamaized.net","fbcdn.net","cdninstagram.com",
+    "apple.com","icloud.com","mzstatic.com","aaplimg.com","push.apple.com",
+    "crashlytics.com","sentry.io","amplitude.com","segment.io","branch.io",
+    "cloudflare.com","cloudflareinsights.com","gvt1.com","gvt2.com","1e100.net",
+    "digicert.com","ocsp","gpsdev","in-app","appsflyer","adjust.com"],
+
+  "_app_map": "Collapse service domains to a readable app name in the feed.",
+  "app_map": {
+    "instagram.com": "Instagram", "tiktok.com": "TikTok", "snapchat.com": "Snapchat",
+    "youtube.com": "YouTube", "reddit.com": "Reddit", "twitter.com": "X/Twitter",
+    "x.com": "X/Twitter", "facebook.com": "Facebook", "discord": "Discord",
+    "twitch.tv": "Twitch", "netflix.com": "Netflix", "pinterest.com": "Pinterest",
+    "spotify.com": "Spotify", "whatsapp": "WhatsApp", "telegram": "Telegram"
+  }
+}

@@ -109,6 +109,8 @@ def _what(rec: dict) -> str:
     Show an honest generic line and let the thumbnail show the specifics.
     """
     reason0 = rec.get("reason") or ""
+    if reason0.startswith("phone"):
+        return _esc(reason0.split(":", 1)[-1].strip()) + " (iPhone, via network)"
     if reason0.startswith("drm"):
         return ("Not a content flag — macOS blanks DRM-protected video, so "
                 "EyeGuard couldn't view it. The title is logged so you can "
@@ -176,7 +178,8 @@ def _card(rec: dict, dt: datetime, report_dir: Path) -> str:
     sev = "red" if red else "yellow"
     _r = rec.get("reason") or ""
     if red:
-        sev_txt = ("Tamper" if _r.startswith("tamper")
+        sev_txt = ("Phone" if _r.startswith("phone")
+                   else "Tamper" if _r.startswith("tamper")
                    else "Nudity" if _r.startswith("nudenet")
                    else "Revealing")
     elif _r.startswith("drm"):
@@ -185,8 +188,8 @@ def _card(rec: dict, dt: datetime, report_dir: Path) -> str:
         sev_txt = "Extension"
     elif _r.startswith("text"):
         sev_txt = "Text"
-    elif _r.startswith("signal"):
-        sev_txt = "Search"
+    elif _r.startswith("signal") or _r.startswith("phone"):
+        sev_txt = "Phone" if _r.startswith("phone") else "Search"
     else:
         sev_txt = "Suggestive"
     grade = rec.get("grade") or ""
