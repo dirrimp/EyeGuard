@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
 """EyeGuard phone connector — runs on the GL.iNet Flint 2 (OpenWRT).
 
-The phone tunnels through WireGuard -> this router -> AdGuard Home, so AdGuard
-already logs every domain the phone's browser + apps touch. This reads AdGuard's
-query log and mirrors it into EyeGuard's Supabase as the SAME red / yellow /
-green feed the Mac produces, so the partner sees the iPhone next to the Mac in
-one dashboard. It also heartbeats a phone_status row and fires a "phone went
-dark" flag when the phone stops routing through AdGuard (tunnel off / phone off).
+AdGuard Home's own query-log API is unusable here: GL.iNet's --glinet flag
+hijacks AdGuard's auth, so no credentials (native or added) can read it, and
+its on-disk query log only flushes on shutdown (unusably stale). Instead this
+watches the phone's DNS traffic directly off the wire with tcpdump -- the
+router's firewall already forces plaintext DNS (DoT/DoH blocked), so every
+lookup crosses the LAN or the WireGuard tunnel in the clear. That also means
+bypass attempts (e.g. querying 8.8.8.8 directly) are seen too, not just
+whatever AdGuard chose to log.
+
+Two capture streams run concurrently: one on the home LAN interface (the
+phone's reserved IP), one on the WireGuard interface (the phone's tunnel IP),
+so both "home" and "away" traffic are covered. Mirrors classified events into
+EyeGuard's Supabase as the same red/yellow/green feed the Mac produces, plus a
+phone_status heartbeat and a "phone went dark" flag.
 
 Uses curl for HTTPS (avoids the python-ssl-on-OpenWRT headache) + python3-light
 for logic. Config: /etc/eyeguard/phone.json (see phone.config.example).
@@ -16,6 +24,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,17 +32,27 @@ from pathlib import Path
 CONF_PATH = os.environ.get("EG_PHONE_CONF", "/etc/eyeguard/phone.json")
 CONF = json.load(open(CONF_PATH))
 SECRET = Path(CONF["secret_file"]).read_text().strip()
-STATE = Path(CONF.get("state_file", "/tmp/eyeguard-phone.state.json"))
 
 SB = CONF["supabase_url"].rstrip("/")
-AG = CONF["adguard_url"].rstrip("/")
-PHONE_CLIENTS = [c.lower() for c in CONF.get("phone_clients", [])]
+HOME_IP = CONF.get("home_ip", "")
+HOME_IFACE = CONF.get("home_interface", "br-lan")
+WG_IFACE = CONF.get("wg_interface", "")
+WG_IP = CONF.get("wg_ip", "")
+WG_PEER = CONF.get("wg_peer", "")
 TERMS = [t.lower() for t in CONF.get("explicit_terms", [])]
 NOISE = [n.lower() for n in CONF.get("noise_domains", [])]
 APP_MAP = {k.lower(): v for k, v in CONF.get("app_map", {}).items()}
-POLL = int(CONF.get("poll_seconds", 15))
 DARK = int(CONF.get("dark_buffer_seconds", 30))
 GREEN_THROTTLE = int(CONF.get("green_repeat_seconds", 900))
+HEARTBEAT_SECONDS = int(CONF.get("heartbeat_seconds", 20))
+
+# tcpdump's default -nn text output, e.g. "...: 36802+ Type65? ocsp2.apple.com. (33)"
+# -- works for any query type (A/AAAA/PTR/Type65/...) without enumerating them.
+QUERY_RE = re.compile(r"\d+\+\s+\S+\?\s+(\S+)\.\s+\(\d+\)")
+
+_LOCK = threading.Lock()
+_STATE = {"last_activity": time.time(), "last_rx": -1, "dark_alerted": False,
+          "green_seen": {}}
 
 
 def now_iso():
@@ -67,24 +86,22 @@ def sb_upsert_phone(row):
 
 def wg_rx_bytes():
     """Total received-bytes for the phone's WireGuard peer, or None if WG isn't
-    being used as the liveness signal. Climbs every keepalive interval while the
-    tunnel is up (even with the phone asleep) -> lets us parse out sleep the way
-    the Mac parses out its own sleep. Requires Persistent Keepalive on the peer."""
-    iface = CONF.get("wg_interface")
-    if not iface:
+    configured. Climbs every keepalive interval while the tunnel is up (even
+    with the phone asleep) -> lets us parse out sleep the way the Mac parses
+    out its own sleep. Requires Persistent Keepalive on the peer."""
+    if not WG_IFACE:
         return None
     try:
-        out = subprocess.run(["wg", "show", iface, "transfer"],
+        out = subprocess.run(["wg", "show", WG_IFACE, "transfer"],
                              capture_output=True, text=True).stdout
     except Exception:
         return None
-    peer = (CONF.get("wg_peer") or "").strip()
     total, found = 0, False
     for line in out.splitlines():
         cols = line.split("\t")
         if len(cols) >= 3:
             pk, rx = cols[0].strip(), cols[1].strip()
-            if peer and pk != peer:
+            if WG_PEER and pk != WG_PEER:
                 continue
             try:
                 total += int(rx)
@@ -92,17 +109,6 @@ def wg_rx_bytes():
             except ValueError:
                 pass
     return total if found else None
-
-
-def adguard_log():
-    """Recent query-log entries (newest first). Adjust for your AdGuard auth."""
-    args = [f"{AG}/control/querylog?limit=200"]
-    if CONF.get("adguard_user"):
-        args += ["-u", f"{CONF['adguard_user']}:{CONF['adguard_pass']}"]
-    try:
-        return json.loads(_curl(args)).get("data", [])
-    except Exception:
-        return []
 
 
 # ---- classification ------------------------------------------------------
@@ -114,6 +120,8 @@ def base_domain(name):
 
 
 def is_noise(domain):
+    if domain.endswith(".arpa") or domain.endswith(".local"):
+        return True  # reverse-DNS / mDNS service-discovery junk, not browsing
     return any(n in domain for n in NOISE)
 
 
@@ -124,118 +132,134 @@ def app_name(domain):
     return None
 
 
-def classify(entry):
-    """-> (verdict, reason, label) or None to skip. verdict flagged/alert/clear."""
-    domain = base_domain((entry.get("question") or {}).get("name"))
+def classify(raw_name):
+    """-> (verdict, reason, label) or None to skip. verdict flagged/clear.
+
+    Unlike the old AdGuard-log version, wire capture only sees the outgoing
+    query, not whether AdGuard's filter blocked it -- so an explicit-domain
+    query is flagged red outright (the attempt itself is the signal that
+    matters, independent of whether the network-level block held)."""
+    domain = base_domain(raw_name)
     if not domain or is_noise(domain):
         return None
     hits = [t for t in TERMS if re.search(r"\b" + re.escape(t) + r"\b", domain)]
-    blocked = str(entry.get("reason", "")).lower().startswith("filtered")
     app = app_name(domain)
     label = app or domain
-    if hits and blocked:
-        # tried to reach an explicit domain and AdGuard blocked it -> RED
-        return ("flagged", f"phone-blocked: attempted NSFW site {domain}", label)
     if hits:
-        return ("alert", f"phone-signal: explicit domain {domain}", label)
-    if blocked:
-        return None  # ad/tracker block -> noise, skip
+        return ("flagged", f"phone-signal: explicit domain {domain}", label)
     return ("clear", f"phone: {label}", label)
 
 
-# ---- state ---------------------------------------------------------------
+# ---- capture ---------------------------------------------------------------
 
-def load_state():
-    try:
-        return json.loads(STATE.read_text())
-    except Exception:
-        return {"cursor": "", "green_seen": {}, "dark_alerted": False}
+def _mark_alive():
+    with _LOCK:
+        _STATE["last_activity"] = time.time()
 
 
-def save_state(s):
-    try:
-        STATE.write_text(json.dumps(s))
-    except Exception:
-        pass
+def _handle_query(raw_name):
+    c = classify(raw_name)
+    if not c:
+        return
+    verdict, reason, label = c
+    if verdict == "clear":
+        now = time.time()
+        with _LOCK:
+            last = _STATE["green_seen"].get(label, 0)
+            if now - last < GREEN_THROTTLE:
+                return
+            _STATE["green_seen"][label] = now
+    sb_post("/rest/v1/flags", {
+        "flagged_at": now_iso(), "verdict": verdict, "reason": reason,
+        "app": "iPhone", "url": None, "window_title": label,
+        "grade": "Likely" if verdict == "flagged" else "Possible",
+        "risk": "high" if verdict == "flagged" else "neutral",
+        "no_image": True, "is_nudity": False},
+        prefer="resolution=merge-duplicates,return=minimal")
 
 
-# ---- main loop -----------------------------------------------------------
+def capture_loop(iface, host_ip):
+    """Runs forever: streams tcpdump for one interface, respawning it if it
+    ever exits (interface flap, transient error)."""
+    filt = f"udp dst port 53 and src host {host_ip}"
+    while True:
+        try:
+            proc = subprocess.Popen(
+                ["tcpdump", "-i", iface, "-l", "-nn", filt],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, bufsize=1)
+            for line in proc.stdout:
+                _mark_alive()  # any packet at all proves the phone/tunnel is up
+                m = QUERY_RE.search(line)
+                if m:
+                    _handle_query(m.group(1))
+            proc.wait()
+        except Exception as ex:
+            print(f"[eyeguard-phone] capture({iface}) {type(ex).__name__}: {ex}",
+                  flush=True)
+        time.sleep(5)
 
-def cycle(state):
-    entries = adguard_log()
-    # phone entries only, oldest-first, newer than the cursor
-    mine = [e for e in entries
-            if str(e.get("client", "")).lower() in PHONE_CLIENTS
-            or str(e.get("client_id", "")).lower() in PHONE_CLIENTS]
-    mine = [e for e in mine if str(e.get("time", "")) > state["cursor"]]
-    mine.sort(key=lambda e: str(e.get("time", "")))
 
-    last_seen = None
-    for e in mine:
-        state["cursor"] = max(state["cursor"], str(e.get("time", "")))
-        last_seen = str(e.get("time", ""))
-        c = classify(e)
-        if not c:
-            continue
-        verdict, reason, label = c
-        if verdict == "clear":  # throttle repeated greens per domain
-            now = time.time()
-            if now - state["green_seen"].get(label, 0) < GREEN_THROTTLE:
-                continue
-            state["green_seen"][label] = now
-        sb_post("/rest/v1/flags", {
-            "flagged_at": now_iso(), "verdict": verdict, "reason": reason,
-            "app": "iPhone", "url": None, "window_title": label,
-            "grade": "Likely" if verdict == "flagged" else "Possible",
-            "risk": "high" if verdict == "flagged" else "neutral",
-            "no_image": True, "is_nudity": False},
-            prefer="resolution=merge-duplicates,return=minimal")
+# ---- liveness / heartbeat ---------------------------------------------------
 
-    # phone liveness = EITHER signal, whichever is fresher:
-    #  (a) DNS activity through AdGuard -> covers the phone on home wifi, where
-    #      it's a plain LAN client and NOT on the WG tunnel at all.
-    #  (b) WireGuard rx-byte counter -> covers the phone AWAY on the tunnel: with
-    #      Persistent Keepalive the counter climbs every ~25s even while asleep,
-    #      so sleep is parsed out and only a truly-down tunnel goes dark.
-    # OR-combining them means "home + browsing", "home + idle-with-DNS", and
-    # "away + asleep-on-tunnel" all read alive; only genuine silence on BOTH
-    # (phone off / off-network / VPN killed while away) trips dark.
-    if mine:
-        state["last_activity"] = time.time()
-    rx = wg_rx_bytes()
-    if rx is not None:
-        if rx > state.get("last_rx", -1):
-            state["last_activity"] = time.time()
-        state["last_rx"] = rx
-    dark_secs = time.time() - state.get("last_activity", 0)
-    if dark_secs > DARK and not state.get("dark_alerted"):
-        sb_post("/rest/v1/flags", {
-            "flagged_at": now_iso(), "verdict": "flagged",
-            "reason": f"phone-dark: tunnel silent for {int(dark_secs)}s (VPN off / phone off / no signal)",
-            "app": "iPhone", "url": None, "window_title": "phone went dark",
-            "grade": "Likely", "risk": "high", "no_image": True,
-            "is_nudity": False},
-            prefer="resolution=merge-duplicates,return=minimal")
-        state["dark_alerted"] = True
-    elif dark_secs <= DARK and state.get("dark_alerted"):
-        state["dark_alerted"] = False  # recovered
+def heartbeat_loop():
+    """phone liveness = EITHER signal, whichever is fresher:
+      (a) DNS packets seen on the home interface -> covers the phone on home
+          wifi, where it's a plain LAN client and never touches the tunnel.
+      (b) WireGuard rx-byte counter -> covers the phone AWAY on the tunnel:
+          with Persistent Keepalive the counter climbs every ~25s even while
+          asleep, so sleep is parsed out and only a truly-down tunnel goes
+          dark.
+    OR-combining them means home browsing, home idle, and away-asleep-on-
+    tunnel all read alive; only genuine silence on BOTH (phone off,
+    off-network, or VPN killed while away) trips phone-dark."""
+    while True:
+        rx = wg_rx_bytes()
+        with _LOCK:
+            if rx is not None and rx > _STATE["last_rx"]:
+                _STATE["last_activity"] = time.time()
+            if rx is not None:
+                _STATE["last_rx"] = rx
+            dark_secs = time.time() - _STATE["last_activity"]
+            was_alerted = _STATE["dark_alerted"]
+            fire_dark = dark_secs > DARK and not was_alerted
+            if fire_dark:
+                _STATE["dark_alerted"] = True
+            elif dark_secs <= DARK and was_alerted:
+                _STATE["dark_alerted"] = False
+            active = not _STATE["dark_alerted"]
 
-    # heartbeat: prove the router script itself is alive (router-down alert)
-    sb_upsert_phone({"id": 1, "monitor_beat": now_iso(),
-                     "last_seen": now_iso() if mine else None,
-                     "phone_active": not state.get("dark_alerted", False)})
-    save_state(state)
+        if fire_dark:
+            sb_post("/rest/v1/flags", {
+                "flagged_at": now_iso(), "verdict": "flagged",
+                "reason": f"phone-dark: silent for {int(dark_secs)}s "
+                          "(VPN off / phone off / no signal)",
+                "app": "iPhone", "url": None, "window_title": "phone went dark",
+                "grade": "Likely", "risk": "high", "no_image": True,
+                "is_nudity": False},
+                prefer="resolution=merge-duplicates,return=minimal")
+
+        sb_upsert_phone({"id": 1, "monitor_beat": now_iso(),
+                         "last_seen": now_iso() if active else None,
+                         "phone_active": active})
+        time.sleep(HEARTBEAT_SECONDS)
 
 
 def main():
-    state = load_state()
-    state.setdefault("last_activity", time.time())
-    while True:
-        try:
-            cycle(state)
-        except Exception as ex:
-            print(f"[eyeguard-phone] {type(ex).__name__}: {ex}", flush=True)
-        time.sleep(POLL)
+    threads = []
+    if HOME_IP:
+        threads.append(threading.Thread(target=capture_loop,
+                                        args=(HOME_IFACE, HOME_IP), daemon=True))
+    if WG_IFACE and WG_IP:
+        threads.append(threading.Thread(target=capture_loop,
+                                        args=(WG_IFACE, WG_IP), daemon=True))
+    if not threads:
+        print("[eyeguard-phone] no home_ip or wg_interface+wg_ip configured "
+              "-- nothing to capture", flush=True)
+        sys.exit(1)
+    for t in threads:
+        t.start()
+    heartbeat_loop()
 
 
 if __name__ == "__main__":

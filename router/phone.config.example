@@ -4,27 +4,25 @@
   "supabase_url": "https://ucgldleacehxjjwwqomk.supabase.co",
   "secret_file": "/etc/eyeguard/.supabase_secret",
 
-  "adguard_url": "http://127.0.0.1:3000",
-  "adguard_user": "ADGUARD_ADMIN_USERNAME",
-  "adguard_pass": "ADGUARD_ADMIN_PASSWORD",
+  "_home": "The phone's LAN identity when on home wifi. Set a Reserved IP for it in the router's Clients page first, and turn OFF Private Wi-Fi Address on the phone for this network -- otherwise the IP/MAC drift and capture silently stops matching.",
+  "home_ip": "192.168.8.153",
+  "home_interface": "br-lan",
 
-  "_phone_clients": "How the phone shows up in AdGuard -> Settings -> Client Settings, OR its IP / WireGuard IP. Add every form it might appear as.",
-  "phone_clients": ["iphone", "10.0.0.2", "Jonah-iPhone"],
+  "_wg": "The phone's identity on the WireGuard tunnel (away from home). Also the sleep-aware liveness signal: set Persistent Keepalive = 25 on the phone's peer (router GUI) so a sleeping-but-connected phone still reads alive; only a truly-down tunnel goes dark. Find the interface name with `wg show` on the router (often NOT wg0 -- GL.iNet's Flint 2 names it e.g. wgserver).",
+  "wg_interface": "wgserver",
+  "wg_ip": "10.1.0.2",
+  "wg_peer": "PHONE_WIREGUARD_PUBLIC_KEY",
 
-  "poll_seconds": 15,
   "dark_buffer_seconds": 30,
   "green_repeat_seconds": 900,
+  "heartbeat_seconds": 20,
 
-  "_wg": "Liveness signal that PARSES OUT SLEEP. Set wg_interface to the phone's WireGuard iface on the router (e.g. wg0) and set Persistent Keepalive = 25 on the phone's peer in the Flint 2 GUI. Then a sleeping-but-connected phone still counts as alive; only a truly-down tunnel goes dark. wg_peer optional: the phone's public key, to isolate it if other peers share the iface. Leave wg_interface empty to fall back to DNS-activity liveness (trips on normal sleep).",
-  "wg_interface": "wg0",
-  "wg_peer": "",
-
-  "_terms": "Reuse the Mac's text.terms watchlist — an explicit domain = red/yellow.",
+  "_terms": "Reuse the Mac's text.terms watchlist -- an explicit domain = red.",
   "explicit_terms": ["porn","pornhub","xvideos","xhamster","xnxx","redtube",
     "youporn","brazzers","onlyfans","chaturbate","spankbang","xxx","nude",
     "naked","hentai","rule34","camgirl","escort","fetish"],
 
-  "_noise": "DNS noise to DROP so the green trail is browsing, not telemetry. Add to this as junk leaks through.",
+  "_noise": "DNS noise to DROP so the green trail is browsing, not telemetry. Add to this as junk leaks through. .arpa and .local are always dropped regardless (reverse-DNS / mDNS junk).",
   "noise_domains": ["googleapis.com","gstatic.com","google-analytics.com",
     "googletagmanager.com","doubleclick.net","googlesyndication.com",
     "cloudfront.net","akamai.net","akamaized.net","fbcdn.net","cdninstagram.com",
