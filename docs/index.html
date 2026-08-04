@@ -272,8 +272,9 @@ function where(r){
 function card(r, dt, signed){
   const time = dt.toLocaleTimeString([], {hour:"numeric",minute:"2-digit"});
   if(r.verdict==="clear"){
+    const label = (r.reason||"").startsWith("phone") ? "Phone" : "Browsing";
     return `<div class="card green"><div class="body"><div class="rtop">`
-      + `<span class="time">${time}</span><span class="pill green">Browsing</span></div>`
+      + `<span class="time">${time}</span><span class="pill green">${label}</span></div>`
       + `<div class="where">${where(r)}</div></div></div>`;
   }
   const red = r.verdict==="flagged";
