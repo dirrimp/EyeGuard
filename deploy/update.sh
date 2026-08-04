@@ -12,8 +12,8 @@ set -euo pipefail
 CODE="/Library/Application Support/EyeGuard"
 
 if [ "$EUID" -ne 0 ]; then
-  echo "Run with sudo: sudo ./update.sh" >&2
-  exit 1
+  echo "Run with sudo: sudo ./update.sh" >&2
+  exit 1
 fi
 
 cd "$CODE"
@@ -29,13 +29,12 @@ read -r -p "Deploy these changes? [y/N] " ans
 
 # Hard reset the CODE tree to exactly what's on main. Data (flags, keys,
 # pending queue) lives outside this tree (see LOCKDOWN.md layout) so a reset
-# here never touches monitoring history.
+# here never touches monitoring history. git checkout also restores each
+# file's committed mode (644/755), so scripts keep their executable bit —
+# no separate chmod pass needed.
 git reset --hard origin/main
 
-# Re-apply ownership in case the pull added new files.
 chown -R root:wheel "$CODE"
-find "$CODE" -type d -exec chmod 755 {} \;
-find "$CODE" -type f -exec chmod 644 {} \;
 chmod 600 "$CODE/.supabase_secret" 2>/dev/null || true
 
 echo "Restarting vault daemon + session agent..."
