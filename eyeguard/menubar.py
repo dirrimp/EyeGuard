@@ -120,10 +120,8 @@ class EyeGuardApp(rumps.App):
         self._mi_counts = rumps.MenuItem("Flags: 0 red / 0 yellow")
         self._mi_last = rumps.MenuItem("Last: none")
         self._mi_diag = rumps.MenuItem("Diagnostics: …")
-        self._mi_open_log = rumps.MenuItem("View live report",
-                                           callback=self._open_log)
         self.menu = [self._mi_status, self._mi_counts, self._mi_last,
-                     self._mi_diag, None, self._mi_open_log]
+                     self._mi_diag]
 
         self._thread = threading.Thread(target=self._detection_loop, daemon=True)
         self._thread.start()
@@ -134,11 +132,6 @@ class EyeGuardApp(rumps.App):
         self._prune(None)
         self._prune_timer = rumps.Timer(self._prune, 3600)
         self._prune_timer.start()
-        # Live report: keep the HTML fresh so the browser auto-refresh shows new
-        # flags as they happen (only regenerates once the report's been opened).
-        rsec = int(self.cfg.get("logging", {}).get("report_refresh_seconds", 10))
-        self._report_timer = rumps.Timer(self._regen_report, rsec)
-        self._report_timer.start()
         # Sleep/wake/shutdown beacons so normal power events don't false-alarm.
         self._register_power_observers()
 
@@ -241,36 +234,6 @@ class EyeGuardApp(rumps.App):
             print(f"[tamper] flags.jsonl shrank {self._log_lines}->{count} "
                   f"— reported", flush=True)
         self._log_lines = count
-
-    def _report_path(self) -> Path:
-        return Path(self.cfg["logging"]["flag_log"]).resolve().parent \
-            / "flags_report.html"
-
-    def _gen_report(self) -> Path:
-        from .viewer import write_html_report
-        log_cfg = self.cfg.get("logging", {})
-        return write_html_report(
-            self.cfg["logging"]["flag_log"], self._report_path(),
-            days=int(log_cfg.get("retention_days", 7)),
-            refresh=int(log_cfg.get("report_refresh_seconds", 10)))
-
-    def _regen_report(self, _timer):
-        # Keep the open report fresh (live feed). Only regen once it exists, i.e.
-        # after the user has opened it at least once.
-        try:
-            if self._report_path().exists():
-                self._gen_report()
-        except Exception:
-            pass
-
-    def _open_log(self, _sender):
-        try:
-            out = self._gen_report()
-        except Exception as e:
-            rumps.alert(title="EyeGuard", message=f"Could not render report: {e}")
-            return
-        import subprocess
-        subprocess.run(["open", str(out)])  # opens the live report in the browser
 
     # ---- power events (sleep / wake / shutdown) -----------------------------
 
