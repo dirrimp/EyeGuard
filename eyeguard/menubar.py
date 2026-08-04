@@ -698,18 +698,22 @@ _LOCK_FH = None
 
 
 def _acquire_single_instance() -> bool:
-    """Take an exclusive lock so a second launch (e.g. clicking the Dock icon
-    while the launchd agent is already running) exits instead of starting a
-    second CLIP. Returns False if another instance already holds the lock."""
-    global _LOCK_FH
-    import fcntl
-    lock_path = Path(__file__).resolve().parent.parent / ".eyeguard.lock"
-    _LOCK_FH = open(lock_path, "w")
-    try:
-        fcntl.flock(_LOCK_FH, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return True
-    except OSError:
-        return False
+    """Take an exclusive lock so a second launch (e.g. clicking the Dock icon
+    while the launchd agent is already running) exits instead of starting a
+    second CLIP. Returns False if another instance already holds the lock."""
+    global _LOCK_FH
+    import fcntl
+    # Code dir is root-owned post-lockdown; the session agent runs as the
+    # monitored user, so the lock must live in their writable data dir.
+    lock_dir = Path.home() / "Library" / "Application Support" / "EyeGuard-data"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / ".eyeguard.lock"
+    _LOCK_FH = open(lock_path, "w")
+    try:
+        fcntl.flock(_LOCK_FH, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
 
 
 def main():
