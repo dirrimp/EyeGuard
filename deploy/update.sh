@@ -39,7 +39,14 @@ chmod 600 "$CODE/.supabase_secret" 2>/dev/null || true
 
 echo "Restarting vault daemon + session agent..."
 launchctl kickstart -k system/com.eyeguard.vault
-CONSOLE_UID=$(stat -f%u /dev/console)
-launchctl kickstart -k "gui/$CONSOLE_UID/com.eyeguard.monitor" 2>/dev/null || true
+# Target the monitored user by name, not whoever's active on the console --
+# Dad has to be his own active session to type the sudo password for this
+# script, so "console user" resolves to HIM, not the monitored user, and the
+# agent (tied to the monitored user's own GUI session) never actually
+# restarts. Silently no-ops via 2>/dev/null, so this went unnoticed for a
+# while: config/code changes landed on disk but never took effect on the
+# running agent until it happened to restart some other way.
+MONITORED_UID=$(id -u jonahdirrim)
+launchctl kickstart -k "gui/$MONITORED_UID/com.eyeguard.monitor" 2>/dev/null || true
 
 echo "Deployed $(git log --oneline -1)."
