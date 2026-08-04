@@ -15,6 +15,9 @@ the same red/green feed the Mac produces.
 > Wire capture sidesteps both problems and, as a bonus, also sees bypass
 > attempts (e.g. the phone querying `8.8.8.8` directly instead of the router).
 
+**Status: deployed and running as a persistent `procd` service on the Flint 2
+(2026-08-04)**, confirmed posting real green/dark/heartbeat rows end-to-end.
+
 ## What it delivers
 - 🟢 **Browsing/app trail** — every meaningful domain, collapsed to app names
   (Instagram, TikTok…), throttled so it's browsing not telemetry.
@@ -22,8 +25,9 @@ the same red/green feed the Mac produces.
   list → red flag + email. (Wire capture only sees the outgoing query, not
   whether AdGuard's filter subsequently blocked it, so a match is flagged red
   outright — the attempt itself is the signal that matters.)
-- 📵 **Phone went dark** — no phone traffic (home *or* tunnel) for 30s → red
-  flag + email (VPN off / phone off / no signal). *Enforced router-side.*
+- 📵 **Phone went dark** — no phone traffic (home DNS, home ARP reachability,
+  *or* tunnel) for 60s → red flag + email (VPN off / phone off / no signal).
+  *Enforced router-side.*
 - ⚫ **Monitor offline** — if the router script itself stops (router down), a
   Supabase cron alerts after 5 min.
 
@@ -68,24 +72,42 @@ a tiny packet every 25s *even while asleep*, so its rx-byte counter keeps
 climbing while the tunnel is up. The connector reads that
 (`wg show <iface> transfer`) and only calls "dark" when the counter
 **flatlines** — i.e. the tunnel is genuinely down (VPN off, phone off, or no
-signal), not merely asleep. This only covers the phone while it's *away* on
-the tunnel — at home the phone is a plain LAN client, so DNS packet activity
-on `home_interface` is the liveness signal instead; the two are OR-combined
-so either one being fresh counts as alive. The one case neither can separate
-is a real power-off vs tampering — both flatline identically (iOS, unlike
-macOS, gives the router no clean-shutdown signal) — but a monitored phone
-being *off* is worth knowing too.
+signal), not merely asleep. This covers the phone while it's *away* on the
+tunnel.
+
+At home, DNS packet activity alone is **not** a reliable liveness signal —
+confirmed live (2026-08-04): a locked, idle iPhone on home wifi can go 30-60s+
+without a single DNS query, which used to false-fire `phone-dark` during
+completely ordinary use. Worse, the natural fallback (an ICMP ping to the
+phone's `home_ip`) doesn't fix it either — the same idle phone answers ARP but
+**silently drops ICMP echo requests** while its network stack is in a
+power-save state, so ping reads it as gone too. The real fix is `home_ping_alive()` in
+`eyeguard-phone.py`: it fires a ping only to *force* a fresh ARP probe as a
+side effect (the ping's own result is ignored), then reads the kernel's
+neighbor-cache state (`ip neigh show <home_ip>`) for `REACHABLE`/`DELAY` — real
+L2 presence, not app-layer cooperation. All three signals (DNS, ARP, WG
+rx-counter) are OR-combined, so any one being fresh counts as alive; only
+silence on all three for `dark_buffer_seconds` (60s) trips phone-dark. The one
+case none of them can separate is a real power-off vs tampering — both
+flatline identically (iOS, unlike macOS, gives the router no clean-shutdown
+signal) — but a monitored phone being *off* is worth knowing too.
 
 ### Run it as a service (so it restarts on boot / crash)
-Create `/etc/init.d/eyeguard-phone`:
+Copy `router/eyeguard-phone.init` to `/etc/init.d/eyeguard-phone` (matches this
+firmware's actual `USE_PROCD=1`/`start_service()` convention, taken from the
+router's own `/etc/init.d/minidlna` — the simpler bare-`start()` procd form
+from earlier drafts of this doc is not this firmware's pattern):
 ```sh
-#!/bin/sh /etc/rc.common
-START=95
-start() { procd_open_instance; procd_set_param command /usr/bin/python3 /usr/bin/eyeguard-phone.py; procd_set_param respawn; procd_close_instance; }
-```
-```sh
+cp router/eyeguard-phone.init /etc/init.d/eyeguard-phone
 chmod 755 /etc/init.d/eyeguard-phone && /etc/init.d/eyeguard-phone enable && /etc/init.d/eyeguard-phone start
 ```
+**Kill any foreground test runs first** (`ps | grep eyeguard-phone`) — a
+leftover manually-started instance plus the new service means duplicate
+tcpdump captures and duplicate/conflicting Supabase posts. Note: killing the
+python process does not kill its tcpdump children (they're orphaned, not
+tracked by procd) — `kill` those PIDs too, or they linger until their pipe
+finally errors out (fast on busy `br-lan`, can take a long time on quiet
+`wgserver`).
 
 ## Supabase side (one-time)
 Run `supabase/phone.sql` in the SQL Editor — it adds the `phone_status`
@@ -102,13 +124,19 @@ python3 /usr/bin/eyeguard-phone.py      # run in the foreground, watch the outpu
   Private Wi-Fi Address is off for that network.
 - Take the phone off wifi (cellular/away) and browse → same check, this time
   verifying the `wg_interface`/`wg_ip` capture is matching.
-- Toggle WireGuard **off** on the phone while away, wait 30s → a **📵 phone
+- Toggle WireGuard **off** on the phone while away, wait 60s → a **📵 phone
   went dark** email. Toggle back on → entries resume.
-- **Sleep test** (only meaningful once keepalive is set): away from home, lock
-  the phone and leave it idle > 30s with the VPN **on** → it should stay
-  green, *no* dark email. If it still goes dark, keepalive isn't set on the
-  peer, or `wg_interface`/`wg_peer` don't match `wg show`'s actual output —
-  check `wg show <iface> transfer` climbs while the phone sits locked.
+- **Home sleep test**: on home wifi, lock the phone and leave it idle > 60s →
+  should stay green (verified working 2026-08-04: ~5+ clean minutes through a
+  real lock/idle cycle, zero dark flags). If it still goes dark, check
+  `home_ip` is still current (`ip neigh show <home_ip>` should read
+  `REACHABLE`/`DELAY` — `STALE`/`FAILED` means the reservation or Private Wifi
+  Address setting has drifted).
+- **Away sleep test** (only meaningful once keepalive is set): away from home,
+  lock the phone and leave it idle > 60s with the VPN **on** → should stay
+  green. If it still goes dark, keepalive isn't set on the peer, or
+  `wg_interface`/`wg_peer` don't match `wg show`'s actual output — check
+  `wg show <iface> transfer` climbs while the phone sits locked.
 - Watch for green-trail noise (CDNs/telemetry) → add those domains to
   `noise_domains` and restart the service.
 
@@ -122,10 +150,10 @@ python3 /usr/bin/eyeguard-phone.py      # run in the foreground, watch the outpu
 - **Explicit hits are flagged red without a block/allow distinction** — wire
   capture only sees the query going out, not AdGuard's filtering decision on
   it. Reaching for the domain is treated as the event that matters.
-- **30s dark buffer** — with WireGuard keepalive liveness (above), normal
+- **60s dark buffer** — with WireGuard keepalive liveness (above), normal
   sleep no longer trips it while away; only a truly-down tunnel does. At home,
-  liveness is DNS-activity based, which behaves the same as it always has (a
-  phone idle at home with the screen off but connected to wifi is still
-  reachable and will show DNS activity from background app refresh). The most
-  robust form overall is an **MDM always-on VPN** so the phone *can't* leave
-  the tunnel at all — then "dark" means only "phone genuinely off."
+  liveness is DNS activity **or** ARP reachability (see above) — a phone idle
+  at home with the screen off but connected to wifi stays green even through
+  DNS lulls. The most robust form overall is an **MDM always-on VPN** so the
+  phone *can't* leave the tunnel at all — then "dark" means only "phone
+  genuinely off."
