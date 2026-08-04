@@ -174,7 +174,7 @@ def _handle_query(raw_name):
         "app": "iPhone", "url": None, "window_title": label,
         "grade": "Likely" if verdict == "flagged" else "Possible",
         "risk": "high" if verdict == "flagged" else "neutral",
-        "no_image": True, "is_nudity": False},
+        "is_nudity": False},
         prefer="resolution=merge-duplicates,return=minimal")
 
 
@@ -235,8 +235,7 @@ def heartbeat_loop():
                 "reason": f"phone-dark: silent for {int(dark_secs)}s "
                           "(VPN off / phone off / no signal)",
                 "app": "iPhone", "url": None, "window_title": "phone went dark",
-                "grade": "Likely", "risk": "high", "no_image": True,
-                "is_nudity": False},
+                "grade": "Likely", "risk": "high", "is_nudity": False},
                 prefer="resolution=merge-duplicates,return=minimal")
 
         sb_upsert_phone({"id": 1, "monitor_beat": now_iso(),
