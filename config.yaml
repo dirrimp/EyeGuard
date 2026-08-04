@@ -438,7 +438,7 @@ context_risk:
     - "pinterest"
 
 logging:
-  flag_log: flags.jsonl
+  flag_log: /Users/jonahdirrim/Library/Application Support/EyeGuard-data/flags.jsonl
   # Permanently save each flagged frame to disk for partner review (the report
   # shows them as thumbnails). Local only; auto-deleted after retention_days.
   save_flagged_frames: true
@@ -448,7 +448,7 @@ logging:
   # Blur amount: image_width / this number. HIGHER = lighter / more visible.
   # (was unintelligible at 24; 50 = moderate, ~70 = light, ~35 = heavy.)
   blur_strength: 75
-  flagged_frames_dir: flagged_frames
+  flagged_frames_dir: /Users/jonahdirrim/Library/Application Support/EyeGuard-data/flagged_frames
   # The "View activity report" is a LIVE feed — the browser auto-refreshes and
   # the agent regenerates the HTML this often (seconds).
   report_refresh_seconds: 10
@@ -464,11 +464,11 @@ supabase:
   enabled: true
   url: https://ucgldleacehxjjwwqomk.supabase.co
   # Server-side secret key: read from this file (chmod 600), never from config.
-  secret_file: .supabase_secret
+  secret_file: /Library/Application Support/EyeGuard/.supabase_secret
   # Public client key for the partner dashboard (safe to store / commit).
   publishable_key: sb_publishable_y9pDf3aBNY4Le5u9tbUXzg_qCRvMn-b
   # Persistent offline queue: flags wait here until they upload successfully.
-  pending_file: pending_uploads.jsonl
+  pending_file: /Library/Application Support/EyeGuard/pending_uploads.jsonl
   # How often (seconds) to retry the offline backlog.
   retry_seconds: 60
   # Heartbeat: pulse device_status every retry cycle so a server-side job can
@@ -478,7 +478,7 @@ supabase:
   # default, single-process build). "split" = the locked-down build: this agent
   # holds NO key and forwards detections to a root vault daemon over a socket,
   # so the key + network live in a process the monitored user can't touch.
-  mode: direct
+  mode: split
   socket_path: /var/run/eyeguard.sock
   # In split mode, if the capture agent goes silent this long (seconds), the
   # daemon reports screen_ok=false (blind alert).
