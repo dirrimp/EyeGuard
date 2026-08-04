@@ -338,6 +338,13 @@ ignore:
     # the macOS login / lock screen — you can't browse anything there, and its
     # avatar/wallpaper false-flags as "a woman in tight clothing"
     - "loginwindow"
+    # terminal apps show only text, never images, so there's no detection
+    # value here -- but shell commands routinely contain secrets/keys, and
+    # logging the window title verbatim can leak them into the flags table
+    # and partner dashboard. Matches on app name too (is_ignored checks
+    # app+url+title together), so this excludes these apps entirely.
+    - "Terminal"
+    - "iTerm2"
 
 # Context-aware risk layer (no AI): combine the CLIP grade with WHERE it happened
 # to decide whether a flag is worth keeping and how likely it is real. Lets us
