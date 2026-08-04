@@ -82,3 +82,9 @@ restarts the vault daemon + session agent. Takes 30 seconds.
 If you ever want to move fast on something, the honest move is to just talk to
 Dad — the workflow is designed to require his attention, not to be worked
 around.
+
+## Verified working (2026-08-04)
+Full loop tested end-to-end: branch pushed by a Write collaborator, direct
+push to `main` confirmed blocked by the ruleset, PR opened, Dad approved and
+merged, `deploy/update.sh` deployed the change to the locked-down Mac. This
+pipeline is proven, not just configured.
