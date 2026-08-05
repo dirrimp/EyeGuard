@@ -10,8 +10,18 @@ Design goals:
   * Idempotent — a deterministic row id + upsert means a retry after a crash
     never creates a duplicate.
 
-Only the sb_secret key is used (read from a local file, never in code/config).
-It bypasses RLS so the agent can write; the partner dashboard can only read.
+The sb_secret key (read from a local file, never in code/config) is used for
+the flags/device_status tables, where it bypasses RLS but a direct REVOKE on
+those tables still holds (confirmed: append-only survives even service_role).
+
+Image uploads are the one exception: Supabase's Storage API does NOT honor a
+REVOKE against service_role the way /rest/v1/ table access does (confirmed
+live 2026-08-05 — DELETE/UPDATE via the secret key still succeeded even after
+`revoke delete, update on storage.objects from service_role`). So image
+uploads instead use the PUBLIC anon/publishable key, for which Storage DOES
+enforce RLS — an insert-only policy on the 'frames' bucket (no update/delete
+policy exists for anon) means the key can create evidence but never alter or
+erase it, closing the gap the secret key couldn't close for storage.
 """
 
 from __future__ import annotations
@@ -38,9 +48,19 @@ def _score(reason: str) -> float | None:
 
 class SupabaseUploader:
     def __init__(self, url: str, secret: str, pending_path: str,
-                 retry_seconds: int = 60, heartbeat: bool = True):
+                 retry_seconds: int = 60, heartbeat: bool = True,
+                 publishable_key: str | None = None):
         self.base = url.rstrip("/")
         self.secret = secret
+        # Falls back to the secret key if no publishable key is configured
+        # (old configs) -- logs so a missing key doesn't silently reopen the
+        # storage-deletion gap without anyone noticing.
+        self.publishable_key = publishable_key or secret
+        if not publishable_key:
+            print("[uploader] WARNING: no supabase.publishable_key configured "
+                  "-- image uploads are falling back to the secret key, which "
+                  "reopens the storage delete/overwrite gap. Set "
+                  "publishable_key in config.yaml.", flush=True)
         self.pending_path = Path(pending_path)
         self.retry_seconds = retry_seconds
         self.heartbeat = heartbeat
@@ -85,8 +105,12 @@ class SupabaseUploader:
             "no_image": True,
         })
 
-    # Cloud image retention now runs SERVER-SIDE (pg_cron) — the agent key can no
-    # longer delete storage objects, so it can't silently wipe review frames.
+    # Cloud image retention runs SERVER-SIDE (pg_cron, as postgres -- outside
+    # the API entirely, so it's unaffected by the anon/secret key distinction
+    # above). The agent itself never deletes cloud images: uploads go through
+    # the anon key's insert-only Storage RLS policy (see _put_image), which is
+    # what actually prevents the agent from deleting/overwriting them -- the
+    # secret key alone was NOT sufficient for this (see module docstring).
 
     # ---- worker -------------------------------------------------------------
 
@@ -240,14 +264,24 @@ class SupabaseUploader:
             h.update(extra)
         return h
 
+    def _anon_headers(self, extra: dict | None = None) -> dict:
+        h = {"apikey": self.publishable_key,
+             "Authorization": f"Bearer {self.publishable_key}"}
+        if extra:
+            h.update(extra)
+        return h
+
     def _put_image(self, remote_path: str, data: bytes):
-        # INSERT-ONLY (no x-upsert): the agent key can create an image but not
-        # overwrite or delete one, so a review frame can't be silently blanked.
-        # A 409 means it already exists (an earlier attempt succeeded) -> fine.
+        # Anon key, not the secret: Storage RLS grants anon INSERT-only on the
+        # 'frames' bucket (no update/delete policy exists for anon), so this
+        # key can create an image but never overwrite or erase one -- unlike
+        # the secret key, which Storage lets bypass a REVOKE entirely (see
+        # module docstring). A 409 means it already exists (an earlier attempt
+        # succeeded) -> fine.
         url = f"{self.base}/storage/v1/object/frames/{remote_path}"
         req = urllib.request.Request(
             url, data=data, method="POST",
-            headers=self._headers({"Content-Type": "image/jpeg"}))
+            headers=self._anon_headers({"Content-Type": "image/jpeg"}))
         try:
             with urllib.request.urlopen(req, timeout=20) as r:
                 r.read()
