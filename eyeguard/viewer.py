@@ -121,6 +121,9 @@ def _what(rec: dict) -> str:
     if reason0.startswith("extension"):
         return _esc(reason0.split(":", 1)[-1].strip()) + \
             " — review whether it's legitimate."
+    if reason0.startswith("vm"):
+        return _esc(reason0.split(":", 1)[-1].strip()) + \
+            " — review whether it's legitimate."
     if reason0.startswith("text"):
         return "Explicit text on screen — " + \
             _esc(reason0.split("—", 1)[-1].strip())
@@ -186,6 +189,8 @@ def _card(rec: dict, dt: datetime, report_dir: Path) -> str:
         sev_txt = "DRM Video"
     elif _r.startswith("extension"):
         sev_txt = "Extension"
+    elif _r.startswith("vm"):
+        sev_txt = "Virtualization"
     elif _r.startswith("text"):
         sev_txt = "Text"
     elif _r.startswith("signal") or _r.startswith("phone"):
