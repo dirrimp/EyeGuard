@@ -142,6 +142,8 @@ def base_domain(name):
 
 
 def is_noise(domain):
+    if domain in ("arpa", "local", "lan"):
+        return True  # bare TLD-only query (single label, e.g. raw "local.")
     if domain.endswith(".arpa") or domain.endswith(".local") or domain.endswith(".lan"):
         return True  # reverse-DNS / mDNS / DNS-SD service-discovery junk, not browsing
     return any(n in domain for n in NOISE)
