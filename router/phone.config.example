@@ -22,15 +22,18 @@
     "youporn","brazzers","onlyfans","chaturbate","spankbang","xxx","nude",
     "naked","hentai","rule34","camgirl","escort","fetish"],
 
-  "_noise": "DNS noise to DROP so the green trail is browsing, not telemetry. Add to this as junk leaks through. .arpa and .local are always dropped regardless (reverse-DNS / mDNS junk).",
+  "_noise": "DNS noise to DROP so the green trail is browsing, not telemetry. Add to this as junk leaks through. .arpa, .local, .lan, and .invalid are always dropped regardless (reverse-DNS / mDNS / iOS captive-portal-probe junk).",
   "noise_domains": ["googleapis.com","gstatic.com","google-analytics.com",
     "googletagmanager.com","doubleclick.net","googlesyndication.com",
     "googleusercontent.com","cloudfront.net","akamai.net","akamaized.net",
-    "akamaiedge.net","fbcdn.net","cdninstagram.com",
-    "apple.com","apple-dns.net","icloud.com","mzstatic.com","aaplimg.com","push.apple.com",
+    "akamaiedge.net","akadns.net","fbcdn.net","cdninstagram.com",
+    "apple.com","apple-dns.net","icloud.com","icloud-content.com",
+    "mzstatic.com","aaplimg.com","push.apple.com",
+    "fastly.net","fastly-edge.com","hostinger.com",
     "crashlytics.com","sentry.io","amplitude.com","segment.io","branch.io",
     "cloudflare.com","cloudflareinsights.com","gvt1.com","gvt2.com","1e100.net",
-    "digicert.com","ocsp","gpsdev","in-app","appsflyer","adjust.com"],
+    "digicert.com","ocsp","gpsdev","in-app","appsflyer","adjust.com",
+    "t-mobile.com","planningcenteronline.com"],
 
   "_app_map": "Collapse service domains to a readable app name in the feed.",
   "app_map": {

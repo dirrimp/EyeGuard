@@ -146,6 +146,11 @@ def is_noise(domain):
         return True  # bare TLD-only query (single label, e.g. raw "local.")
     if domain.endswith(".arpa") or domain.endswith(".local") or domain.endswith(".lan"):
         return True  # reverse-DNS / mDNS / DNS-SD service-discovery junk, not browsing
+    if domain.endswith(".invalid"):
+        return True  # iOS's own randomized captive-portal/DNS-hijack probe
+                     # domains (e.g. "<random-uuid>.invalid") -- always junk,
+                     # the subdomain differs per check so no fixed substring
+                     # in noise_domains could ever match it.
     return any(n in domain for n in NOISE)
 
 
