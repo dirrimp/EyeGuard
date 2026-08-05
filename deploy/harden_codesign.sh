@@ -38,11 +38,13 @@ PLIST
 
 echo "== 3/6: signing (hardened runtime, no get-task-allow) =="
 codesign -f --options runtime --entitlements "$ENT" --sign - "$PYBIN"
-codesign -dv "$PYBIN" 2>&1 | grep -q "flags=0x10002(adhoc,runtime)" || {
+SIGN_OUTPUT="$(codesign -dv "$PYBIN" 2>&1)"
+if ! echo "$SIGN_OUTPUT" | grep -q "flags=0x10002(adhoc,runtime)"; then
   echo "Signature verification failed -- restoring backup." >&2
+  echo "$SIGN_OUTPUT" >&2
   cp "$BACKUP" "$PYBIN"
   exit 1
-}
+fi
 echo "Signature OK: hardened runtime, no get-task-allow."
 
 echo "== 4/6: smoke test (unsigned-of-daemon-context import check) =="
@@ -59,8 +61,10 @@ launchctl kickstart -k "gui/${MONITORED_UID}/com.eyeguard.monitor"
 sleep 5
 
 echo "== 6/6: verifying both are up and not crash-looping =="
-VAULT_PID="$(launchctl print system/com.eyeguard.vault 2>/dev/null | awk '/pid = /{print $3; exit}')"
-AGENT_PID="$(launchctl print "gui/${MONITORED_UID}/com.eyeguard.monitor" 2>/dev/null | awk '/pid = /{print $3; exit}')"
+VAULT_INFO="$(launchctl print system/com.eyeguard.vault 2>/dev/null || true)"
+AGENT_INFO="$(launchctl print "gui/${MONITORED_UID}/com.eyeguard.monitor" 2>/dev/null || true)"
+VAULT_PID="$(awk '/pid = /{print $3; exit}' <<< "$VAULT_INFO")"
+AGENT_PID="$(awk '/pid = /{print $3; exit}' <<< "$AGENT_INFO")"
 if [ -z "${VAULT_PID:-}" ] || [ -z "${AGENT_PID:-}" ]; then
   echo "One or both processes did not come back up -- restoring backup and restarting again." >&2
   cp "$BACKUP" "$PYBIN"
