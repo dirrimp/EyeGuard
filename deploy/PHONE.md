@@ -38,6 +38,18 @@ the same red/green feed the Mac produces.
   tamper alert + email, same as the browser-extension/VM-software monitors'
   philosophy: can't prevent a local admin from changing these, but it's no
   longer silent. Baselines on first run (no flags then).
+- 🔐 **DoH bypass detection** (added 2026-08-05) — DoH can't be network-blocked
+  the clean way DoT was (it deliberately reuses port 443, identical to
+  ordinary HTTPS). Three layers: AdGuard returns NXDOMAIN for Firefox's
+  `use-application-dns.net` canary (auto-disables Firefox's own DoH) + known
+  DoH provider hostnames; the firewall REJECTs TCP:443 to known DoH provider
+  IPs (both `lan` and `wgserver` sources); this connector watches for the
+  initial SYN to those same IPs even though the firewall should already be
+  rejecting it — catches a gap (an unlisted provider, a reverted firewall
+  rule) the other two layers might miss. Red flag + email, throttled 5 min
+  per IP so retry bursts collapse into one alert. Known accepted residual: a
+  self-hosted DoH server on an unlisted IP, or Encrypted Client Hello, isn't
+  caught by any of this.
 
 ## Install (on the Flint 2, SSH in as root)
 

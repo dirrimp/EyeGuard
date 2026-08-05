@@ -231,6 +231,83 @@ def capture_loop(iface, host_ip):
         time.sleep(5)
 
 
+# ---- DNS-over-HTTPS bypass detection ---------------------------------------
+#
+# DoH can't be network-blocked the clean way DoT was (port 853 is its own
+# protocol; DoH deliberately reuses port 443, identical to ordinary HTTPS, so
+# there's no way to separate it from regular browsing without deep packet
+# inspection). Layer 1 (AdGuard: NXDOMAIN for Firefox's use-application-dns.net
+# canary + known DoH provider hostnames) and Layer 2 (firewall: REJECT TCP:443
+# to known DoH provider IPs, both lan and wgserver sources -- see
+# router/CONFIG_BACKUP.md) close the casual/default-browser-setting gap. This
+# is Layer 3: even with the firewall REJECTing the connection, the initial SYN
+# packet still crosses the wire before the reject happens (tcpdump on the LAN
+# side sees it regardless of what the firewall does downstream), so an
+# attempt is still visible even if a firewall rule ever gets removed/missed a
+# provider -- same tamper-evident philosophy as everything else here. A
+# technically motivated bypass (self-hosted DoH on an unlisted IP, or
+# Encrypted Client Hello hiding even the destination-IP-adjacent signal) is
+# NOT caught by this -- that's an accepted residual, not a gap in this layer.
+
+# Known public DoH provider IPs -- keep in sync with the Block-DoH-Providers
+# firewall rules. Adding a provider here does NOT need a firewall change to
+# take effect (this layer is independent), but for it to actually be BLOCKED
+# and not just flagged, add it to the firewall rule too.
+DOH_IPS = [
+    "1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4", "9.9.9.9", "9.9.9.10",
+    "149.112.112.112", "149.112.112.10", "208.67.222.222", "208.67.220.220",
+    "208.67.222.123", "208.67.220.123", "94.140.14.14", "94.140.15.15",
+    "185.228.168.9", "185.228.169.9",
+]
+
+SYN_DST_RE = re.compile(r"IP \S+ > (\d+\.\d+\.\d+\.\d+)\.\d+:")
+
+_DOH_THROTTLE = 300  # a rejected connection retries several SYNs in a burst;
+                     # collapse those into one flag per IP per window.
+
+
+def _doh_filter(host_ip):
+    ips = " or ".join(f"host {ip}" for ip in DOH_IPS)
+    return (f"tcp and src host {host_ip} and dst port 443 and "
+            f"tcp[tcpflags] & (tcp-syn|tcp-ack) == tcp-syn and ({ips})")
+
+
+def _handle_doh_attempt(ip):
+    now = time.time()
+    with _LOCK:
+        seen = _STATE.setdefault("doh_seen", {})
+        last = seen.get(ip, 0)
+        if now - last < _DOH_THROTTLE:
+            return
+        seen[ip] = now
+    sb_post("/rest/v1/flags", {
+        "flagged_at": now_iso(), "verdict": "flagged",
+        "reason": f"phone-signal: DNS-over-HTTPS bypass attempt to {ip}",
+        "app": "iPhone", "url": None, "window_title": f"DoH attempt: {ip}",
+        "grade": "Likely", "risk": "high", "is_nudity": False})
+
+
+def doh_syn_loop(iface, host_ip):
+    """Same respawn-forever pattern as capture_loop, watching for the initial
+    SYN of a TCP:443 connection attempt to a known DoH provider IP."""
+    filt = _doh_filter(host_ip)
+    while True:
+        try:
+            proc = subprocess.Popen(
+                ["tcpdump", "-i", iface, "-l", "-nn", filt],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, bufsize=1)
+            for line in proc.stdout:
+                m = SYN_DST_RE.search(line)
+                if m:
+                    _handle_doh_attempt(m.group(1))
+            proc.wait()
+        except Exception as ex:
+            print(f"[eyeguard-phone] doh_syn({iface}) {type(ex).__name__}: {ex}",
+                  flush=True)
+        time.sleep(5)
+
+
 # ---- liveness / heartbeat ---------------------------------------------------
 
 def heartbeat_loop():
@@ -477,6 +554,12 @@ def main():
                                         args=(HOME_IFACE, HOME_IP), daemon=True))
     if WG_IFACE and WG_IP:
         threads.append(threading.Thread(target=capture_loop,
+                                        args=(WG_IFACE, WG_IP), daemon=True))
+    if HOME_IP:
+        threads.append(threading.Thread(target=doh_syn_loop,
+                                        args=(HOME_IFACE, HOME_IP), daemon=True))
+    if WG_IFACE and WG_IP:
+        threads.append(threading.Thread(target=doh_syn_loop,
                                         args=(WG_IFACE, WG_IP), daemon=True))
     if not threads:
         print("[eyeguard-phone] no home_ip or wg_interface+wg_ip configured "
