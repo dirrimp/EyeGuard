@@ -61,10 +61,13 @@ launchctl kickstart -k "gui/${MONITORED_UID}/com.eyeguard.monitor"
 sleep 5
 
 echo "== 6/6: verifying both are up and not crash-looping =="
-VAULT_INFO="$(launchctl print system/com.eyeguard.vault 2>/dev/null || true)"
-AGENT_INFO="$(launchctl print "gui/${MONITORED_UID}/com.eyeguard.monitor" 2>/dev/null || true)"
-VAULT_PID="$(awk '/pid = /{print $3; exit}' <<< "$VAULT_INFO")"
-AGENT_PID="$(awk '/pid = /{print $3; exit}' <<< "$AGENT_INFO")"
+# launchctl print's "pid = " line for another user's GUI domain isn't
+# reliably visible cross-session (confirmed live: even queried directly, no
+# sudo, targeting jonahdirrim's domain from patrickdirrim's session returns
+# no pid line despite the process genuinely running per `ps`) -- so verify
+# via the process table instead, which is visible regardless of caller.
+VAULT_PID="$(pgrep -f "eyeguard\.vault --config" | head -1 || true)"
+AGENT_PID="$(pgrep -f "run_agent\.py" | head -1 || true)"
 if [ -z "${VAULT_PID:-}" ] || [ -z "${AGENT_PID:-}" ]; then
   echo "One or both processes did not come back up -- restoring backup and restarting again." >&2
   cp "$BACKUP" "$PYBIN"
