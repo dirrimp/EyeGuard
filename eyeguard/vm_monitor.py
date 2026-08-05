@@ -35,6 +35,10 @@ _KNOWN_APPS = [
     "Oracle VM VirtualBox.app",
     "VirtualBox.app",
     "Genymotion.app",
+    "BlueStacks.app",
+    "BlueStacks X.app",
+    "NoxPlayer.app",
+    "Android Studio.app",
     "Docker.app",
     "QEMU.app",
 ]
@@ -42,7 +46,7 @@ _KNOWN_APPS = [
 # CLI-only tools (typically Homebrew-installed, no .app bundle) on PATH.
 _KNOWN_CLI = [
     "qemu-system-x86_64", "qemu-system-aarch64", "VBoxManage", "vagrant",
-    "limactl", "colima", "multipass",
+    "limactl", "colima", "multipass", "emulator",  # Android SDK emulator
 ]
 
 
