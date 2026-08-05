@@ -84,6 +84,28 @@ def sb_upsert_phone(row):
             prefer="resolution=merge-duplicates,return=minimal")
 
 
+def home_ping_alive():
+    """ARP/L2 reachability probe for the phone's home-LAN IP -- NOT ICMP.
+    Confirmed empirically on this network: a locked/idle iPhone stays
+    associated to the AP and answers ARP, but silently drops ICMP echo
+    requests (100% ping loss) the same moment `ip neigh` shows it
+    REACHABLE. So ICMP alone reads a normal idle phone as gone. Instead:
+    issue a ping only to *force* a fresh ARP probe as a side effect (its own
+    ICMP result is ignored), then read the kernel neighbor-cache state,
+    which the kernel only (re)confirms to REACHABLE/DELAY on an actual ARP
+    reply -- i.e. real L2 presence, not app-layer cooperation."""
+    if not HOME_IP:
+        return False
+    try:
+        subprocess.run(["ping", "-c", "1", "-W", "1", HOME_IP],
+                       capture_output=True, text=True, timeout=3)
+        out = subprocess.run(["ip", "neigh", "show", HOME_IP],
+                             capture_output=True, text=True, timeout=3).stdout
+        return "REACHABLE" in out or "DELAY" in out
+    except Exception:
+        return False
+
+
 def wg_rx_bytes():
     """Total received-bytes for the phone's WireGuard peer, or None if WG isn't
     configured. Climbs every keepalive interval while the tunnel is up (even
@@ -120,8 +142,8 @@ def base_domain(name):
 
 
 def is_noise(domain):
-    if domain.endswith(".arpa") or domain.endswith(".local"):
-        return True  # reverse-DNS / mDNS service-discovery junk, not browsing
+    if domain.endswith(".arpa") or domain.endswith(".local") or domain.endswith(".lan"):
+        return True  # reverse-DNS / mDNS / DNS-SD service-discovery junk, not browsing
     return any(n in domain for n in NOISE)
 
 
@@ -202,19 +224,24 @@ def capture_loop(iface, host_ip):
 # ---- liveness / heartbeat ---------------------------------------------------
 
 def heartbeat_loop():
-    """phone liveness = EITHER signal, whichever is fresher:
-      (a) DNS packets seen on the home interface -> covers the phone on home
-          wifi, where it's a plain LAN client and never touches the tunnel.
-      (b) WireGuard rx-byte counter -> covers the phone AWAY on the tunnel:
+    """phone liveness = ANY of three signals, whichever is fresher:
+      (a) DNS packets seen on the home interface -> covers active browsing
+          on home wifi.
+      (b) home-LAN ping reachability -> covers the phone sitting IDLE on
+          home wifi (locked, no DNS traffic) without false-firing dark.
+      (c) WireGuard rx-byte counter -> covers the phone AWAY on the tunnel:
           with Persistent Keepalive the counter climbs every ~25s even while
           asleep, so sleep is parsed out and only a truly-down tunnel goes
           dark.
     OR-combining them means home browsing, home idle, and away-asleep-on-
-    tunnel all read alive; only genuine silence on BOTH (phone off,
-    off-network, or VPN killed while away) trips phone-dark."""
+    tunnel all read alive; only genuine silence on ALL THREE (phone off,
+    off-network entirely, or VPN killed while away) trips phone-dark."""
     while True:
         rx = wg_rx_bytes()
+        ping_ok = home_ping_alive()
         with _LOCK:
+            if ping_ok:
+                _STATE["last_activity"] = time.time()
             if rx is not None and rx > _STATE["last_rx"]:
                 _STATE["last_activity"] = time.time()
             if rx is not None:
