@@ -207,7 +207,8 @@ def build_uploader_from_config(cfg: dict) -> SupabaseUploader:
     return SupabaseUploader(url=sb["url"], secret=secret,
                             pending_path=str(pending),
                             retry_seconds=int(sb.get("retry_seconds", 60)),
-                            heartbeat=bool(sb.get("heartbeat", True)))
+                            heartbeat=bool(sb.get("heartbeat", True)),
+                            publishable_key=sb.get("publishable_key"))
 
 
 def main():
