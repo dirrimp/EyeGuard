@@ -121,6 +121,29 @@ class FlagLogger:
             f.write(json.dumps(record) + "\n")
         return record
 
+    def log_vm_software(self, name: str, path: str) -> dict:
+        """Log newly-detected virtualization software (UTM, VirtualBox, etc.) --
+        a Standard user can install this without admin and browse inside its own
+        network stack, bypassing router-level DNS filtering. Not itself proof of
+        anything (legitimate dev tool use is common), so YELLOW review rather
+        than an immediate red incident -- but it's now visible to the partner,
+        matching the browser-extension monitor's tamper-evident philosophy.
+        Imageless."""
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "verdict": "alert",
+            "reason": f"vm: new virtualization software '{name}' ({path})",
+            "app": "EyeGuard",
+            "url": None,
+            "window_title": f"Virtualization software installed: {name}",
+            "grade": "Possible",
+            "risk": "neutral",
+            "no_image": True,
+        }
+        with self.flag_log.open("a") as f:
+            f.write(json.dumps(record) + "\n")
+        return record
+
     def log_drm(self, context: dict | None = None,
                 service: str | None = None) -> dict:
         """Log a YELLOW flag for DRM streaming video that macOS blanks to black —

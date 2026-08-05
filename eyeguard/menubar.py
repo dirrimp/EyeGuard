@@ -23,6 +23,7 @@ import rumps
 from .capture import ScreenCapturer
 from .context import capture_context, frontmost_is_self, is_ignored
 from .extensions import scan as scan_extensions, is_questionable
+from .vm_monitor import scan as scan_vm
 from .risk import assess
 from .detector import Verdict
 from .logger import FlagLogger
@@ -80,6 +81,10 @@ class EyeGuardApp(rumps.App):
         self._ext_scan = int(self._ext.get("scan_seconds", 60))
         self._ext_questionable = [p.lower() for p in self._ext.get("questionable", [])]
         self._ext_baseline = None       # set on the first scan (no flags then)
+        self._vm = self.cfg.get("vm_monitor", {})
+        self._vm_on = bool(self._vm.get("enabled"))
+        self._vm_scan = int(self._vm.get("scan_seconds", 300))
+        self._vm_baseline = None        # set on the first scan (no flags then)
         self._text = self.cfg.get("text", {})
         self._ocr_on = bool(self._text.get("ocr_enabled"))
         self._signals_on = bool(self._text.get("signals_enabled"))
@@ -363,6 +368,7 @@ class EyeGuardApp(rumps.App):
         # First self-test 60s in (after warm-up), then every self_test_secs.
         last_self_test = time.time() - self._self_test_secs + 60
         last_ext_scan = 0.0
+        last_vm_scan = 0.0
         last_ocr = 0.0
         while not self._stop.is_set():
             try:
@@ -479,6 +485,32 @@ class EyeGuardApp(rumps.App):
                                          "window_title": f"{browser}: {name}"})
                                     print(f"[extension] new {browser} ext "
                                           f"'{name}' questionable={q}", flush=True)
+                        except Exception:
+                            pass
+
+                    # VM-software monitoring: baseline at first scan, then flag
+                    # any NEW virtualization app/CLI tool as a yellow review
+                    # flag (dual-use -- legitimate dev tool or a network-level
+                    # bypass attempt, so not an automatic red incident).
+                    if (self._vm_on and uploader is not None
+                            and time.time() - last_vm_scan >= self._vm_scan):
+                        last_vm_scan = time.time()
+                        try:
+                            current = scan_vm()
+                            prev = self._vm_baseline
+                            self._vm_baseline = set(current)
+                            if prev is not None:
+                                for name in set(current) - prev:
+                                    path = current[name]
+                                    uploader.enqueue(
+                                        logger.log_vm_software(name, path))
+                                    self._record_flag(
+                                        Verdict.ALERT,
+                                        {"app": "EyeGuard",
+                                         "window_title":
+                                             f"Virtualization software: {name}"})
+                                    print(f"[vm] new virtualization software "
+                                          f"'{name}' at {path}", flush=True)
                         except Exception:
                             pass
 

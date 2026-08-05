@@ -560,6 +560,16 @@ extensions:
     - screenshot
     - incognito
 
+# Virtualization-software monitoring. A Standard user can install a VM app
+# (UTM, VirtualBox, etc.) without admin and browse inside its own network
+# stack -- bypassing router-level DNS filtering. Same tamper-evident
+# philosophy as extensions above: can't prevent it, but flags it visibly
+# the moment it's installed. The on-screen visual detector still sees
+# whatever's rendered in the VM's own window regardless.
+vm_monitor:
+  enabled: true
+  scan_seconds: 300   # VM installs are rare; no need to poll as often as extensions
+
 # Text + signal layer. The image detector can't see the TEXTUAL side of
 # behavior — erotic text, sexual chat, explicit searches — because there's no
 # nude image to classify. These two on-device checks close that gap.
