@@ -45,6 +45,9 @@ APP_MAP = {k.lower(): v for k, v in CONF.get("app_map", {}).items()}
 DARK = int(CONF.get("dark_buffer_seconds", 30))
 GREEN_THROTTLE = int(CONF.get("green_repeat_seconds", 900))
 HEARTBEAT_SECONDS = int(CONF.get("heartbeat_seconds", 20))
+ROUTER_CHECK_SECONDS = int(CONF.get("router_check_seconds", 300))
+ROUTER_BASELINE_PATH = Path(CONF.get("router_baseline_file",
+                                     "/etc/eyeguard/router_baseline.json"))
 
 # tcpdump's default -nn text output, e.g. "...: 36802+ Type65? ocsp2.apple.com. (33)"
 # -- works for any query type (A/AAAA/PTR/Type65/...) without enumerating them.
@@ -276,7 +279,198 @@ def heartbeat_loop():
         time.sleep(HEARTBEAT_SECONDS)
 
 
+# ---- router config tamper-evidence -----------------------------------------
+#
+# Giving Jonah his own router GUI login (requested 2026-08-05) is genuinely
+# useful for day-to-day network management, but GL.iNet's admin account is
+# all-or-nothing -- there's no "network management only" role. The same login
+# that lets you check which devices are online also lets you disable AdGuard,
+# delete a WireGuard peer, remove the Block-DoT firewall rule, or re-enable
+# the GoodCloud remote-management channel that was disabled during hardening.
+# None of those are PREVENTABLE from inside the router (that's the same
+# "can't stop a local admin" limit as everywhere else in this project) -- but
+# they can be made VISIBLE, the same tamper-evident philosophy as the Mac's
+# browser-extension and VM-software monitors. This snapshots the handful of
+# security-relevant settings established during the 2026-08-04 hardening
+# pass and flags ANY drift from the expected/hardened value as a tamper
+# event, routed through the same eg_on_red "tampering detected" email as
+# every other tamper signal in this project.
+#
+# Deliberately does NOT try to catch every possible router change (that would
+# be noisy and fragile) -- only the specific things actually established as
+# "this must stay this way" during hardening: AdGuard protection, the
+# Block-DoT rule, WAN-facing default-deny, SSH password-auth staying off,
+# GoodCloud staying disabled, the admin GUI staying HTTPS-only, and the set
+# of WireGuard peers (an added OR removed peer is worth knowing about either
+# way -- a removal breaks monitoring, an addition is an unknown device on
+# the tunnel).
+
+def _uci_show(pkg):
+    try:
+        return subprocess.run(["uci", "show", pkg],
+                              capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return ""
+
+
+def _parse_uci_show(text):
+    """{'<pkg>.<section>': {option: value}} from `uci show <pkg>` text --
+    handles both named (dropbear.main) and anonymous (firewall.@rule[21])
+    sections. Values are read fresh each check, so an admin renaming/
+    reordering anonymous sections doesn't matter -- sections are matched by
+    their own 'name' field below, never by index."""
+    sections = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or "=" not in line:
+            continue
+        key, val = line.split("=", 1)
+        val = val.strip().strip("'")
+        parts = key.split(".")
+        if len(parts) >= 3:
+            sect = ".".join(parts[:2])
+            opt = ".".join(parts[2:])
+            sections.setdefault(sect, {})[opt] = val
+        elif len(parts) == 2:
+            sections.setdefault(key, {})["_type"] = val
+    return sections
+
+
+def _find_by_name(sections, name):
+    for opts in sections.values():
+        if opts.get("name") == name:
+            return opts
+    return {}
+
+
+def _find_by_opt(sections, key, val):
+    for opts in sections.values():
+        if opts.get(key) == val:
+            return opts
+    return {}
+
+
+def _adguard_protection_enabled():
+    try:
+        text = Path("/etc/AdGuardHome/config.yaml").read_text()
+    except Exception:
+        return None
+    m = re.search(r"^\s*protection_enabled:\s*(true|false)", text, re.MULTILINE)
+    return m.group(1) if m else None
+
+
+def _wg_peer_pubkeys():
+    try:
+        out = subprocess.run(["wg", "show", "wgserver", "dump"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return None
+    lines = out.splitlines()
+    if not lines:
+        return None
+    # First line is the interface's own privkey/pubkey/port/fwmark, not a
+    # peer -- every subsequent line is one peer, first column = its pubkey.
+    return sorted(l.split("\t")[0] for l in lines[1:] if l.strip())
+
+
+def router_snapshot():
+    fw = _parse_uci_show(_uci_show("firewall"))
+    db = _parse_uci_show(_uci_show("dropbear"))
+    cloud = _parse_uci_show(_uci_show("gl-cloud"))
+    uh = _parse_uci_show(_uci_show("uhttpd"))
+
+    block_dot = _find_by_name(fw, "Block-DoT")
+    wan_zone = _find_by_opt(fw, "name", "wan")
+    dropbear_main = db.get("dropbear.main", {})
+    cloud_section = next(iter(cloud.values()), {})
+    uh_main = uh.get("uhttpd.main", {})
+    wg_peers = _wg_peer_pubkeys()
+
+    return {
+        "adguard_protection_enabled": _adguard_protection_enabled(),
+        "block_dot_ok": block_dot.get("target") == "REJECT",
+        "wan_input_policy": wan_zone.get("input"),
+        "dropbear_password_auth": dropbear_main.get("PasswordAuth"),
+        "dropbear_root_password_auth": dropbear_main.get("RootPasswordAuth"),
+        "goodcloud_enabled": cloud_section.get("enable"),
+        "uhttpd_has_http_listener": "listen_http" in uh_main,
+        "wg_peers": wg_peers,
+    }
+
+
+# (key, expected, human description) for the scalar checks. wg_peers is
+# handled separately below since it's a set, not a scalar.
+_ROUTER_INVARIANTS = [
+    ("adguard_protection_enabled", "true", "AdGuard protection was disabled"),
+    ("block_dot_ok", True, "the Block-DoT firewall rule was removed/weakened "
+                            "(DNS-over-TLS can now bypass filtering)"),
+    ("wan_input_policy", "DROP", "the WAN firewall default-deny policy changed"),
+    ("dropbear_password_auth", "off", "SSH password authentication was "
+                                       "re-enabled (was key-only)"),
+    ("dropbear_root_password_auth", "off", "SSH root password authentication "
+                                            "was re-enabled (was key-only)"),
+    ("goodcloud_enabled", "0", "GoodCloud remote management was re-enabled"),
+    ("uhttpd_has_http_listener", False, "an insecure HTTP admin listener was "
+                                         "added (was HTTPS-only)"),
+]
+
+
+def _router_tamper_flag(detail):
+    sb_post("/rest/v1/flags", {
+        "flagged_at": now_iso(), "verdict": "flagged",
+        "reason": f"tamper: router config changed -- {detail}",
+        "app": "Router", "url": None, "window_title": "Router configuration changed",
+        "grade": "Likely", "risk": "high", "is_nudity": False})
+
+
+def router_check_loop():
+    """Baseline on first run (no flags then -- avoids flagging the router's
+    own already-hardened state as if it were a change), then flag any drift
+    from either the baseline OR the known-hardened expected value, whichever
+    catches it: a value can drift baseline-to-baseline (a change after the
+    monitor started) or start already wrong (baseline captured a value that
+    was never actually hardened, e.g. this check being added later than the
+    setting) -- checking against _ROUTER_INVARIANTS' expected values as well
+    as the previous snapshot covers both."""
+    baseline = None
+    if ROUTER_BASELINE_PATH.exists():
+        try:
+            baseline = json.loads(ROUTER_BASELINE_PATH.read_text())
+        except Exception:
+            baseline = None
+    while True:
+        try:
+            current = router_snapshot()
+            if baseline is None:
+                for key, expected, detail in _ROUTER_INVARIANTS:
+                    if current.get(key) != expected:
+                        _router_tamper_flag(f"{detail} (found at first check)")
+                baseline = current
+            else:
+                for key, expected, detail in _ROUTER_INVARIANTS:
+                    if current.get(key) != expected and baseline.get(key) == expected:
+                        _router_tamper_flag(detail)
+                cur_peers = current.get("wg_peers")
+                base_peers = baseline.get("wg_peers")
+                if cur_peers is not None and base_peers is not None:
+                    added = set(cur_peers) - set(base_peers)
+                    removed = set(base_peers) - set(cur_peers)
+                    for pk in added:
+                        _router_tamper_flag(
+                            f"a new WireGuard peer was added ({pk[:12]}...)")
+                    for pk in removed:
+                        _router_tamper_flag(
+                            f"a WireGuard peer was removed ({pk[:12]}...)")
+                baseline = current
+            ROUTER_BASELINE_PATH.write_text(json.dumps(baseline))
+        except Exception as ex:
+            print(f"[eyeguard-phone] router_check {type(ex).__name__}: {ex}",
+                  flush=True)
+        time.sleep(ROUTER_CHECK_SECONDS)
+
+
 def main():
+    threading.Thread(target=router_check_loop, daemon=True).start()
     threads = []
     if HOME_IP:
         threads.append(threading.Thread(target=capture_loop,

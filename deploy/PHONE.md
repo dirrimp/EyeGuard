@@ -30,6 +30,14 @@ the same red/green feed the Mac produces.
   *Enforced router-side.*
 - ⚫ **Monitor offline** — if the router script itself stops (router down), a
   Supabase cron alerts after 5 min.
+- 🚨 **Router config tamper-evidence** (added 2026-08-05, for whoever besides
+  Dad has the router GUI login) — every 5 min, checks that AdGuard protection,
+  the Block-DoT rule, WAN default-deny, SSH key-only auth, GoodCloud staying
+  disabled, the admin GUI staying HTTPS-only, and the WireGuard peer set all
+  still match the hardened state from the 2026-08-04 lockdown. Any drift → red
+  tamper alert + email, same as the browser-extension/VM-software monitors'
+  philosophy: can't prevent a local admin from changing these, but it's no
+  longer silent. Baselines on first run (no flags then).
 
 ## Install (on the Flint 2, SSH in as root)
 

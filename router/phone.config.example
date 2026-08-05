@@ -17,6 +17,10 @@
   "green_repeat_seconds": 900,
   "heartbeat_seconds": 20,
 
+  "_router_check": "Router config tamper-evidence: periodically checks that AdGuard protection, Block-DoT, WAN default-deny, SSH key-only auth, GoodCloud staying disabled, the admin GUI staying HTTPS-only, and the WireGuard peer set all still match the hardened state -- flags a RED tamper alert on any drift. Baselines silently on first run.",
+  "router_check_seconds": 300,
+  "router_baseline_file": "/etc/eyeguard/router_baseline.json",
+
   "_terms": "Reuse the Mac's text.terms watchlist -- an explicit domain = red.",
   "explicit_terms": ["porn","pornhub","xvideos","xhamster","xnxx","redtube",
     "youporn","brazzers","onlyfans","chaturbate","spankbang","xxx","nude",
