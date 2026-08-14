@@ -188,7 +188,14 @@ class VaultDaemon:
                     line, buf = buf.split(b"\n", 1)
                     if line.strip():
                         try:
-                            self._handle(json.loads(line))
+                            msg = json.loads(line)
+                            self._handle(msg)
+                            if msg.get("op") == "suspend":
+                                # Ack only after suspend's own send_heartbeat()
+                                # call above has actually returned, so the
+                                # client's blocking recv() genuinely means the
+                                # Supabase post completed (or was attempted).
+                                conn.sendall(b"ack\n")
                         except Exception:
                             pass  # never let one bad message kill the daemon
         finally:
