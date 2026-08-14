@@ -39,7 +39,28 @@ class VaultClient:
         self._send({"op": "tamper", "detail": detail})
 
     def suspend(self):
-        self._send({"op": "suspend"})
+        """Block until the daemon confirms it actually posted clean_shutdown to
+        Supabase -- not just that we wrote to the socket. macOS's WillSleep
+        grace period only lasts as long as THIS call keeps running; without
+        waiting here, the daemon's own HTTPS round-trip can get frozen
+        mid-flight by the same sleep event moments later, and the clean
+        beacon never lands -- confirmed live: this caused a false gone-dark
+        alert on every sleep once the daemon moved to a separate process."""
+        with self._lock:
+            try:
+                if self._sock is None:
+                    self._sock = self._connect()
+                self._sock.sendall((json.dumps({"op": "suspend"}) + "\n").encode())
+                self._sock.recv(16)  # daemon's ack, bounded by the socket's timeout
+            except OSError:
+                try:
+                    if self._sock:
+                        self._sock.close()
+                except OSError:
+                    pass
+                self._sock = None
+                # best-effort only -- no retry, so a failed attempt doesn't eat
+                # further into macOS's already-short sleep grace period
 
     def resume(self):
         self._send({"op": "resume"})
