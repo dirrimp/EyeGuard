@@ -34,6 +34,10 @@ class ScreenCapturer:
         # Per-display downscaled grayscale signature of the last frame seen.
         self._last_signature: dict[int, np.ndarray] = {}
         self._last_monitor_count: int | None = None
+        # Every successful raw grab, INCLUDING ones skipped for being unchanged
+        # -- unlike a count of yielded/analyzed frames, this can't go stale just
+        # because the screen is legitimately static for a while (reading, idle).
+        self.frames_captured = 0
 
     def _monitors(self, sct):
         # mss.monitors[0] is the "all displays" virtual screen; 1..n are physical.
@@ -103,6 +107,7 @@ class ScreenCapturer:
                 img = self._downscale(img)
                 sig = self._signature(img)
                 changed = self._changed_fraction(display_index, sig)
+                self.frames_captured += 1
                 if skip_unchanged and changed < self.change_threshold:
                     continue
                 yield Frame(image=img, display_index=display_index,

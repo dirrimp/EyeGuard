@@ -357,7 +357,11 @@ class EyeGuardApp(rumps.App):
         last_probe = 0.0
         last_seen_count = 0
         last_growth_time = time.time()
-        FROZEN_SECONDS = 120  # no new analyzed frames this long while up = blind
+        # No new RAW captures (not analyzed frames -- those are legitimately
+        # skipped for a static screen, e.g. reading, which used to false-read
+        # as "frozen" after 2 minutes of a genuinely unchanging but healthy
+        # capture) this long while up = actually blind.
+        FROZEN_SECONDS = 120
         # GREEN activity trail: how often to sample the active app/site, and how
         # often to re-log the SAME location (a keepalive proving continued use).
         act_sample = int(self._activity.get("sample_seconds", 20))
@@ -421,8 +425,7 @@ class EyeGuardApp(rumps.App):
                     last_probe = time.time()
                     bright = self._probe_brightness()
                     now = time.time()
-                    with self._lock:
-                        frames = self._frames_analyzed
+                    frames = capturer.frames_captured
                     if frames > last_seen_count:
                         last_seen_count = frames
                         last_growth_time = now
