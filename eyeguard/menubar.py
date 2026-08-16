@@ -13,6 +13,7 @@ The menu bar icon reflects current state:
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 import traceback
@@ -111,6 +112,8 @@ class EyeGuardApp(rumps.App):
         self._log_seen = False          # have we ever seen a non-empty flag log?
         self._log_missing = 0           # consecutive checks the log was missing
         self._log_lines = None          # tamper baseline: last known line count
+        self._log_hash = None           # tamper baseline: hash of the known-good lines
+        self._frames_seen: dict[str, str] = {}  # flagged-frame tamper baseline
         self._detector_ok = True        # False if the self-test finds it broken
         self._self_test_secs = int(self.cfg.get("detection", {})
                                     .get("self_test_seconds", 1800))
@@ -203,25 +206,33 @@ class EyeGuardApp(rumps.App):
             prune(self.cfg)
         except Exception:
             pass  # retention must never crash the app
-        # Retention just (legitimately) shrank the log, so reset the tamper
-        # baseline — the next check re-establishes it from the pruned size.
-        # Cloud images are pruned SERVER-SIDE now (the agent key can't delete).
+        # Retention just (legitimately) shrank the log / deleted old frames, so
+        # reset both tamper baselines — the next check re-establishes them from
+        # the pruned state. Cloud images are pruned SERVER-SIDE now (the agent
+        # key can't delete), so none of this touches the actual evidence trail.
         self._log_lines = None
+        self._log_hash = None
+        self._frames_seen = {}
 
     def _check_log_tamper(self, log_path, uploader):
-        """Detect deletion / truncation / line-drops in flags.jsonl. Retention
-        resets the baseline (in _prune), so any shrink here is external editing.
-        Records an immutable tamper event; the cloud copy is already safe."""
+        """Detect deletion, truncation, or in-place edits of flags.jsonl.
+        Retention resets the baseline (in _prune), so any shrink or content
+        change here is external editing. Content is verified by hash of the
+        previously-seen lines, not just a line count -- a line count alone
+        can't tell "grew normally" apart from "one earlier line was swapped
+        for different content while the total count stayed the same or grew",
+        which the hash catches. Reported immutably; the cloud record already
+        has this data independent of this file."""
         try:
             if log_path.exists():
-                with log_path.open() as f:
-                    count = sum(1 for ln in f if ln.strip())
+                lines = [ln for ln in log_path.read_text().splitlines()
+                         if ln.strip()]
             else:
-                count = None
+                lines = None
         except OSError:
-            count = None
+            lines = None
 
-        if count is None:                       # missing / unreadable
+        if lines is None:                       # missing / unreadable
             if self._log_seen:
                 self._log_missing += 1
                 if self._log_missing == 2:      # ~30s, rules out transients
@@ -230,16 +241,65 @@ class EyeGuardApp(rumps.App):
             return
 
         self._log_missing = 0
+        count = len(lines)
         if count > 0:
             self._log_seen = True
-        if (self._log_seen and self._log_lines is not None
-                and count < self._log_lines):   # shrank outside retention
-            uploader.report_tamper(
-                f"flags.jsonl shrank {self._log_lines}->{count} lines "
-                f"outside retention")
-            print(f"[tamper] flags.jsonl shrank {self._log_lines}->{count} "
-                  f"— reported", flush=True)
+
+        if self._log_seen and self._log_lines is not None:
+            if count < self._log_lines:          # shrank outside retention
+                uploader.report_tamper(
+                    f"flags.jsonl shrank {self._log_lines}->{count} lines "
+                    f"outside retention")
+                print(f"[tamper] flags.jsonl shrank {self._log_lines}->{count} "
+                      f"— reported", flush=True)
+            elif self._log_hash is not None:
+                # Same-or-greater count -- confirm the PREVIOUSLY-SEEN lines
+                # are still byte-identical. New lines may be appended after
+                # them; nothing already written may change.
+                prefix_hash = hashlib.sha256(
+                    "\n".join(lines[:self._log_lines]).encode()).hexdigest()
+                if prefix_hash != self._log_hash:
+                    uploader.report_tamper(
+                        "flags.jsonl content changed in place (line count "
+                        "unchanged or grown, but earlier lines were edited)")
+                    print("[tamper] flags.jsonl edited in place — reported",
+                          flush=True)
+
         self._log_lines = count
+        self._log_hash = hashlib.sha256("\n".join(lines).encode()).hexdigest()
+
+    def _check_frames_tamper(self, frames_dir, uploader):
+        """Per-file sibling of _check_log_tamper for saved flagged-frame images.
+        Retention (_prune) is the only sanctioned way a frame disappears, and it
+        resets the baseline the same way. Anything present at the last baseline
+        that's now missing, or whose bytes now hash differently, was tampered
+        with outside retention."""
+        try:
+            if not frames_dir.exists():
+                self._frames_seen = {}
+                return
+            current = {}
+            for p in frames_dir.iterdir():
+                if p.is_file():
+                    try:
+                        current[p.name] = hashlib.sha256(p.read_bytes()).hexdigest()
+                    except OSError:
+                        continue
+        except OSError:
+            return
+
+        for name, old_hash in self._frames_seen.items():
+            new_hash = current.get(name)
+            if new_hash is None:
+                uploader.report_tamper(
+                    f"flagged frame '{name}' deleted outside retention")
+                print(f"[tamper] flagged frame '{name}' deleted — reported",
+                      flush=True)
+            elif new_hash != old_hash:
+                uploader.report_tamper(f"flagged frame '{name}' content changed")
+                print(f"[tamper] flagged frame '{name}' edited — reported",
+                      flush=True)
+        self._frames_seen = current
 
     # ---- power events (sleep / wake / shutdown) -----------------------------
 
@@ -464,6 +524,11 @@ class EyeGuardApp(rumps.App):
                             self._check_log_tamper(logger.flag_log, uploader)
                         except Exception:
                             pass
+                        try:
+                            self._check_frames_tamper(
+                                logger.flagged_frames_dir, uploader)
+                        except Exception:
+                            pass
 
                     # Browser-extension monitoring: baseline at first scan, then
                     # flag any NEW extension — questionable (evasion) ones red,
@@ -573,6 +638,16 @@ class EyeGuardApp(rumps.App):
                                       flush=True)
                             elif not hits:
                                 self._last_signal_loc = None
+
+                # A full iteration finished with no exception -- clear any
+                # latched failure state. Without this, _watching was only
+                # ever set True once before the loop started, so a single
+                # transient error (e.g. a locked log file) grayed the icon
+                # permanently until the whole process restarted, even once
+                # every following iteration succeeded cleanly.
+                with self._lock:
+                    self._watching = True
+                    self._status_text = "watching"
             except Exception as e:
                 with self._lock:
                     self._watching = False
