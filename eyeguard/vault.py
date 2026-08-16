@@ -79,6 +79,83 @@ def _proc_argv(pid: int) -> tuple[str, list[str]]:
     return exec_path, argv
 
 
+_IOKit = ctypes.CDLL("/System/Library/Frameworks/IOKit.framework/IOKit")
+_CF = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+
+_IOServiceInterestCallback = ctypes.CFUNCTYPE(
+    None, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p)
+
+_IOKit.IORegisterForSystemPower.restype = ctypes.c_uint32
+_IOKit.IORegisterForSystemPower.argtypes = [
+    ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+    _IOServiceInterestCallback, ctypes.POINTER(ctypes.c_uint32)]
+_IOKit.IONotificationPortGetRunLoopSource.restype = ctypes.c_void_p
+_IOKit.IONotificationPortGetRunLoopSource.argtypes = [ctypes.c_void_p]
+_IOKit.IOAllowPowerChange.restype = ctypes.c_int
+_IOKit.IOAllowPowerChange.argtypes = [ctypes.c_uint32, ctypes.c_long]
+
+_CF.CFRunLoopGetCurrent.restype = ctypes.c_void_p
+_CF.CFRunLoopAddSource.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+_CF.CFRunLoopRun.restype = None
+_kCFRunLoopDefaultMode = ctypes.c_void_p.in_dll(_CF, "kCFRunLoopDefaultMode")
+
+# IOMessage.h: iokit_common_msg(x) = 0xe0000000 | x
+_K_CAN_SLEEP = 0xE0000270
+_K_WILL_SLEEP = 0xE0000280
+_K_HAS_POWERED_ON = 0xE0000300
+
+
+class SleepWatcher:
+    """Root-level sleep/wake via IOKit, so the vault daemon reacts directly --
+    no agent, no socket round-trip. A LaunchDaemon has no GUI session for
+    NSWorkspace's WillSleep (why the agent used that instead originally), but
+    IORegisterForSystemPower is the kernel-level equivalent, and crucially the
+    daemon can hold up the actual sleep transition (via IOAllowPowerChange)
+    until send_heartbeat() has genuinely returned -- closing the lid-close
+    race for good regardless of how short that trigger's grace period is,
+    unlike the old agent-socket-daemon relay it replaces as the primary path."""
+
+    def __init__(self, uploader: SupabaseUploader):
+        self.uploader = uploader
+        self._root_port = 0
+        self._callback = None  # kept alive so ctypes can't GC the trampoline
+
+    def _handle(self, refcon, service, message_type, message_arg):
+        try:
+            if message_type == _K_WILL_SLEEP:
+                try:
+                    self.uploader.suspend()
+                except Exception:
+                    pass
+                _IOKit.IOAllowPowerChange(self._root_port, message_arg)
+            elif message_type == _K_CAN_SLEEP:
+                _IOKit.IOAllowPowerChange(self._root_port, message_arg)
+            elif message_type == _K_HAS_POWERED_ON:
+                try:
+                    self.uploader.resume()
+                except Exception:
+                    pass
+        except Exception:
+            pass  # a bad power notification must never kill this thread
+
+    def run(self):
+        """Blocks forever running a CFRunLoop -- call on its own daemon thread."""
+        notify_port = ctypes.c_void_p()
+        notifier = ctypes.c_uint32()
+        self._callback = _IOServiceInterestCallback(self._handle)
+        self._root_port = _IOKit.IORegisterForSystemPower(
+            None, ctypes.byref(notify_port), self._callback, ctypes.byref(notifier))
+        if not self._root_port:
+            print("[vault] IORegisterForSystemPower failed -- sleep beacon "
+                  "falls back to the agent's socket path only", flush=True)
+            return
+        rl_source = _IOKit.IONotificationPortGetRunLoopSource(notify_port)
+        _CF.CFRunLoopAddSource(_CF.CFRunLoopGetCurrent(), rl_source,
+                                _kCFRunLoopDefaultMode)
+        print("[vault] IOKit sleep/wake watcher active", flush=True)
+        _CF.CFRunLoopRun()
+
+
 class VaultDaemon:
     def __init__(self, uploader: SupabaseUploader, socket_path: str,
                  agent_timeout: int = 90, verify_peer: bool = True,
@@ -142,6 +219,12 @@ class VaultDaemon:
         os.chmod(self.socket_path, 0o666)
         srv.listen(16)
         self.uploader.start()  # heartbeat + upload worker
+        # Direct kernel-level sleep/wake -- see SleepWatcher docstring. The
+        # agent's own suspend()/resume() calls over the socket still happen
+        # too; both paths call the same idempotent uploader methods, so this
+        # is pure redundancy, not a replacement that can race the old one.
+        threading.Thread(target=SleepWatcher(self.uploader).run,
+                         daemon=True).start()
         print(f"[vault] listening on {self.socket_path}", flush=True)
         while True:
             try:
