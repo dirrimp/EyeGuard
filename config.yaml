@@ -1,5 +1,15 @@
 # EyeGuard configuration (Phase 1)
 
+# The session agent's LaunchAgent is installed system-wide (root-owned, so the
+# monitored user can't remove it) -- but that also means macOS starts a copy of
+# it for EVERY logged-in GUI session, not just this one. Without this gate, any
+# other account on the machine (e.g. the administrator's own login) runs a full
+# instance too, against these same monitored-user-owned local paths --
+# confirmed live (repeated PermissionErrors from the administrator's account
+# once their session went active via fast user switching). Any account other
+# than this one exits immediately at startup, before touching anything.
+monitored_user: jonahdirrim
+
 capture:
   # Seconds between screen captures. Lower = more thorough, more CPU.
   interval_seconds: 4

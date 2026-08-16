@@ -804,10 +804,26 @@ def _acquire_single_instance() -> bool:
 
 def main():
     import argparse
+    import getpass
+    from .main import load_config
     p = argparse.ArgumentParser(prog="eyeguard-menubar")
     p.add_argument("--config", default=str(Path(__file__).resolve().parent.parent
                                             / "config.yaml"))
     args = p.parse_args()
+
+    # The plist is system-wide, so launchd starts this for EVERY GUI session on
+    # the Mac, not just the monitored one. Bail out before touching anything
+    # (no capture, no file writes, no vault connection) if this isn't that
+    # account -- see the monitored_user comment in config.yaml for why this
+    # exists. Missing/unset is treated as "no gate" so older configs still work.
+    cfg_probe = load_config(args.config)
+    monitored_user = cfg_probe.get("monitored_user")
+    if monitored_user and getpass.getuser() != monitored_user:
+        print(f"[eyeguard] this account ({getpass.getuser()}) is not the "
+              f"monitored account ({monitored_user}); exiting without "
+              f"starting.", flush=True)
+        return
+
     if not _acquire_single_instance():
         print("[eyeguard] another instance is already running; exiting.",
               flush=True)
