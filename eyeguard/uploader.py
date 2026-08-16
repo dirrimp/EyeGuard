@@ -66,6 +66,7 @@ class SupabaseUploader:
         self.heartbeat = heartbeat
         self._suspended = False  # True between sleep/power-off and wake
         self._status_provider = None  # returns {screen_ok, frames_analyzed}
+        self._heartbeat_failing = False  # logged on first failure + recovery only
         self._lock = threading.Lock()          # guards the pending file
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -114,13 +115,32 @@ class SupabaseUploader:
 
     # ---- worker -------------------------------------------------------------
 
+    def _heartbeat_ok(self):
+        if self._heartbeat_failing:
+            print("[uploader] heartbeat recovered", flush=True)
+            self._heartbeat_failing = False
+
+    def _heartbeat_failed(self, e: Exception, context: str):
+        # Logged only on the FIRST failure and again on recovery -- a sustained
+        # outage would otherwise print once per retry_seconds forever. This is
+        # the only local trail a missed heartbeat ("gone dark") leaves; before
+        # this, the exception was swallowed entirely and a real outage was
+        # indistinguishable, after the fact, from no attempt having been made.
+        if not self._heartbeat_failing:
+            print(f"[uploader] heartbeat FAILING ({context}): "
+                  f"{type(e).__name__}: {e} -- retrying every "
+                  f"{self.retry_seconds}s, next log line is on recovery",
+                  flush=True)
+            self._heartbeat_failing = True
+
     def _worker(self):
         # Pulse once right away so "last seen" is fresh the moment we start.
         if self.heartbeat:
             try:
                 self.send_heartbeat("alive")
-            except Exception:
-                pass
+                self._heartbeat_ok()
+            except Exception as e:
+                self._heartbeat_failed(e, "startup pulse")
         while not self._stop.is_set():
             try:
                 self._flush()
@@ -130,8 +150,9 @@ class SupabaseUploader:
                 try:
                     self.send_heartbeat(
                         "clean_shutdown" if self._suspended else "alive")
-                except Exception:
-                    pass  # a missed pulse is exactly what "gone dark" detects
+                    self._heartbeat_ok()
+                except Exception as e:
+                    self._heartbeat_failed(e, "worker loop")
             self._wake.wait(self.retry_seconds)
             self._wake.clear()
 
@@ -143,16 +164,18 @@ class SupabaseUploader:
         self._suspended = True
         try:
             self.send_heartbeat("clean_shutdown")
-        except Exception:
-            pass
+            self._heartbeat_ok()
+        except Exception as e:
+            self._heartbeat_failed(e, "suspend beacon")
 
     def resume(self):
         """Mac woke: back to alive (also clears the gone-dark `alerted` flag)."""
         self._suspended = False
         try:
             self.send_heartbeat("alive")
-        except Exception:
-            pass
+            self._heartbeat_ok()
+        except Exception as e:
+            self._heartbeat_failed(e, "resume beacon")
 
     def send_heartbeat(self, status: str = "alive"):
         """Upsert the single device_status row. status='alive' also clears the
