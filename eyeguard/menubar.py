@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import threading
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -576,6 +577,18 @@ class EyeGuardApp(rumps.App):
                 with self._lock:
                     self._watching = False
                     self._status_text = f"capture error: {type(e).__name__}"
+                # The plist defines no log paths, so print() goes nowhere --
+                # write the full traceback to a file in the user's own data
+                # dir instead, so a recurring error is actually diagnosable
+                # without needing a one-off foreground run to catch it live.
+                try:
+                    err_dir = Path(self.cfg["logging"]["flag_log"]).resolve().parent
+                    err_dir.mkdir(parents=True, exist_ok=True)
+                    with (err_dir / "agent_error.log").open("a") as f:
+                        f.write(f"\n--- {datetime.now().isoformat()} ---\n")
+                        f.write(traceback.format_exc())
+                except Exception:
+                    pass  # logging the error must never itself crash the loop
             self._stop.wait(interval)
 
     @staticmethod
