@@ -48,6 +48,9 @@ HEARTBEAT_SECONDS = int(CONF.get("heartbeat_seconds", 20))
 ROUTER_CHECK_SECONDS = int(CONF.get("router_check_seconds", 300))
 ROUTER_BASELINE_PATH = Path(CONF.get("router_baseline_file",
                                      "/etc/eyeguard/router_baseline.json"))
+TOR_RELAY_CACHE_PATH = Path(CONF.get("tor_relay_cache_file",
+                                     "/etc/eyeguard/tor_relays.json"))
+TOR_REFRESH_SECONDS = int(CONF.get("tor_refresh_seconds", 21600))  # 6h
 
 # tcpdump's default -nn text output, e.g. "...: 36802+ Type65? ocsp2.apple.com. (33)"
 # -- works for any query type (A/AAAA/PTR/Type65/...) without enumerating them.
@@ -308,6 +311,145 @@ def doh_syn_loop(iface, host_ip):
         time.sleep(5)
 
 
+# ---- Tor bypass detection ---------------------------------------------------
+#
+# DNS-based detection (classify(), above) is blind to Tor by design: Tor
+# resolves the sites actually visited *inside* the encrypted circuit, so a
+# Tor Browser / Onion Browser session generates no plaintext DNS query for
+# whatever's actually being viewed -- there's nothing for classify() to see.
+# The wire capture still sees the raw TCP connection to whatever Tor guard
+# relay the phone's client picks as its first hop, though, so that's the
+# signal used here: match the destination of each outbound TCP:443 SYN
+# against the current set of public Guard-flagged relay IPs (Tor's own
+# Onionoo directory API, https://onionoo.torproject.org) -- a client's FIRST
+# hop must be Guard-flagged, so this is the precise signal, not just "any
+# known Tor relay" (which would also match IPs a client never connects to
+# directly, e.g. middle/exit-only relays).
+#
+# Guard relay churn means this can't be a static list the way DOH_IPS is (a
+# handful of large public DNS providers that rarely change) -- refreshed on
+# TOR_REFRESH_SECONDS, ~6000 entries currently. That's also too large for a
+# tcpdump BPF filter enumerating every IP the way _doh_filter() does (16
+# entries is fine, thousands isn't) -- so unlike DoH, the tcpdump filter here
+# is broad (every outbound TCP:443 SYN) and the actual IP match happens in
+# Python against an in-memory set (O(1), trivial even at phone-browsing SYN
+# volume).
+#
+# Known, accepted residual (not caught by this): pluggable transports
+# (obfs4, meek, snowflake) and user-configured bridges are specifically
+# designed to look like ordinary HTTPS to exactly this kind of IP-list
+# detection -- this catches default Tor Browser / Onion Browser usage (no
+# bridge configured), which is the overwhelming common case, not a
+# bridge-configured evasion attempt. Same tamper-evident philosophy as the
+# DoH layer's own documented residual (self-hosted DoH / ECH) -- flagged
+# honestly rather than silently claimed as complete coverage.
+
+_TOR_LOCK = threading.Lock()
+_TOR_STATE = {"ips": set()}
+
+
+def _load_tor_cache():
+    """Best-effort local cache so a restart isn't blind until the first live
+    fetch succeeds -- especially relevant right after a router reboot, when
+    outbound HTTPS to onionoo.torproject.org may not be up yet."""
+    try:
+        data = json.loads(TOR_RELAY_CACHE_PATH.read_text())
+        return set(data.get("ips", []))
+    except Exception:
+        return set()
+
+
+def _fetch_tor_guard_ips():
+    """Current public Guard-flagged relay IPv4 addresses, or None on any
+    failure (network down, malformed response, etc.) -- caller must keep the
+    last-known-good set rather than wiping it out on a transient fetch miss."""
+    try:
+        out = _curl(["https://onionoo.torproject.org/summary"
+                      "?type=relay&running=true&flag=Guard"], timeout=30)
+        data = json.loads(out)
+        ips = set()
+        for relay in data.get("relays", []):
+            for addr in relay.get("a", []):
+                if addr and not addr.startswith("["):  # skip bracketed IPv6
+                    ips.add(addr)
+        return ips if ips else None
+    except Exception as ex:
+        print(f"[eyeguard-phone] tor relay fetch {type(ex).__name__}: {ex}",
+              flush=True)
+        return None
+
+
+def tor_refresh_loop():
+    with _TOR_LOCK:
+        _TOR_STATE["ips"] = _load_tor_cache()
+    print(f"[eyeguard-phone] tor relay cache loaded: "
+          f"{len(_TOR_STATE['ips'])} IPs", flush=True)
+    while True:
+        fresh = _fetch_tor_guard_ips()
+        if fresh:
+            with _TOR_LOCK:
+                _TOR_STATE["ips"] = fresh
+            try:
+                TOR_RELAY_CACHE_PATH.write_text(json.dumps({"ips": sorted(fresh)}))
+            except Exception:
+                pass
+            print(f"[eyeguard-phone] tor relay list refreshed: {len(fresh)} IPs",
+                  flush=True)
+        # else: keep whatever's already loaded (memory or the on-disk cache
+        # from a prior run) -- a failed refresh must never blank the list.
+        time.sleep(TOR_REFRESH_SECONDS)
+
+
+_TOR_THROTTLE = 300  # same rationale as _DOH_THROTTLE -- collapse retry bursts
+
+
+def _handle_tor_attempt(ip):
+    now = time.time()
+    with _LOCK:
+        seen = _STATE.setdefault("tor_seen", {})
+        last = seen.get(ip, 0)
+        if now - last < _TOR_THROTTLE:
+            return
+        seen[ip] = now
+    sb_post("/rest/v1/flags", {
+        "flagged_at": now_iso(), "verdict": "flagged",
+        "reason": f"phone-signal: Tor connection to guard relay {ip}",
+        "app": "iPhone", "url": None, "window_title": f"Tor guard relay: {ip}",
+        "grade": "Likely", "risk": "high", "is_nudity": False})
+
+
+def _tor_syn_filter(host_ip):
+    # Broad on purpose (see module comment above) -- every outbound
+    # TCP:443 SYN, matched against the Tor relay set in Python, not here.
+    return (f"tcp and src host {host_ip} and dst port 443 and "
+            f"tcp[tcpflags] & (tcp-syn|tcp-ack) == tcp-syn")
+
+
+def tor_syn_loop(iface, host_ip):
+    """Same respawn-forever pattern as capture_loop/doh_syn_loop."""
+    filt = _tor_syn_filter(host_ip)
+    while True:
+        try:
+            proc = subprocess.Popen(
+                ["tcpdump", "-i", iface, "-l", "-nn", filt],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, bufsize=1)
+            for line in proc.stdout:
+                m = SYN_DST_RE.search(line)
+                if not m:
+                    continue
+                ip = m.group(1)
+                with _TOR_LOCK:
+                    is_tor = ip in _TOR_STATE["ips"]
+                if is_tor:
+                    _handle_tor_attempt(ip)
+            proc.wait()
+        except Exception as ex:
+            print(f"[eyeguard-phone] tor_syn({iface}) {type(ex).__name__}: {ex}",
+                  flush=True)
+        time.sleep(5)
+
+
 # ---- liveness / heartbeat ---------------------------------------------------
 
 def heartbeat_loop():
@@ -548,6 +690,7 @@ def router_check_loop():
 
 def main():
     threading.Thread(target=router_check_loop, daemon=True).start()
+    threading.Thread(target=tor_refresh_loop, daemon=True).start()
     threads = []
     if HOME_IP:
         threads.append(threading.Thread(target=capture_loop,
@@ -560,6 +703,12 @@ def main():
                                         args=(HOME_IFACE, HOME_IP), daemon=True))
     if WG_IFACE and WG_IP:
         threads.append(threading.Thread(target=doh_syn_loop,
+                                        args=(WG_IFACE, WG_IP), daemon=True))
+    if HOME_IP:
+        threads.append(threading.Thread(target=tor_syn_loop,
+                                        args=(HOME_IFACE, HOME_IP), daemon=True))
+    if WG_IFACE and WG_IP:
+        threads.append(threading.Thread(target=tor_syn_loop,
                                         args=(WG_IFACE, WG_IP), daemon=True))
     if not threads:
         print("[eyeguard-phone] no home_ip or wg_interface+wg_ip configured "

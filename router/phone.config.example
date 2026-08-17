@@ -21,6 +21,10 @@
   "router_check_seconds": 300,
   "router_baseline_file": "/etc/eyeguard/router_baseline.json",
 
+  "_tor": "Tor bypass detection: DNS-based classify() is blind to Tor by design (it resolves sites inside the encrypted circuit), so this matches outbound TCP:443 SYNs against the current public Guard-relay IP set (Tor's own Onionoo directory API) -- a client's first hop must be Guard-flagged. Refreshed periodically since guard relays churn; a failed refresh keeps the last-known-good list rather than going blind. Known accepted residual: pluggable transports/bridges (obfs4, meek, snowflake) are designed to evade exactly this kind of IP-list detection -- this catches default Tor Browser/Onion Browser usage, not a bridge-configured evasion.",
+  "tor_refresh_seconds": 21600,
+  "tor_relay_cache_file": "/etc/eyeguard/tor_relays.json",
+
   "_terms": "Reuse the Mac's text.terms watchlist -- an explicit domain = red.",
   "explicit_terms": ["porn","pornhub","xvideos","xhamster","xnxx","redtube",
     "youporn","brazzers","onlyfans","chaturbate","spankbang","xxx","nude",

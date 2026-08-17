@@ -50,6 +50,23 @@ the same red/green feed the Mac produces.
   per IP so retry bursts collapse into one alert. Known accepted residual: a
   self-hosted DoH server on an unlisted IP, or Encrypted Client Hello, isn't
   caught by any of this.
+- 🧅 **Tor bypass detection** (added 2026-08-17) — DNS-based detection is
+  blind to Tor by design: it resolves whatever's actually visited *inside*
+  the encrypted circuit, so there's no plaintext DNS query for the green/red
+  classifier to see. Instead this watches for the initial SYN of any
+  outbound TCP:443 connection matching the phone's current destination
+  against the public Guard-flagged relay IP set (Tor's own Onionoo directory
+  API, `onionoo.torproject.org`) — a client's first hop must be
+  Guard-flagged, so this is the precise signal, not just "any known Tor
+  relay." Refreshed every `tor_refresh_seconds` (default 6h; guard relay
+  churn means a static list would go stale) with a local cache so a router
+  reboot isn't blind until the first live fetch succeeds, and a failed
+  refresh keeps the last-known-good list rather than going blind. Red flag +
+  email, throttled 5 min per IP. Known accepted residual: pluggable
+  transports/bridges (obfs4, meek, snowflake) are specifically designed to
+  look like ordinary HTTPS to exactly this kind of IP-list detection — this
+  catches default Tor Browser / Onion Browser usage (no bridge configured),
+  not a deliberately bridge-configured evasion attempt.
 
 ## Install (on the Flint 2, SSH in as root)
 
