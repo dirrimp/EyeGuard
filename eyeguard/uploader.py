@@ -26,8 +26,11 @@ erase it, closing the gap the secret key couldn't close for storage.
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
+import socket
+import subprocess
 import threading
 import urllib.error
 import urllib.request
@@ -36,6 +39,70 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 _NS = uuid.UUID("e7e9f1c0-0000-4000-8000-eeeeeeeeeeee")  # stable namespace
+
+# ---- route every HTTPS call off the system default route -----------------
+# The default route is often an on-demand VPN tunnel (confirmed live
+# 2026-08-17: scutil flags it "Transient Connection", and it was caught
+# mid-DNS-resolution-failure during a real gone-dark investigation). This
+# Mac's own network state shouldn't be able to interrupt the accountability
+# channel, so every request below binds to the physical interface directly
+# via IP_BOUND_IF, independent of whatever the tunnel is doing at that
+# moment. IP_BOUND_IF=25, confirmed from this machine's own
+# /usr/include/netinet/in.h (not guessed/copied from docs).
+_IP_BOUND_IF = 25
+
+
+def _physical_interface() -> str | None:
+    """First non-tunnel interface in macOS's own priority order (scutil
+    --nwi's own "Network interfaces:" line -- the same list macOS itself
+    uses to pick the default route), or None if none found. Re-checked on
+    every connection attempt (not cached) since the active interface can
+    change -- Wi-Fi<->Ethernet, docking -- while this process runs for days.
+    Never raises: a scutil hiccup should fall back to default routing, not
+    break every request."""
+    try:
+        out = subprocess.run(["scutil", "--nwi"], capture_output=True,
+                              text=True, timeout=5).stdout
+    except Exception:
+        return None
+    for line in out.splitlines():
+        if line.startswith("Network interfaces:"):
+            for name in line.split(":", 1)[1].split():
+                if not name.startswith(("utun", "ppp", "ipsec", "awdl")):
+                    return name
+    return None
+
+
+class _BoundHTTPSConnection(http.client.HTTPSConnection):
+    """Binds to the physical interface before connecting, so this request's
+    route is independent of the system default route. Falls back to normal
+    (default-route-following) behavior if no physical interface is found or
+    the bind/connect itself fails -- this can only ever ADD a more reliable
+    path, never remove the one that already existed before this."""
+
+    def connect(self):
+        iface = _physical_interface()
+        if not iface:
+            super().connect()
+            return
+        try:
+            ifindex = socket.if_nametoindex(iface)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.IPPROTO_IP, _IP_BOUND_IF, ifindex)
+            if self.timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                sock.settimeout(self.timeout)
+            sock.connect((self.host, self.port))
+            self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+        except OSError:
+            super().connect()  # bind/connect on the physical interface failed
+
+
+class _BoundHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_BoundHTTPSConnection, req)
+
+
+_opener = urllib.request.build_opener(_BoundHTTPSHandler)
 
 
 def _score(reason: str) -> float | None:
@@ -216,7 +283,7 @@ class SupabaseUploader:
             headers=self._headers({
                 "Content-Type": "application/json",
                 "Prefer": "resolution=merge-duplicates,return=minimal"}))
-        with urllib.request.urlopen(req, timeout=15) as r:
+        with _opener.open(req, timeout=15) as r:
             r.read()
 
     def _flush(self):
@@ -309,7 +376,7 @@ class SupabaseUploader:
             url, data=data, method="POST",
             headers=self._anon_headers({"Content-Type": "image/jpeg"}))
         try:
-            with urllib.request.urlopen(req, timeout=20) as r:
+            with _opener.open(req, timeout=20) as r:
                 r.read()
         except urllib.error.HTTPError as e:
             if e.code == 409:  # already uploaded on a previous attempt
@@ -326,5 +393,5 @@ class SupabaseUploader:
             headers=self._headers({
                 "Content-Type": "application/json",
                 "Prefer": "resolution=ignore-duplicates,return=minimal"}))
-        with urllib.request.urlopen(req, timeout=20) as r:
+        with _opener.open(req, timeout=20) as r:
             r.read()
