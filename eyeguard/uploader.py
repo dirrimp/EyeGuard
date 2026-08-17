@@ -117,7 +117,8 @@ class SupabaseUploader:
 
     def _heartbeat_ok(self):
         if self._heartbeat_failing:
-            print("[uploader] heartbeat recovered", flush=True)
+            print(f"[uploader] {datetime.now().isoformat()} heartbeat recovered",
+                  flush=True)
             self._heartbeat_failing = False
 
     def _heartbeat_failed(self, e: Exception, context: str):
@@ -126,9 +127,11 @@ class SupabaseUploader:
         # the only local trail a missed heartbeat ("gone dark") leaves; before
         # this, the exception was swallowed entirely and a real outage was
         # indistinguishable, after the fact, from no attempt having been made.
+        # Timestamped so a later alert email can actually be correlated to a
+        # specific line here instead of just "somewhere in this log".
         if not self._heartbeat_failing:
-            print(f"[uploader] heartbeat FAILING ({context}): "
-                  f"{type(e).__name__}: {e} -- retrying every "
+            print(f"[uploader] {datetime.now().isoformat()} heartbeat FAILING "
+                  f"({context}): {type(e).__name__}: {e} -- retrying every "
                   f"{self.retry_seconds}s, next log line is on recovery",
                   flush=True)
             self._heartbeat_failing = True
