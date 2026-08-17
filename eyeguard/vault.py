@@ -25,6 +25,7 @@ import struct
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 from .uploader import SupabaseUploader
@@ -102,6 +103,7 @@ _kCFRunLoopDefaultMode = ctypes.c_void_p.in_dll(_CF, "kCFRunLoopDefaultMode")
 # IOMessage.h: iokit_common_msg(x) = 0xe0000000 | x
 _K_CAN_SLEEP = 0xE0000270
 _K_WILL_SLEEP = 0xE0000280
+_K_WILL_NOT_SLEEP = 0xE0000290
 _K_HAS_POWERED_ON = 0xE0000300
 
 
@@ -121,8 +123,19 @@ class SleepWatcher:
         self._callback = None  # kept alive so ctypes can't GC the trampoline
 
     def _handle(self, refcon, service, message_type, message_arg):
+        # Logged unconditionally (not just on failure) -- without this line,
+        # "suspend() ran and quietly succeeded" and "the callback never fired
+        # at all" are indistinguishable from the logs alone, which is exactly
+        # the gap that made a real gone-dark alert (2026-08-17, lid-close at
+        # ~00:07) undiagnosable after the fact: uploader.py only logs
+        # heartbeat FAILURES, so a silent success looks identical to a silent
+        # non-event. Timestamped so it can actually be correlated to when an
+        # alert email landed, unlike every other line in this log before this.
+        ts = datetime.now().isoformat()
         try:
             if message_type == _K_WILL_SLEEP:
+                print(f"[vault] {ts} IOKit: WillSleep -- calling suspend()",
+                      flush=True)
                 try:
                     self.uploader.suspend()
                 except Exception:
@@ -130,7 +143,25 @@ class SleepWatcher:
                 _IOKit.IOAllowPowerChange(self._root_port, message_arg)
             elif message_type == _K_CAN_SLEEP:
                 _IOKit.IOAllowPowerChange(self._root_port, message_arg)
+            elif message_type == _K_WILL_NOT_SLEEP:
+                # Sleep was requested then cancelled/aborted (e.g. vetoed by
+                # another app, or the system backed out) -- WillSleep already
+                # ran and set _suspended=True, but since the Mac never
+                # actually slept, there's no corresponding HasPoweredOn to
+                # clear it. Without this, _suspended stays stuck True
+                # indefinitely: every future heartbeat would keep posting
+                # 'clean_shutdown' while the Mac is genuinely awake and in
+                # use, silently disabling the gone-dark alert for real. Treat
+                # it the same as a wake -- back to alive.
+                print(f"[vault] {ts} IOKit: WillNotSleep (sleep cancelled) "
+                      f"-- calling resume()", flush=True)
+                try:
+                    self.uploader.resume()
+                except Exception:
+                    pass
             elif message_type == _K_HAS_POWERED_ON:
+                print(f"[vault] {ts} IOKit: HasPoweredOn -- calling resume()",
+                      flush=True)
                 try:
                     self.uploader.resume()
                 except Exception:
