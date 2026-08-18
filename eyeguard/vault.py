@@ -212,7 +212,11 @@ class VaultDaemon:
         with self._lock:
             fresh = (time.time() - self._last_agent) < self.agent_timeout
             st = dict(self._last_status)
-        if not fresh:
+        # A just-woken agent hasn't had a chance to reconnect yet -- its
+        # staleness right at wake reflects the sleep duration, not a real
+        # blind condition. See SupabaseUploader.recently_resumed()'s
+        # docstring for the live-confirmed failure mode this closes.
+        if not fresh and not self.uploader.recently_resumed():
             st["screen_ok"] = False  # capture agent went silent -> blind
         return st
 

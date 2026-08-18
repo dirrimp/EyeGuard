@@ -32,6 +32,7 @@ import re
 import socket
 import subprocess
 import threading
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -134,6 +135,7 @@ class SupabaseUploader:
         self._suspended = False  # True between sleep/power-off and wake
         self._status_provider = None  # returns {screen_ok, frames_analyzed}
         self._heartbeat_failing = False  # logged on first failure + recovery only
+        self._resumed_at = 0.0  # time.time() of the last resume() call
         self._lock = threading.Lock()          # guards the pending file
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -241,11 +243,26 @@ class SupabaseUploader:
     def resume(self):
         """Mac woke: back to alive (also clears the gone-dark `alerted` flag)."""
         self._suspended = False
+        self._resumed_at = time.time()
         try:
             self.send_heartbeat("alive")
             self._heartbeat_ok()
         except Exception as e:
             self._heartbeat_failed(e, "resume beacon")
+
+    def recently_resumed(self, grace_seconds: int = 120) -> bool:
+        """True for a window after resume() -- the session agent is frozen
+        for the ENTIRE sleep duration (unlike this daemon, which IOKit can
+        wake right at the boundary), so its last-contact timestamp is stale
+        by however long the sleep lasted the instant we wake. Without this,
+        resume()'s own immediate "alive" heartbeat would carry a false
+        screen_ok=false (the daemon's own staleness check has no way to tell
+        "genuinely blind" from "just hasn't reconnected yet") -- confirmed
+        live: this fired a real 'lost view of the screen' alert on ordinary
+        wake, every time, since the agent's actual catch-up window
+        (comfortably under agent_timeout once it resumes) is not
+        distinguishable from the sleep-induced staleness that preceded it."""
+        return time.time() - self._resumed_at < grace_seconds
 
     def send_heartbeat(self, status: str = "alive"):
         """Upsert the single device_status row. status='alive' also clears the
