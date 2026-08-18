@@ -60,7 +60,7 @@ begin
   perform public.eg_send_email('🔴 EyeGuard alert — ' || kind,
     format('<p><b>%s was flagged.</b></p><p><b>When:</b> %s<br>'
         || '<b>Where:</b> %s</p><p>The review image is on the dashboard: '
-        || '<a href="https://shrimp-iord.github.io/EyeGuard/">open dashboard</a></p>',
+        || '<a href="https://dirrimp.github.io/EyeGuard/">open dashboard</a></p>',
         kind, whenn, loc));
   return NEW;
 end $$;
