@@ -105,6 +105,8 @@ _K_CAN_SLEEP = 0xE0000270
 _K_WILL_SLEEP = 0xE0000280
 _K_WILL_NOT_SLEEP = 0xE0000290
 _K_HAS_POWERED_ON = 0xE0000300
+_K_WILL_POWER_OFF = 0xE0000250  # real shutdown, not sleep
+_K_WILL_RESTART = 0xE0000310
 
 
 class SleepWatcher:
@@ -166,6 +168,33 @@ class SleepWatcher:
                     self.uploader.resume()
                 except Exception:
                     pass
+            elif message_type in (_K_WILL_POWER_OFF, _K_WILL_RESTART):
+                # A real shutdown/restart is a DIFFERENT IOKit message family
+                # from sleep (WillSleep never fires for this) -- added after
+                # noticing this daemon never registered for it at all, so an
+                # actual power-off/restart got zero coverage from any of the
+                # sleep-specific work tonight, falling back entirely to the
+                # old agent-side NSWorkspace+socket path (the original
+                # race-prone mechanism). NOT verified live (would require an
+                # actual shutdown to trigger, which isn't something to force
+                # just to test) -- Apple's IORegisterForSystemPower docs
+                # focus on sleep/wake, so whether these two message types are
+                # actually delivered through this same registration is
+                # unconfirmed. Harmless if they never fire; real coverage if
+                # they do. Deliberately NOT a generic SIGTERM handler instead
+                # -- that would conflate "Dad legitimately stopped
+                # monitoring" with "the Mac is shutting down" and silently
+                # defeat gone-dark's whole purpose as a tamper check (see
+                # suspend()'s own docstring: a manual stop must still alert).
+                kind = "WillPowerOff" if message_type == _K_WILL_POWER_OFF \
+                    else "WillRestart"
+                print(f"[vault] {ts} IOKit: {kind} -- calling suspend()",
+                      flush=True)
+                try:
+                    self.uploader.suspend()
+                except Exception:
+                    pass
+                _IOKit.IOAllowPowerChange(self._root_port, message_arg)
         except Exception:
             pass  # a bad power notification must never kill this thread
 
