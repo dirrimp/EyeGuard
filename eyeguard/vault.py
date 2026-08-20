@@ -230,7 +230,18 @@ class VaultDaemon:
         self.expected_exec = os.path.realpath(sys.executable)
         self.expected_launcher = os.path.realpath(
             expected_launcher or str(_BASE / "run_agent.py"))
-        self._last_agent = 0.0
+        # Starting this at 0.0 (epoch) meant the FIRST heartbeat after every
+        # daemon restart -- which fires immediately, before the agent has any
+        # chance to reconnect -- computed staleness against Jan 1 1970 and
+        # forced screen_ok=False into it. Confirmed live (2026-08-19 22:09:41,
+        # via this daemon's own new transition logging): "no contact for
+        # 1787191782s" -- ~56 years -- tripped a real blind alert 22s after a
+        # routine restart, 53s before the agent had even reconnected. Starting
+        # this at "now" instead gives the agent the same normal agent_timeout
+        # grace window a fresh restart should get, matching how
+        # recently_resumed() already protects the equivalent wake-from-sleep
+        # case -- this was the cold-start version of the same bug.
+        self._last_agent = time.time()
         self._last_status = {"screen_ok": True, "frames_analyzed": 0}
         self._lock = threading.Lock()
         self._reported_blind = False  # last value WE sent upstream, for edge logging
