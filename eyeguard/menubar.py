@@ -108,6 +108,7 @@ class EyeGuardApp(rumps.App):
         self._last_flag_time = 0.0
         self._frames_analyzed = 0
         self._screen_ok = True          # False = blind (black or frozen wallpaper)
+        self._last_probe_ok = True      # edge tracking for _log_diag transitions
         self._uploader = None           # set once the detection loop starts
         self._log_seen = False          # have we ever seen a non-empty flag log?
         self._log_missing = 0           # consecutive checks the log was missing
@@ -300,6 +301,22 @@ class EyeGuardApp(rumps.App):
                 print(f"[tamper] flagged frame '{name}' edited — reported",
                       flush=True)
         self._frames_seen = current
+
+    def _log_diag(self, msg: str):
+        """Append a timestamped line to agent_diagnostic.log, next to
+        agent_error.log. The plist defines no stdout/stderr path at all, so a
+        bare print() -- like the brightness-probe PROBLEM line below --
+        genuinely goes nowhere; a real blind alert (2026-08-19, ~19:34/20:20)
+        with no corresponding sleep/wake event left zero trace anywhere
+        because of exactly this gap. Best-effort: a failure here must never
+        break the detection loop that's trying to report through it."""
+        try:
+            err_dir = Path(self.cfg["logging"]["flag_log"]).resolve().parent
+            err_dir.mkdir(parents=True, exist_ok=True)
+            with (err_dir / "agent_diagnostic.log").open("a") as f:
+                f.write(f"{datetime.now().isoformat()} {msg}\n")
+        except Exception:
+            pass
 
     # ---- power events (sleep / wake / shutdown) -----------------------------
 
@@ -502,6 +519,13 @@ class EyeGuardApp(rumps.App):
                         print(f"[probe] PROBLEM brightness={bright} "
                               f"frames={frames} frozen={frozen} "
                               f"(no screen access?)", flush=True)
+                    if ok != self._last_probe_ok:  # log the transition, durably
+                        if not ok:
+                            self._log_diag(f"probe PROBLEM: brightness={bright} "
+                                           f"frames={frames} frozen={frozen}")
+                        else:
+                            self._log_diag("probe recovered: screen_ok back to True")
+                        self._last_probe_ok = ok
 
                     # Detector self-test: prove the ML pipeline still flags, so a
                     # silent breakage doesn't masquerade as a clean feed.

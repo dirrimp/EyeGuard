@@ -233,6 +233,7 @@ class VaultDaemon:
         self._last_agent = 0.0
         self._last_status = {"screen_ok": True, "frames_analyzed": 0}
         self._lock = threading.Lock()
+        self._reported_blind = False  # last value WE sent upstream, for edge logging
         # The daemon's heartbeat carries the agent's last-known screen health,
         # but only while the agent is fresh — a silent agent reads as blind.
         uploader.set_status_provider(self._status)
@@ -240,13 +241,38 @@ class VaultDaemon:
     def _status(self) -> dict:
         with self._lock:
             fresh = (time.time() - self._last_agent) < self.agent_timeout
+            last_agent = self._last_agent
             st = dict(self._last_status)
         # A just-woken agent hasn't had a chance to reconnect yet -- its
         # staleness right at wake reflects the sleep duration, not a real
         # blind condition. See SupabaseUploader.recently_resumed()'s
         # docstring for the live-confirmed failure mode this closes.
-        if not fresh and not self.uploader.recently_resumed():
+        agent_silent = not fresh and not self.uploader.recently_resumed()
+        if agent_silent:
             st["screen_ok"] = False  # capture agent went silent -> blind
+        # Logged only on the transition, not every call (this runs on every
+        # heartbeat) -- a real blind alert (2026-08-19, ~19:34/20:20) had NO
+        # corresponding sleep/wake event and left zero trace anywhere: the
+        # agent's own plist defines no stdout/stderr log path (its print()
+        # diagnostics go nowhere), and this daemon never recorded WHY it
+        # decided the agent was silent. This closes that gap -- the next
+        # occurrence will show the exact staleness duration and whether it
+        # was the daemon's own timeout tripping (agent silent >agent_timeout
+        # for a non-sleep reason -- e.g. the detection loop stalling on a
+        # slow inference/OCR cycle) versus the agent itself self-reporting
+        # screen_ok=false (a real capture/permission problem).
+        will_report_blind = bool(st.get("screen_ok") is False)
+        if will_report_blind != self._reported_blind:
+            ts = datetime.now().isoformat()
+            if will_report_blind:
+                idle = time.time() - last_agent
+                print(f"[vault] {ts} agent presumed blind: no contact for "
+                      f"{idle:.0f}s (agent_timeout={self.agent_timeout}s)",
+                      flush=True)
+            else:
+                print(f"[vault] {ts} agent no longer presumed blind",
+                      flush=True)
+            self._reported_blind = will_report_blind
         return st
 
     def _handle(self, msg: dict):
