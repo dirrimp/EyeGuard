@@ -108,6 +108,12 @@ _K_HAS_POWERED_ON = 0xE0000300
 _K_WILL_POWER_OFF = 0xE0000250  # real shutdown, not sleep
 _K_WILL_RESTART = 0xE0000310
 
+# How long the agent's OWN self-reported screen_ok=false may persist before
+# VaultDaemon._status() forwards it upstream as a real blind condition.
+# Confirmed live (2026-08-20 23:37-23:39): a post-wake black/frozen probe
+# self-resolved in ~2m43s with no real problem. Comfortably longer than that.
+SCREEN_OK_GRACE_SECONDS = 180
+
 
 class SleepWatcher:
     """Root-level sleep/wake via IOKit, so the vault daemon reacts directly --
@@ -242,7 +248,10 @@ class VaultDaemon:
         # recently_resumed() already protects the equivalent wake-from-sleep
         # case -- this was the cold-start version of the same bug.
         self._last_agent = time.time()
-        self._last_status = {"screen_ok": True, "frames_analyzed": 0}
+        self._last_status = {"screen_ok": True, "frames_analyzed": 0,
+                             "detector_ok": True}
+        self._blind_since: float | None = None  # when the agent's own
+                                                   # screen_ok=false report started
         self._lock = threading.Lock()
         self._reported_blind = False  # last value WE sent upstream, for edge logging
         # The daemon's heartbeat carries the agent's last-known screen health,
@@ -253,33 +262,55 @@ class VaultDaemon:
         with self._lock:
             fresh = (time.time() - self._last_agent) < self.agent_timeout
             last_agent = self._last_agent
+            blind_since = self._blind_since
             st = dict(self._last_status)
         # A just-woken agent hasn't had a chance to reconnect yet -- its
         # staleness right at wake reflects the sleep duration, not a real
         # blind condition. See SupabaseUploader.recently_resumed()'s
         # docstring for the live-confirmed failure mode this closes.
         agent_silent = not fresh and not self.uploader.recently_resumed()
+        cause = None
         if agent_silent:
             st["screen_ok"] = False  # capture agent went silent -> blind
+            cause = "silent"
+        elif st.get("screen_ok") is False:
+            # The agent is FRESH (actively reporting) but self-reported
+            # screen_ok=false itself -- e.g. its own frozen/black-screen probe
+            # tripped, often right after a real wake while the display is
+            # still initializing. Confirmed live (2026-08-20 23:37-23:39) this
+            # self-resolves in ~2-3 minutes without ever being a real problem,
+            # same as the wake-grace and cold-start cases already fixed --
+            # just triggered from the agent's own report instead of this
+            # daemon's staleness inference. Give it SCREEN_OK_GRACE_SECONDS to
+            # clear before forwarding it upstream as a real blind condition.
+            if blind_since is not None and time.time() - blind_since < SCREEN_OK_GRACE_SECONDS:
+                st["screen_ok"] = True
+            else:
+                cause = "self-reported"
         # Logged only on the transition, not every call (this runs on every
         # heartbeat) -- a real blind alert (2026-08-19, ~19:34/20:20) had NO
         # corresponding sleep/wake event and left zero trace anywhere: the
         # agent's own plist defines no stdout/stderr log path (its print()
         # diagnostics go nowhere), and this daemon never recorded WHY it
-        # decided the agent was silent. This closes that gap -- the next
-        # occurrence will show the exact staleness duration and whether it
-        # was the daemon's own timeout tripping (agent silent >agent_timeout
-        # for a non-sleep reason -- e.g. the detection loop stalling on a
-        # slow inference/OCR cycle) versus the agent itself self-reporting
-        # screen_ok=false (a real capture/permission problem).
+        # decided the agent was silent. This closes that gap -- the log now
+        # distinguishes "daemon's own timeout tripped" (agent_silent -- no
+        # contact for a non-sleep reason, e.g. the detection loop stalling on
+        # a slow inference/OCR cycle) from "agent self-reported blind" (a
+        # real capture/frozen/permission problem that outlasted the grace
+        # window), instead of one misleading "no contact" message for both.
         will_report_blind = bool(st.get("screen_ok") is False)
         if will_report_blind != self._reported_blind:
             ts = datetime.now().isoformat()
-            if will_report_blind:
+            if will_report_blind and cause == "silent":
                 idle = time.time() - last_agent
                 print(f"[vault] {ts} agent presumed blind: no contact for "
                       f"{idle:.0f}s (agent_timeout={self.agent_timeout}s)",
                       flush=True)
+            elif will_report_blind:
+                idle = time.time() - blind_since if blind_since else 0.0
+                print(f"[vault] {ts} agent self-reported blind for "
+                      f"{idle:.0f}s (grace={SCREEN_OK_GRACE_SECONDS}s) "
+                      f"-- forwarding as real", flush=True)
             else:
                 print(f"[vault] {ts} agent no longer presumed blind",
                       flush=True)
@@ -303,9 +334,22 @@ class VaultDaemon:
             with self._lock:
                 self._last_agent = time.time()
                 if "screen_ok" in s:
-                    self._last_status["screen_ok"] = bool(s["screen_ok"])
+                    ok = bool(s["screen_ok"])
+                    self._last_status["screen_ok"] = ok
+                    if not ok:
+                        if self._blind_since is None:
+                            self._blind_since = time.time()
+                    else:
+                        self._blind_since = None
                 if "frames_analyzed" in s:
                     self._last_status["frames_analyzed"] = int(s["frames_analyzed"])
+                # Previously silently dropped -- the agent has always sent this
+                # (menubar.py's status provider includes it), but this daemon
+                # never read it, so eg_check_gone_dark()'s self-test-failure
+                # check (part c: "detector broken") could never fire in split
+                # mode -- device_status.detector_ok never got a real value.
+                if "detector_ok" in s:
+                    self._last_status["detector_ok"] = bool(s["detector_ok"])
 
     def serve(self):
         try:
