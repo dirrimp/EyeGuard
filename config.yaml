@@ -127,6 +127,23 @@ arbiter:
     - "a male bodybuilder or shirtless male athlete"
     - "a man in a tank top with bare arms"
     - "a naked or nude man"
+    # VERIFIED against the actual real flagged frames from the strongman-video
+    # session (not guessed): all 3 inspected tiles were the MALE competitor,
+    # not a woman at all -- CLIP misgendered bending-over posture + skin/tattoo
+    # texture. The existing male anchors above are all torso/chest-framed and
+    # gave no safe home for these. Result of empirical testing against those
+    # 3 real images, iterated twice: the skin/tattoo case flips fully to SAFE;
+    # the bending-pants case measurably improves (0.93->0.81 mass) but stays
+    # above yellow_threshold; the tight-briefs case is UNCHANGED (0.89, no
+    # measurable effect at all) -- a genuine CLIP-ViT-B/32 bias for this
+    # specific posture/framing that prompt-list tuning alone doesn't fully
+    # overcome. Kept because it measurably helps some real cases and provably
+    # regresses nothing; not claimed as a full fix for this content category.
+    - "a man's butt in tight pants"
+    - "a man bending over in athletic pants"
+    - "a man in tight underwear or briefs"
+    - "a closeup of tattooed skin or a tattoo on an arm or leg"
+    - "a closeup of hairy human skin texture"
     # normal CLOTHED people — strong buckets so ordinary photos of women/men
     # don't leak into the suggestive prompts. (This is the main false-positive fix.)
     - "a woman in normal everyday clothing"
@@ -160,6 +177,19 @@ arbiter:
     - "a meme with text"
     - "a logo, icon, or graphic design"
     - "a sports game or athlete playing sports"
+    # WOMEN'S ATHLETIC COMPETITION FOOTAGE — the male-athlete anchors above
+    # ("a man working out...", "a male bodybuilder...") had no female
+    # counterpart, so CLIP had no safe home for it: a real YouTube session
+    # (Eddie Hall strongman videos, 21 flags in ~1h15m, scores 0.85-0.95)
+    # misread female competitors/spectators in athletic wear against
+    # suggestive_prompts' "a woman in a sports bra" / "a woman wearing gym or
+    # athletic clothing" with nothing on the safe side to compete. Scoped
+    # narrowly to BROADCAST/COMPETITION content specifically (not a general
+    # "woman exercising" anchor) so this doesn't broadly dull detection of
+    # athletic-wear content in other, more personal contexts.
+    - "a female athlete competing in a televised sports competition"
+    - "a women's strength, powerlifting, or athletic competition broadcast"
+    - "a professional sports broadcast with commentators and competitors"
     # WEBCAM / self-recording (Photo Booth was 64 FPs: a young man in a cream
     # t-shirt playing guitar — shirt + guitar body read as "butt in tight pants")
     - "a man on a webcam or video call"
