@@ -656,8 +656,22 @@ vm_monitor:
 # this repo; generate the keypair on a separate machine you control and
 # paste only the public half below.
 encryption:
-  enabled: false   # flip to true once public_key_pem below is filled in
-  public_key_pem: ""
+  enabled: true
+  public_key_pem: |
+    -----BEGIN PUBLIC KEY-----
+    MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAqOrqMSxLqjLZg82erYo4
+    MwaWBecVQBCksUXzhrrgU32UeWUv5vCqYNwMnJTXOGyaWCrzpM8nhuxSfbBsXeq4
+    UW0ZW5Qm1JaFFJS7TaR/pwcp+hRROpziKbs629A1ydLm/Mg3JJk/iVr/ts8k5osM
+    hf+yPnSAafwJrsIfcQ25MbsDsqnLN7ycWaScrzWiJ0CXCYpWaqGnI41LhKNq2gae
+    bWLTxEpzdEFn4JpxiZaiJxeTLEpdN1VGMrP3zHyE6e/cO12CJ5LyOP1uDvt72sMW
+    trXmL/J0Uh+tFmZUPc7RuqVhxt38xmuXiE1OfaLVSBjmSbr9zB1OcHn60/Ap2/jC
+    mBU2mOJmhJnvE1FVc5YeDQWqK5mDJam4OOnwiIknPwr57aQ40FdDEguMgk0Pu5un
+    idnk74KctCvcHFdDxAfH3pphU2+zSIwKvAiADEclBAimlHWd82gMzhjhloo/vp6p
+    Dpalogp/pgkK1ssC7q9Y30PEVjwiOEqTSvTzVQWnS5zTs8yiZzNwNrQwx/1fNRsQ
+    6TPXyD4uXhB1MMcQb0UapOClgMtRvVYPGPy+TxFU9rpbvr896//zjy4X5ocZMQYs
+    FjNGI01CTj26b3opN5/eXuN6gogXA8ylzxZDTPopQwrvXovgy6B/kg1TCndQLmzm
+    p1XTZfGXMQI6LaHl3tXENlcCAwEAAQ==
+    -----END PUBLIC KEY-----
 
 file_integrity:
   enabled: true
