@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- EyeGuard auto-deploy watcher -- polls GitHub's public API for main's
+     latest commit and deploys it the moment it changes (git reset --hard +
+     restart, same as deploy/update.sh does by hand). The merge into main
+     (GitHub branch protection + Dad's PR review) is the only approval gate
+     -- there is no second one here. Installed to /Library/LaunchDaemons
+     (root-owned), runs as ROOT: needs to chown/reset the root-owned code
+     tree and restart other root-owned LaunchDaemons. Holds no secret beyond
+     the same public anon key everything else already uses -- the GitHub
+     repo it polls is public, so no token lives on this device either. -->
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.eyeguard.deploywatcher</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Applications/EyeGuard.app/Contents/Resources/python/bin/python3.12</string>
+    <string>-m</string>
+    <string>eyeguard.deploy_watcher</string>
+    <string>--config</string>
+    <string>/Library/Application Support/EyeGuard/config.yaml</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Library/Application Support/EyeGuard</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONPATH</key><string>/Library/Application Support/EyeGuard</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Library/Application Support/EyeGuard/logs/deploywatcher.out.log</string>
+  <key>StandardErrorPath</key><string>/Library/Application Support/EyeGuard/logs/deploywatcher.err.log</string>
+</dict></plist>

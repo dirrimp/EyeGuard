@@ -50,5 +50,10 @@ echo "Restarting session agent + session watcher..."
 MONITORED_UID=$(id -u jonahdirrim)
 launchctl kickstart -k "gui/$MONITORED_UID/com.eyeguard.monitor" 2>/dev/null || true
 launchctl kickstart -k system/com.eyeguard.sessionwatcher
+# || true: the first run after this daemon is introduced won't have it
+# installed yet -- see deploy/com.eyeguard.deploywatcher.plist, needs a
+# one-time `launchctl bootstrap system ...` + `install` first, same
+# one-time bootstrap the session watcher itself needed.
+launchctl kickstart -k system/com.eyeguard.deploywatcher 2>/dev/null || true
 
 echo "Deployed $(git log --oneline -1)."

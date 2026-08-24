@@ -670,6 +670,20 @@ session_watcher:
   check_seconds: 120
   expected_user: jonahdirrim
 
+# Auto-deploy watcher: polls the public GitHub repo for main's latest
+# commit and deploys it the moment it changes -- the merge into main
+# (GitHub branch protection + Dad's PR review) is the only approval gate,
+# no second one here. Root LaunchDaemon (see deploy/
+# com.eyeguard.deploywatcher.plist) -- needs to chown/reset the root-owned
+# code tree and restart other daemons. code_dir defaults to the deployed
+# tree itself if omitted.
+deploy_watcher:
+  enabled: true
+  check_seconds: 300
+  owner: dirrimp
+  repo: EyeGuard
+  monitored_user: jonahdirrim
+
 # Text + signal layer. The image detector can't see the TEXTUAL side of
 # behavior — erotic text, sexual chat, explicit searches — because there's no
 # nude image to classify. These two on-device checks close that gap.
