@@ -26,6 +26,7 @@ from .capture import ScreenCapturer
 from .context import capture_context, frontmost_is_self, is_ignored
 from .extensions import scan as scan_extensions, is_questionable
 from .vm_monitor import scan as scan_vm
+from .integrity import IntegrityWatcher
 from .risk import assess
 from .detector import Verdict
 from .logger import FlagLogger
@@ -358,37 +359,27 @@ class EyeGuardApp(rumps.App):
     def _build_uploader(self):
         """Create the thing the loop uploads through, or None if disabled.
 
-        In SPLIT mode (the locked-down build) this agent holds no secret — it
-        forwards to the root vault daemon over a socket. In DIRECT mode (default)
-        this process holds the key and uploads itself."""
+        Admin-trust-model pivot (2026-08-24): there is no more secret-holding
+        split -- this process holds only the public anon key (config
+        `supabase.api_key`) and uploads directly. See uploader.py's module
+        docstring for why that's safe: every write is either an explicit
+        anon-scoped RLS policy or a SECURITY DEFINER RPC that validates and
+        stamps server-side, never a raw table write with a powerful key."""
         sb = self.cfg.get("supabase", {})
         if not sb.get("enabled") or not sb.get("url"):
             return None
-        if sb.get("mode") == "split":
-            from .vault_client import VaultClient
-            up = VaultClient(sb.get("socket_path", "/var/run/eyeguard.sock"))
-            up.start()
-            print("[agent] split mode — forwarding to vault daemon", flush=True)
-            return up
-        secret_path = Path(sb.get("secret_file", ".supabase_secret"))
-        if not secret_path.is_absolute():
-            secret_path = _BASE / secret_path
-        try:
-            secret = secret_path.read_text().strip()
-        except OSError:
-            print(f"[uploader] no secret at {secret_path}; cloud sync off",
+        api_key = sb.get("api_key")
+        if not api_key:
+            print("[uploader] no supabase.api_key configured; cloud sync off",
                   flush=True)
-            return None
-        if not secret:
             return None
         pending = Path(sb.get("pending_file", "pending_uploads.jsonl"))
         if not pending.is_absolute():
             pending = _BASE / pending
-        up = SupabaseUploader(url=sb["url"], secret=secret,
+        up = SupabaseUploader(url=sb["url"], api_key=api_key,
                               pending_path=str(pending),
                               retry_seconds=int(sb.get("retry_seconds", 60)),
-                              heartbeat=bool(sb.get("heartbeat", True)),
-                              publishable_key=sb.get("publishable_key"))
+                              heartbeat=bool(sb.get("heartbeat", True)))
         up.start()
         print("[uploader] cloud sync on", flush=True)
         return up
@@ -421,6 +412,25 @@ class EyeGuardApp(rumps.App):
                                 "frames_analyzed": self._frames_analyzed,
                                 "detector_ok": self._detector_ok}
                 uploader.set_status_provider(_status)
+
+                # Deployed-code/config integrity: runs in this same process
+                # now (admin-trust-model pivot, 2026-08-24 -- there is no
+                # more separate root vault daemon to hold it). See
+                # integrity.py's module docstring for why fetching the
+                # manifest fresh from the server each cycle, rather than
+                # trusting a locally-shipped copy, is what makes this a real
+                # check rather than a check-yourself tautology.
+                fi_cfg = self.cfg.get("file_integrity", {})
+                if fi_cfg.get("enabled", True):
+                    sb_cfg = self.cfg.get("supabase", {})
+                    threading.Thread(
+                        target=IntegrityWatcher(
+                            uploader, _BASE, sb_cfg.get("url", ""),
+                            sb_cfg.get("api_key", ""),
+                            str(fi_cfg.get("version", "unknown")),
+                            check_seconds=int(fi_cfg.get("check_seconds", 300)),
+                        ).run,
+                        daemon=True).start()
             interval = cap["interval_seconds"]
         except Exception as e:
             with self._lock:

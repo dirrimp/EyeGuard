@@ -10,18 +10,25 @@ Design goals:
   * Idempotent — a deterministic row id + upsert means a retry after a crash
     never creates a duplicate.
 
-The sb_secret key (read from a local file, never in code/config) is used for
-the flags/device_status tables, where it bypasses RLS but a direct REVOKE on
-those tables still holds (confirmed: append-only survives even service_role).
-
-Image uploads are the one exception: Supabase's Storage API does NOT honor a
-REVOKE against service_role the way /rest/v1/ table access does (confirmed
-live 2026-08-05 — DELETE/UPDATE via the secret key still succeeded even after
-`revoke delete, update on storage.objects from service_role`). So image
-uploads instead use the PUBLIC anon/publishable key, for which Storage DOES
-enforce RLS — an insert-only policy on the 'frames' bucket (no update/delete
-policy exists for anon) means the key can create evidence but never alter or
-erase it, closing the gap the secret key couldn't close for storage.
+Admin-trust-model pivot (2026-08-24): the client holds ONLY the public anon
+key from now on. There is no secret/service_role key anywhere in this file,
+on disk, or in config -- once the monitored user has full admin on their own
+Mac, no locally-held secret can be assumed hidden from them, so there's no
+longer a meaningful distinction between "the powerful key" and "the public
+key." Every write goes through one of two mechanisms, both safe to expose to
+a fully-untrusted, fully-admin client:
+  * `flags` and the `frames` storage bucket: explicit anon-scoped INSERT-only
+    RLS policies (frames' policy predates this pivot -- Storage doesn't honor
+    a REVOKE against service_role the same way table access does, a confirmed
+    Supabase platform quirk, which is exactly why frames moved to anon+RLS
+    first; flags now uses the identical pattern).
+  * `device_status`: no direct table write exists for any role anymore.
+    Every write is a SECURITY DEFINER RPC (`eg_heartbeat`, `eg_report_suspend`,
+    `eg_authorized_stop`) that stamps `last_heartbeat = now()` itself -- the
+    SERVER's clock, never anything the client submits -- so a local admin
+    reading this key can't forge a future timestamp to silence gone-dark, or
+    set `status='clean_shutdown'` without passing `eg_authorized_stop`'s
+    password check.
 """
 
 from __future__ import annotations
@@ -115,20 +122,10 @@ def _score(reason: str) -> float | None:
 
 
 class SupabaseUploader:
-    def __init__(self, url: str, secret: str, pending_path: str,
-                 retry_seconds: int = 60, heartbeat: bool = True,
-                 publishable_key: str | None = None):
+    def __init__(self, url: str, api_key: str, pending_path: str,
+                 retry_seconds: int = 60, heartbeat: bool = True):
         self.base = url.rstrip("/")
-        self.secret = secret
-        # Falls back to the secret key if no publishable key is configured
-        # (old configs) -- logs so a missing key doesn't silently reopen the
-        # storage-deletion gap without anyone noticing.
-        self.publishable_key = publishable_key or secret
-        if not publishable_key:
-            print("[uploader] WARNING: no supabase.publishable_key configured "
-                  "-- image uploads are falling back to the secret key, which "
-                  "reopens the storage delete/overwrite gap. Set "
-                  "publishable_key in config.yaml.", flush=True)
+        self.api_key = api_key
         self.pending_path = Path(pending_path)
         self.retry_seconds = retry_seconds
         self.heartbeat = heartbeat
@@ -176,11 +173,9 @@ class SupabaseUploader:
         })
 
     # Cloud image retention runs SERVER-SIDE (pg_cron, as postgres -- outside
-    # the API entirely, so it's unaffected by the anon/secret key distinction
-    # above). The agent itself never deletes cloud images: uploads go through
-    # the anon key's insert-only Storage RLS policy (see _put_image), which is
-    # what actually prevents the agent from deleting/overwriting them -- the
-    # secret key alone was NOT sufficient for this (see module docstring).
+    # the API entirely). The agent itself never deletes cloud images: uploads
+    # go through the anon key's insert-only Storage RLS policy (see
+    # _put_image), which is what actually prevents deleting/overwriting them.
 
     # ---- worker -------------------------------------------------------------
 
@@ -209,7 +204,7 @@ class SupabaseUploader:
         # Pulse once right away so "last seen" is fresh the moment we start.
         if self.heartbeat:
             try:
-                self.send_heartbeat("alive")
+                self.send_heartbeat()
                 self._heartbeat_ok()
             except Exception as e:
                 self._heartbeat_failed(e, "startup pulse")
@@ -220,8 +215,10 @@ class SupabaseUploader:
                 pass  # never let the uploader crash the app
             if self.heartbeat:
                 try:
-                    self.send_heartbeat(
-                        "clean_shutdown" if self._suspended else "alive")
+                    if self._suspended:
+                        self._send_suspend_beacon()
+                    else:
+                        self.send_heartbeat()
                     self._heartbeat_ok()
                 except Exception as e:
                     self._heartbeat_failed(e, "worker loop")
@@ -232,10 +229,13 @@ class SupabaseUploader:
         """Mac going to sleep / shutting down normally: beacon a clean state so
         the gone-dark watchdog stays quiet, and keep pulses clean until resumed.
         (A MANUAL stop sends no beacon at all, so disabling the monitor still
-        alerts — the clean beacon only fires on real sleep/power-off events.)"""
+        alerts — the clean beacon only fires on real sleep/power-off events.)
+        Not password-gated (routine sleep shouldn't need a password prompt) --
+        see supabase/anon_client_pivot.sql's eg_report_suspend() docstring for
+        the accepted residual this implies."""
         self._suspended = True
         try:
-            self.send_heartbeat("clean_shutdown")
+            self._send_suspend_beacon()
             self._heartbeat_ok()
         except Exception as e:
             self._heartbeat_failed(e, "suspend beacon")
@@ -245,10 +245,27 @@ class SupabaseUploader:
         self._suspended = False
         self._resumed_at = time.time()
         try:
-            self.send_heartbeat("alive")
+            self.send_heartbeat()
             self._heartbeat_ok()
         except Exception as e:
             self._heartbeat_failed(e, "resume beacon")
+
+    def authorized_stop(self, password: str) -> bool:
+        """Ask the server to verify `password` and, only if correct, set
+        status='clean_shutdown' -- one atomic RPC call (eg_authorized_stop),
+        replacing the old two-call check-then-beacon sequence, which had a
+        real gap: nothing tied the two together, so a direct POST with the
+        old secret key could set the clean-shutdown status without ever
+        passing the password check. Returns True iff the password was
+        correct and the beacon was set; False on a wrong password OR the
+        server-side lockout (5 wrong attempts / 15 min, tracked in
+        `settings`, immune to a local reset no matter what key you hold)."""
+        req = urllib.request.Request(
+            f"{self.base}/rest/v1/rpc/eg_authorized_stop",
+            data=json.dumps({"pw": password}).encode(), method="POST",
+            headers=self._headers({"Content-Type": "application/json"}))
+        with _opener.open(req, timeout=15) as r:
+            return json.loads(r.read().decode()) is True
 
     def recently_resumed(self, grace_seconds: int = 120) -> bool:
         """True for a window after resume() -- the session agent is frozen
@@ -264,42 +281,33 @@ class SupabaseUploader:
         distinguishable from the sleep-induced staleness that preceded it."""
         return time.time() - self._resumed_at < grace_seconds
 
-    def send_heartbeat(self, status: str = "alive"):
-        """Upsert the single device_status row. status='alive' also clears the
-        `alerted` flag so a future outage can fire a fresh alert; a clean
-        shutdown sets status='clean_shutdown' so it doesn't false-alarm."""
-        now = datetime.now(timezone.utc).isoformat()
-        core = {"id": 1, "last_heartbeat": now, "status": status,
-                "updated_at": now}
-        if status == "alive":
-            core["alerted"] = False
-        row = dict(core)
+    def send_heartbeat(self):
+        """Calls eg_heartbeat() -- the ONLY way status='alive' +
+        last_heartbeat gets set. The RPC signature has no timestamp
+        parameter at all, so there is nothing for the client to forge; the
+        server's own now() is the only value ever written."""
+        params: dict = {}
         if self._status_provider is not None:
             try:
                 extra = self._status_provider() or {}
                 if "screen_ok" in extra:
-                    row["screen_ok"] = bool(extra["screen_ok"])
+                    params["p_screen_ok"] = bool(extra["screen_ok"])
                 if "frames_analyzed" in extra:
-                    row["frames_analyzed"] = int(extra["frames_analyzed"])
+                    params["p_frames_analyzed"] = int(extra["frames_analyzed"])
                 if "detector_ok" in extra:
-                    row["detector_ok"] = bool(extra["detector_ok"])
+                    params["p_detector_ok"] = bool(extra["detector_ok"])
             except Exception:
                 pass
-        try:
-            self._post_status(row)
-        except urllib.error.HTTPError:
-            # A missing optional column (schema not migrated yet) must never
-            # break the heartbeat — retry with just the core fields, so a fresh
-            # deploy can't false-trip gone-dark before its SQL is run.
-            self._post_status(core)
+        self._rpc("eg_heartbeat", params)
 
-    def _post_status(self, row: dict):
+    def _send_suspend_beacon(self):
+        self._rpc("eg_report_suspend", {})
+
+    def _rpc(self, name: str, params: dict):
         req = urllib.request.Request(
-            f"{self.base}/rest/v1/device_status", data=json.dumps(row).encode(),
+            f"{self.base}/rest/v1/rpc/{name}", data=json.dumps(params).encode(),
             method="POST",
-            headers=self._headers({
-                "Content-Type": "application/json",
-                "Prefer": "resolution=merge-duplicates,return=minimal"}))
+            headers=self._headers({"Content-Type": "application/json"}))
         with _opener.open(req, timeout=15) as r:
             r.read()
 
@@ -369,29 +377,20 @@ class SupabaseUploader:
     # ---- HTTP (urllib, no extra deps) ---------------------------------------
 
     def _headers(self, extra: dict | None = None) -> dict:
-        h = {"apikey": self.secret, "Authorization": f"Bearer {self.secret}"}
-        if extra:
-            h.update(extra)
-        return h
-
-    def _anon_headers(self, extra: dict | None = None) -> dict:
-        h = {"apikey": self.publishable_key,
-             "Authorization": f"Bearer {self.publishable_key}"}
+        h = {"apikey": self.api_key, "Authorization": f"Bearer {self.api_key}"}
         if extra:
             h.update(extra)
         return h
 
     def _put_image(self, remote_path: str, data: bytes):
-        # Anon key, not the secret: Storage RLS grants anon INSERT-only on the
-        # 'frames' bucket (no update/delete policy exists for anon), so this
-        # key can create an image but never overwrite or erase one -- unlike
-        # the secret key, which Storage lets bypass a REVOKE entirely (see
-        # module docstring). A 409 means it already exists (an earlier attempt
-        # succeeded) -> fine.
+        # Insert-only on the 'frames' bucket via RLS (no update/delete policy
+        # exists for anon), so this key can create an image but never
+        # overwrite or erase one. A 409 means it already exists (an earlier
+        # attempt succeeded) -> fine.
         url = f"{self.base}/storage/v1/object/frames/{remote_path}"
         req = urllib.request.Request(
             url, data=data, method="POST",
-            headers=self._anon_headers({"Content-Type": "image/jpeg"}))
+            headers=self._headers({"Content-Type": "image/jpeg"}))
         try:
             with _opener.open(req, timeout=20) as r:
                 r.read()
