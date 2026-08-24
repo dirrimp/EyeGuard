@@ -1,12 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- EyeGuard session agent (split build) — the CAPTURE half.
-     Installed to /Library/LaunchAgents (root-owned) so the monitored user runs
-     it but can't edit it. Runs in the user's GUI session (needs Screen
-     Recording). Holds NO key; forwards detections to the root vault daemon.
-     Launched via the absolute run_agent.py path so the daemon's peer check
-     accepts exactly this invocation (`<python> <launcher>`, no extra args). -->
+<!-- EyeGuard session agent -- the capture + detection + upload process.
+     Admin-trust-model pivot (2026-08-24): this now holds the public anon
+     API key directly and uploads to Supabase itself -- there's no more
+     root vault daemon to forward to (see eyeguard/uploader.py's module
+     docstring for why that's safe: every write is either an explicit
+     anon-scoped RLS policy or a SECURITY DEFINER RPC that validates
+     server-side, never a raw table write with a powerful key). Runs in the
+     user's GUI session (needs Screen Recording). Cross-session visibility
+     (new accounts, wrong active user) is NOT this process's job -- see
+     com.eyeguard.sessionwatcher.plist, a separate root daemon, for why that
+     specific check needs to live elsewhere. -->
 <plist version="1.0"><dict>
   <key>Label</key><string>com.eyeguard.monitor</string>
   <key>ProgramArguments</key>

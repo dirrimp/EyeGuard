@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- EyeGuard session/account watcher -- admin-trust-model pivot (2026-08-24).
+     Installed to /Library/LaunchDaemons (root-owned), runs as ROOT. Holds NO
+     secret (same public anon key as everything else) -- root here is for
+     OS-level, cross-session visibility only: detecting a newly-created
+     macOS user account, or the active console session being someone other
+     than the monitored account. A per-user LaunchAgent (the main app) can
+     only ever see its own session, so this specific check has to live here.
+     Disabling this daemon is just as visible as disabling the main app --
+     see eyeguard/session_watcher.py's module docstring. -->
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.eyeguard.sessionwatcher</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Applications/EyeGuard.app/Contents/Resources/python/bin/python3.12</string>
+    <string>-m</string>
+    <string>eyeguard.session_watcher</string>
+    <string>--config</string>
+    <string>/Library/Application Support/EyeGuard/config.yaml</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Library/Application Support/EyeGuard</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONPATH</key><string>/Library/Application Support/EyeGuard</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Library/Application Support/EyeGuard/logs/sessionwatcher.out.log</string>
+  <key>StandardErrorPath</key><string>/Library/Application Support/EyeGuard/logs/sessionwatcher.err.log</string>
+</dict></plist>

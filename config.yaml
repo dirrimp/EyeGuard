@@ -528,16 +528,23 @@ logging:
   retention_days: 7
 
 # Cloud sync: mirror flags + images to Supabase so the accountability partner
-# can see them from anywhere. The agent uploads with the sb_secret key, read
-# from secret_file (never stored here). The URL and publishable key are NOT
-# secret — the publishable key is only usable with a partner login.
+# can see them from anywhere. Admin-trust-model pivot (2026-08-24): the agent
+# uploads with ONLY the public anon key below (api_key) -- there is no secret
+# key anywhere client-side anymore. Safe to commit; see api_key's own comment
+# for why that's fine even though it's fully public.
 supabase:
   enabled: true
   url: https://ucgldleacehxjjwwqomk.supabase.co
-  # Server-side secret key: read from this file (chmod 600), never from config.
-  secret_file: /Library/Application Support/EyeGuard/.supabase_secret
-  # Public client key for the partner dashboard (safe to store / commit).
-  publishable_key: sb_publishable_y9pDf3aBNY4Le5u9tbUXzg_qCRvMn-b
+  # Admin-trust-model pivot (2026-08-24): this is the ONLY key anywhere in
+  # this config, on disk, or in this process -- there is no secret/
+  # service_role key client-side at all. Safe to store/commit; it always
+  # was meant to be public. Every write it makes is either an explicit
+  # anon-scoped RLS policy (flags, frames) or a SECURITY DEFINER RPC that
+  # validates and stamps server-side (device_status) -- see
+  # supabase/anon_client_pivot.sql and eyeguard/uploader.py's module
+  # docstring for why that's safe even though this key is fully public and
+  # the monitored user has full admin on their own Mac.
+  api_key: sb_publishable_y9pDf3aBNY4Le5u9tbUXzg_qCRvMn-b
   # Persistent offline queue: flags wait here until they upload successfully.
   pending_file: /Library/Application Support/EyeGuard/pending_uploads.jsonl
   # How often (seconds) to retry the offline backlog.
@@ -545,19 +552,6 @@ supabase:
   # Heartbeat: pulse device_status every retry cycle so a server-side job can
   # detect an unexpected shutdown / going dark and alert the partners.
   heartbeat: true
-  # Architecture. "direct" = this agent holds the key and uploads itself (the
-  # default, single-process build). "split" = the locked-down build: this agent
-  # holds NO key and forwards detections to a root vault daemon over a socket,
-  # so the key + network live in a process the monitored user can't touch.
-  mode: split
-  socket_path: /var/run/eyeguard.sock
-  # In split mode, if the capture agent goes silent this long (seconds), the
-  # daemon reports screen_ok=false (blind alert).
-  agent_timeout: 90
-  # Verify the socket peer is the real managed agent (kernel-provided PID ->
-  # exact executable + launch-args match). Blocks a forged status ping that
-  # would otherwise suppress the blind alert. Only meaningful in split mode.
-  verify_peer: true
 
 # GREEN activity trail: log a clean record (app/site + timestamp, NO image) of
 # what's on screen even when nothing is flagged, so a reviewer can see the full
@@ -634,18 +628,47 @@ vm_monitor:
   enabled: true
   scan_seconds: 300   # VM installs are rare; no need to poll as often as extensions
 
-# Deployed-code/config integrity watcher (runs inside the ROOT vault daemon,
-# not the agent -- see eyeguard/integrity.py's module docstring for why).
-# Every git-tracked file under the deployed tree is compared against its
-# HEAD-committed content each cycle; any content change or deletion outside
-# a real `update.sh` deploy is reported through the same report_tamper()
-# path used by the existing flags.jsonl / flagged-frame tamper checks, which
-# already routes to a dedicated "tampering detected" alert email. Same
+# Deployed-code/config integrity watcher, runs inside the main app process
+# (eyeguard/integrity.py). Admin-trust-model pivot (2026-08-24): the old
+# version compared every git-tracked file against `git show HEAD:<path>` in
+# a live git repo -- correct for this Mac's original deployment, but doesn't
+# generalize to a packaged, distributed `.app` (no git repo ships inside a
+# bundle). Now fetches a PUBLISHED manifest fresh from Supabase on every
+# check (supabase/anon_client_pivot.sql's release_manifests table, anon
+# SELECT-only -- populated only by a release script using the maintainer's
+# own key, never the shipped app) and compares the running files' hashes
+# against it -- same "can't be satisfied by anything the local admin
+# controls" reasoning that motivated using live git HEAD over a local
+# baseline file in the first place. Reports through the same
+# report_tamper() path used by every other tamper check in this project,
+# routing to the same dedicated "tampering detected" alert email. Same
 # tamper-EVIDENT (not tamper-proof) standing philosophy as the rest of this
 # project -- see integrity.py for the honest limits.
 file_integrity:
   enabled: true
   check_seconds: 300   # config/code edits should be caught within 5 min
+  version: "0.3.0"      # must match a version key already published in
+                        # release_manifests, or checks log an "unknown
+                        # version" warning instead of a tamper flag
+
+# Session/account watcher (root LaunchDaemon, eyeguard/session_watcher.py).
+# The main app is a per-user process -- it can only ever see its own user's
+# session. If the monitored user (who has full admin) creates a second
+# macOS account and switches to it, the original account's EyeGuard keeps
+# running and heartbeating "alive" the whole time, completely blind to what
+# happens in the other session -- a silent bypass needing no killing, no
+# tampering, no uninstall at all. Only root can see across all sessions, so
+# this one check stays root-level -- not to protect a secret (it holds
+# none, same public api_key as everything else), but because cross-session
+# visibility is an OS-level capability no per-user process has, admin or
+# not. Flags either a newly-created local user account, or the active
+# console session being someone other than expected_user, through the same
+# gone-dark-style alert as the main app (see eg_watcher_heartbeat() /
+# eg_check_gone_dark()'s new branches in anon_client_pivot.sql).
+session_watcher:
+  enabled: true
+  check_seconds: 120
+  expected_user: jonahdirrim
 
 # Text + signal layer. The image detector can't see the TEXTUAL side of
 # behavior — erotic text, sexual chat, explicit searches — because there's no

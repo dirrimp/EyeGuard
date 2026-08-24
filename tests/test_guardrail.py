@@ -62,8 +62,9 @@ print("— safety toggles stay on —")
 for path, val in [
         ("logging.save_flagged_frames", lg.get("save_flagged_frames")),
         ("logging.blur_red_frames", lg.get("blur_red_frames")),
-        ("supabase.verify_peer", sb.get("verify_peer")),
         ("supabase.heartbeat", sb.get("heartbeat")),
+        ("file_integrity.enabled", cfg.get("file_integrity", {}).get("enabled")),
+        ("session_watcher.enabled", cfg.get("session_watcher", {}).get("enabled")),
         ("context_risk.enabled", cr.get("enabled")),
         ("activity_logging.enabled", cfg["activity_logging"].get("enabled")),
         ("drm.enabled", cfg["drm"].get("enabled")),
@@ -90,10 +91,21 @@ for listname in ("suppress", "low_risk"):
     check(f"context_risk.{listname} has no risky sites", not bad, str(bad))
 
 print("— security-critical code is still wired —")
-vault = (ROOT / "eyeguard" / "vault.py").read_text()
 menu = (ROOT / "eyeguard" / "menubar.py").read_text()
-check("vault peer check present",
-      "expected_launcher" in vault and "len(argv)" in vault)
+uploader_src = (ROOT / "eyeguard" / "uploader.py").read_text()
+session_watcher_src = (ROOT / "eyeguard" / "session_watcher.py").read_text()
+check("eyeguard/vault.py deleted (admin-trust-model pivot)",
+      not (ROOT / "eyeguard" / "vault.py").exists())
+check("no secret/service_role key anywhere in uploader.py",
+      "self.secret" not in uploader_src and "secret_file" not in uploader_src)
+check("uploader calls the server-stamped heartbeat RPC, not a raw table write",
+      "eg_heartbeat" in uploader_src and "eg_report_suspend" in uploader_src
+      and "eg_authorized_stop" in uploader_src)
+check("menubar wires the (manifest-based) integrity watcher",
+      "IntegrityWatcher" in menu)
+check("session_watcher checks both new-account and wrong-user",
+      "_local_user_accounts" in session_watcher_src
+      and "_active_console_user" in session_watcher_src)
 check("menubar applies context-risk", "assess(" in menu)
 check("menubar log-tamper detection present", "report_tamper" in menu
       and "_check_log_tamper" in menu)

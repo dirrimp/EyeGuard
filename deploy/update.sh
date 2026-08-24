@@ -27,18 +27,19 @@ echo
 read -r -p "Deploy these changes? [y/N] " ans
 [ "$ans" = "y" ] || [ "$ans" = "Y" ] || { echo "Aborted — nothing deployed."; exit 0; }
 
-# Hard reset the CODE tree to exactly what's on main. Data (flags, keys,
-# pending queue) lives outside this tree (see LOCKDOWN.md layout) so a reset
-# here never touches monitoring history. git checkout also restores each
-# file's committed mode (644/755), so scripts keep their executable bit —
-# no separate chmod pass needed.
+# Hard reset the CODE tree to exactly what's on main. Data (flags, pending
+# queue) lives outside this tree (see LOCKDOWN.md layout) so a reset here
+# never touches monitoring history. Admin-trust-model pivot (2026-08-24):
+# there is no more secret key on disk at all -- config.yaml's api_key is the
+# same public key that's already safe to commit, so nothing here needs the
+# old .supabase_secret chmod step. git checkout also restores each file's
+# committed mode (644/755), so scripts keep their executable bit -- no
+# separate chmod pass needed.
 git reset --hard origin/main
 
 chown -R root:wheel "$CODE"
-chmod 600 "$CODE/.supabase_secret" 2>/dev/null || true
 
-echo "Restarting vault daemon + session agent..."
-launchctl kickstart -k system/com.eyeguard.vault
+echo "Restarting session agent + session watcher..."
 # Target the monitored user by name, not whoever's active on the console --
 # Dad has to be his own active session to type the sudo password for this
 # script, so "console user" resolves to HIM, not the monitored user, and the
@@ -48,5 +49,6 @@ launchctl kickstart -k system/com.eyeguard.vault
 # running agent until it happened to restart some other way.
 MONITORED_UID=$(id -u jonahdirrim)
 launchctl kickstart -k "gui/$MONITORED_UID/com.eyeguard.monitor" 2>/dev/null || true
+launchctl kickstart -k system/com.eyeguard.sessionwatcher
 
 echo "Deployed $(git log --oneline -1)."
