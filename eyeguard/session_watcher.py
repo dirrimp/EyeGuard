@@ -12,12 +12,28 @@ not to protect a secret (it holds none, the same public anon key as
 everything else), but because cross-session visibility is an OS-level
 capability no per-user process has, admin or not.
 
-Two checks, every `check_seconds`:
+Three checks, every `check_seconds`:
   1. New local user account created (compared against a baseline captured
      on first run -- same "baseline silently, flag drift after" pattern used
      everywhere else in this project: extensions.py, vm_monitor.py, the
      router's config tamper-evidence monitor).
   2. The active console/GUI session is not `expected_user`.
+  3. The monitor agent (run_agent.py) has an injected library loaded --
+     the classic DYLD_INSERT_LIBRARIES-style in-memory tampering technique,
+     used to hook/patch a running process without ever touching disk. This
+     specifically closes the "in-memory patching is undetectable" gap
+     accepted earlier in this project's design: confirmed on this exact
+     Mac that root CAN inspect another process's loaded libraries (`vmmap`
+     works without any special entitlement here), so rather than trying to
+     diff raw memory bytes (impractical for a Python process -- the actual
+     interpreted logic lives in dynamic heap objects, not a fixed
+     on-disk-comparable region), this checks WHERE every loaded library
+     came from. Every legitimate library loads from a small, fixed set of
+     trusted path prefixes (the app bundle, /usr/lib, /System/Library);
+     anything loaded from outside those is flagged immediately -- no
+     baseline needed, no locally-tamperable trust anchor, matching the
+     same "don't trust something a local admin could also tamper with"
+     reasoning that moved integrity.py off a local baseline file.
 
 Reports both via eg_watcher_heartbeat() (supabase/anon_client_pivot.sql),
 which stamps its own server-side timestamp -- same principle as the main
@@ -38,6 +54,7 @@ adding an account without anyone noticing at all.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 import urllib.error
@@ -50,6 +67,29 @@ _BASELINE_PATH = _BASE / "session_watcher_baseline.json"
 # macOS reserves UID < 500 for system/service accounts (root, daemon, _www,
 # etc.) -- only UIDs >= 500 are real, human-created accounts.
 _MIN_HUMAN_UID = 500
+
+# Every legitimate loaded library/framework the monitor agent should ever
+# have mapped comes from one of these roots: the app bundle itself
+# (interpreter + bundled site-packages), or standard macOS system paths.
+# Anything outside this set is flagged unconditionally -- this list needs
+# no baseline file (nothing here for a local admin to tamper with) and
+# needs no update when new legitimate dependencies get bundled, since it's
+# a set of trusted ROOTS, not a specific list of expected files.
+_TRUSTED_LIB_PREFIXES = (
+    "/Applications/EyeGuard.app/",
+    "/usr/lib/",
+    "/usr/libexec/",
+    "/System/Library/",
+)
+
+# vmmap's plain-text columns aren't fixed-width and a loaded library's path
+# can itself contain spaces (e.g. "Library/Application Support/...") -- a
+# naive whitespace split breaks on that. Every region line that references a
+# file has "SM=<mode>" immediately before the path with nothing after it, so
+# anchoring there and capturing the rest of the line is what actually holds
+# up against real vmmap output (verified against real captured output,
+# including a path with a space in it, before shipping this).
+_VMMAP_PATH_RE = re.compile(r"SM=\S+\s+(/.+)$")
 
 
 def _local_user_accounts() -> dict[str, int] | None:
@@ -92,6 +132,66 @@ def _active_console_user() -> str | None:
     return out or None
 
 
+def _monitor_agent_pid() -> int | None:
+    """PID of the running run_agent.py process, or None if it's not
+    currently running (not itself suspicious -- e.g. the monitored user
+    isn't in an active GUI session right now -- just nothing to check this
+    cycle; the main app's own absence is already covered separately by its
+    heartbeat-based gone-dark check)."""
+    try:
+        out = subprocess.run(
+            ["pgrep", "-f", "run_agent.py"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+    except Exception:
+        return None
+    if not out:
+        return None
+    try:
+        return int(out.splitlines()[0])
+    except ValueError:
+        return None
+
+
+def _loaded_library_paths(pid: int) -> set[str] | None:
+    """Every file path vmmap reports as mapped into `pid`'s address space,
+    or None on any failure (this daemon already runs as root, so a failure
+    here means vmmap itself had a problem -- e.g. the process exited between
+    the pgrep and this call -- not a permissions issue; never treated as a
+    signal, just skip this cycle)."""
+    try:
+        out = subprocess.run(
+            ["vmmap", str(pid)],
+            capture_output=True, text=True, timeout=20,
+        ).stdout
+    except Exception:
+        return None
+    paths = set()
+    for line in out.splitlines():
+        m = _VMMAP_PATH_RE.search(line)
+        if m:
+            paths.add(m.group(1))
+    return paths or None
+
+
+def _untrusted_library() -> str | None:
+    """The path of an untrusted loaded library, if the monitor agent has
+    one loaded right now -- the classic signature of DYLD_INSERT_LIBRARIES-
+    style in-memory injection. None if the agent isn't running, vmmap
+    couldn't be read this cycle, or everything loaded is from a trusted
+    root -- none of those are themselves suspicious."""
+    pid = _monitor_agent_pid()
+    if pid is None:
+        return None
+    paths = _loaded_library_paths(pid)
+    if paths is None:
+        return None
+    for path in sorted(paths):
+        if not any(path.startswith(prefix) for prefix in _TRUSTED_LIB_PREFIXES):
+            return path
+    return None
+
+
 def _load_baseline() -> dict[str, int] | None:
     try:
         return json.loads(_BASELINE_PATH.read_text())
@@ -124,12 +224,13 @@ class SessionWatcher:
         with urllib.request.urlopen(req, timeout=15) as r:
             r.read()
 
-    def _check_once(self) -> tuple[bool, bool]:
-        """Returns (new_account, wrong_user). Baselines silently on first
-        run -- no accounts existing yet, or the baseline file missing, both
-        just mean "start fresh from here," matching the established
-        baseline-then-flag-new pattern used everywhere else in this
-        project."""
+    def _check_once(self) -> tuple[bool, bool, bool]:
+        """Returns (new_account, wrong_user, untrusted_library). Baselines
+        silently on first run -- no accounts existing yet, or the baseline
+        file missing, both just mean "start fresh from here," matching the
+        established baseline-then-flag-new pattern used everywhere else in
+        this project. The library check needs no baseline at all -- see
+        _untrusted_library()."""
         new_account = False
         current = _local_user_accounts()
         if current is not None:
@@ -154,7 +255,13 @@ class SessionWatcher:
                   f"expected '{self.expected_user}'", flush=True)
             wrong_user = True
 
-        return new_account, wrong_user
+        untrusted_path = _untrusted_library()
+        untrusted_library = untrusted_path is not None
+        if untrusted_library:
+            print(f"[session_watcher] untrusted library loaded in monitor "
+                  f"agent: {untrusted_path}", flush=True)
+
+        return new_account, wrong_user, untrusted_library
 
     def run(self):
         print(f"[session_watcher] active, checking every "
@@ -162,10 +269,11 @@ class SessionWatcher:
               flush=True)
         while True:
             try:
-                new_account, wrong_user = self._check_once()
+                new_account, wrong_user, untrusted_library = self._check_once()
                 self._rpc("eg_watcher_heartbeat",
                           {"p_new_account": new_account,
-                           "p_wrong_user": wrong_user})
+                           "p_wrong_user": wrong_user,
+                           "p_untrusted_library": untrusted_library})
             except urllib.error.URLError as e:
                 print(f"[session_watcher] heartbeat network error: {e} "
                       f"-- will retry next cycle", flush=True)
