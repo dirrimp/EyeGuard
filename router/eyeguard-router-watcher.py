@@ -35,6 +35,13 @@ what protects the Mac's own interpreter binary, so this watcher's own code
 is exactly as editable as eyeguard-phone.py's was -- it just makes that
 one additional edit necessary, and a compromise of BOTH scripts together
 is a materially bigger, noisier action than editing one file.
+
+Uses curl for HTTPS, same as eyeguard-phone.py and for the same reason:
+this router's python3-light build has no _ssl module at all, so urllib
+can't make an HTTPS request here -- confirmed live (`python3 -c 'import
+ssl'` fails with ModuleNotFoundError) after an initial version of this
+script tried urllib.request directly and every heartbeat failed with
+"unknown url type: https".
 """
 from __future__ import annotations
 
@@ -43,9 +50,7 @@ import json
 import os
 import subprocess
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 
 CONF_PATH = os.environ.get("EG_PHONE_CONF", "/etc/eyeguard/phone.json")
 CONF = json.load(open(CONF_PATH))
@@ -57,14 +62,22 @@ VERSION = CONF.get("router_script_version", "unknown")
 CHECK_SECONDS = int(CONF.get("router_watcher_check_seconds", 300))
 
 
+def _curl(args, timeout=15):
+    try:
+        return subprocess.run(["curl", "-s", "--max-time", str(timeout)] + args,
+                              capture_output=True, text=True).stdout
+    except Exception:
+        return ""
+
+
+def _sb_headers():
+    return ["-H", f"apikey: {API_KEY}", "-H", f"Authorization: Bearer {API_KEY}",
+            "-H", "Content-Type: application/json"]
+
+
 def _rpc(name: str, params: dict):
-    req = urllib.request.Request(
-        f"{SB}/rest/v1/rpc/{name}",
-        data=json.dumps(params).encode(), method="POST",
-        headers={"apikey": API_KEY, "Authorization": f"Bearer {API_KEY}",
-                 "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=15) as r:
-        r.read()
+    _curl([f"{SB}/rest/v1/rpc/{name}"] + _sb_headers()
+          + ["-X", "POST", "-d", json.dumps(params)])
 
 
 def _fetch_manifest() -> dict | None:
@@ -72,14 +85,12 @@ def _fetch_manifest() -> dict | None:
     server has confirmed no manifest is published, or on any network
     failure. Never raises -- a network hiccup should skip this cycle, not
     be treated as tamper."""
+    url = (f"{SB}/rest/v1/router_manifests"
+           f"?version=eq.{urllib.parse.quote(VERSION, safe='')}"
+           f"&select=manifest")
+    out = _curl([url] + _sb_headers())
     try:
-        req = urllib.request.Request(
-            f"{SB}/rest/v1/router_manifests"
-            f"?version=eq.{urllib.parse.quote(VERSION, safe='')}"
-            f"&select=manifest",
-            headers={"apikey": API_KEY, "Authorization": f"Bearer {API_KEY}"})
-        with urllib.request.urlopen(req, timeout=15) as r:
-            rows = json.loads(r.read().decode())
+        rows = json.loads(out)
     except Exception:
         return None
     if not rows:
@@ -142,9 +153,6 @@ def run():
             _rpc("eg_router_watcher_heartbeat",
                  {"p_script_tampered": script_tampered,
                   "p_process_down": process_down})
-        except urllib.error.URLError as e:
-            print(f"[router-watcher] heartbeat network error: {e} -- "
-                  f"will retry next cycle", flush=True)
         except Exception as e:
             # A bad check must never kill this daemon -- same rule as
             # every other background watcher in this project.
