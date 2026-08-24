@@ -31,7 +31,15 @@ from pathlib import Path
 
 CONF_PATH = os.environ.get("EG_PHONE_CONF", "/etc/eyeguard/phone.json")
 CONF = json.load(open(CONF_PATH))
-SECRET = Path(CONF["secret_file"]).read_text().strip()
+# Admin-trust pivot (2026-08-24): Jonah is getting SSH (root shell, not just
+# the router GUI) for network administration -- the same reasoning that
+# moved the Mac off a secret key applies here, since anyone with SSH could
+# read secret_file directly. There is no secret client-side anymore -- only
+# the public anon key, same one everything else in this project already
+# uses. Every write goes through either flags' existing anon-scoped
+# insert-only RLS policy (unchanged, predates this) or a SECURITY DEFINER
+# RPC that stamps server-side (phone_status), never a raw table write.
+API_KEY = CONF["api_key"]
 
 SB = CONF["supabase_url"].rstrip("/")
 HOME_IP = CONF.get("home_ip", "")
@@ -76,7 +84,7 @@ def _curl(args, timeout=15):
 
 
 def _sb_headers():
-    return ["-H", f"apikey: {SECRET}", "-H", f"Authorization: Bearer {SECRET}",
+    return ["-H", f"apikey: {API_KEY}", "-H", f"Authorization: Bearer {API_KEY}",
             "-H", "Content-Type: application/json"]
 
 
@@ -85,9 +93,17 @@ def sb_post(path, row, prefer="return=minimal"):
           + ["-H", f"Prefer: {prefer}", "-X", "POST", "-d", json.dumps(row)])
 
 
-def sb_upsert_phone(row):
-    sb_post("/rest/v1/phone_status", row,
-            prefer="resolution=merge-duplicates,return=minimal")
+def sb_rpc(name, params):
+    _curl([f"{SB}/rest/v1/rpc/{name}"] + _sb_headers()
+          + ["-X", "POST", "-d", json.dumps(params)])
+
+
+def sb_phone_heartbeat(active):
+    # Replaces the old raw phone_status upsert -- eg_phone_heartbeat() stamps
+    # monitor_beat/last_seen with the SERVER's clock, the same reasoning as
+    # the Mac's eg_heartbeat(): no timestamp parameter exists for this
+    # script to submit, so it cannot forge one even if it tried.
+    sb_rpc("eg_phone_heartbeat", {"p_active": active})
 
 
 def home_ping_alive():
@@ -120,7 +136,7 @@ def wg_rx_bytes():
     if not WG_IFACE:
         return None
     try:
-        out = subprocess.run(["wg", "show", WG_IFACE, "transfer"],
+        out = subprocess.run(["awg", "show", WG_IFACE, "transfer"],
                              capture_output=True, text=True).stdout
     except Exception:
         return None
@@ -492,9 +508,7 @@ def heartbeat_loop():
                 "app": "iPhone", "url": None, "window_title": "phone went dark",
                 "grade": "Likely", "risk": "high", "is_nudity": False})
 
-        sb_upsert_phone({"id": 1, "monitor_beat": now_iso(),
-                         "last_seen": now_iso() if active else None,
-                         "phone_active": active})
+        sb_phone_heartbeat(active)
         time.sleep(HEARTBEAT_SECONDS)
 
 
@@ -580,7 +594,7 @@ def _adguard_protection_enabled():
 
 def _wg_peer_pubkeys():
     try:
-        out = subprocess.run(["wg", "show", "wgserver", "dump"],
+        out = subprocess.run(["awg", "show", "wgserver", "dump"],
                              capture_output=True, text=True, timeout=5).stdout
     except Exception:
         return None
@@ -643,44 +657,56 @@ def _router_tamper_flag(detail):
 
 
 def router_check_loop():
-    """Baseline on first run (no flags then -- avoids flagging the router's
-    own already-hardened state as if it were a change), then flag any drift
-    from either the baseline OR the known-hardened expected value, whichever
-    catches it: a value can drift baseline-to-baseline (a change after the
-    monitor started) or start already wrong (baseline captured a value that
-    was never actually hardened, e.g. this check being added later than the
-    setting) -- checking against _ROUTER_INVARIANTS' expected values as well
-    as the previous snapshot covers both."""
+    """Admin-trust pivot (2026-08-24): the scalar invariant checks now
+    compare directly against _ROUTER_INVARIANTS' fixed expected value on
+    EVERY cycle, no longer gated on the local baseline file also agreeing.
+
+    The original design required `baseline.get(key) == expected` before
+    alerting -- meaning a real gap opened up the moment Jonah got SSH
+    (root shell, not just the GUI): change the actual config AND
+    hand-edit ROUTER_BASELINE_PATH to match in the same window, and the
+    alert condition can never become true again, since baseline advances
+    to `current` every cycle regardless of whether something fired. A
+    locally-tamperable file gating a security alert defeats the alert.
+
+    _ROUTER_INVARIANTS' expected values are permanently fixed (unlike
+    wg_peers, which legitimately changes over time and still needs real
+    diff-against-baseline semantics, kept below unchanged) -- so there's
+    no reason to route the scalar checks through mutable local state at
+    all. `_alerted` is purely an in-memory anti-spam dedup now, not a
+    security boundary: losing it on restart just means one possible extra
+    duplicate email, not a missed detection, since the fixed-value
+    comparison itself is what actually catches drift."""
     baseline = None
     if ROUTER_BASELINE_PATH.exists():
         try:
             baseline = json.loads(ROUTER_BASELINE_PATH.read_text())
         except Exception:
             baseline = None
+    _alerted: set[str] = set()
     while True:
         try:
             current = router_snapshot()
-            if baseline is None:
-                for key, expected, detail in _ROUTER_INVARIANTS:
-                    if current.get(key) != expected:
-                        _router_tamper_flag(f"{detail} (found at first check)")
-                baseline = current
-            else:
-                for key, expected, detail in _ROUTER_INVARIANTS:
-                    if current.get(key) != expected and baseline.get(key) == expected:
+            for key, expected, detail in _ROUTER_INVARIANTS:
+                if current.get(key) != expected:
+                    if key not in _alerted:
                         _router_tamper_flag(detail)
-                cur_peers = current.get("wg_peers")
-                base_peers = baseline.get("wg_peers")
-                if cur_peers is not None and base_peers is not None:
-                    added = set(cur_peers) - set(base_peers)
-                    removed = set(base_peers) - set(cur_peers)
-                    for pk in added:
-                        _router_tamper_flag(
-                            f"a new WireGuard peer was added ({pk[:12]}...)")
-                    for pk in removed:
-                        _router_tamper_flag(
-                            f"a WireGuard peer was removed ({pk[:12]}...)")
-                baseline = current
+                        _alerted.add(key)
+                elif key in _alerted:
+                    _alerted.discard(key)  # recovered -- a future drift re-alerts
+
+            cur_peers = current.get("wg_peers")
+            base_peers = (baseline or {}).get("wg_peers")
+            if cur_peers is not None and base_peers is not None:
+                added = set(cur_peers) - set(base_peers)
+                removed = set(base_peers) - set(cur_peers)
+                for pk in added:
+                    _router_tamper_flag(
+                        f"a new WireGuard peer was added ({pk[:12]}...)")
+                for pk in removed:
+                    _router_tamper_flag(
+                        f"a WireGuard peer was removed ({pk[:12]}...)")
+            baseline = current
             ROUTER_BASELINE_PATH.write_text(json.dumps(baseline))
         except Exception as ex:
             print(f"[eyeguard-phone] router_check {type(ex).__name__}: {ex}",
