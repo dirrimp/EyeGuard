@@ -111,6 +111,9 @@ check("session_watcher checks both new-account and wrong-user",
 check("session_watcher checks for injected libraries in the monitor agent",
       "_untrusted_library" in session_watcher_src
       and "_TRUSTED_LIB_PREFIXES" in session_watcher_src)
+check("session_watcher checks for an attached debugger via the kernel's own P_TRACED flag",
+      "_is_debugger_attached" in session_watcher_src
+      and "_P_TRACED" in session_watcher_src)
 check("deploy_watcher polls GitHub and actually deploys on change",
       "_latest_main_sha" in deploy_watcher_src
       and "_deploy" in deploy_watcher_src)

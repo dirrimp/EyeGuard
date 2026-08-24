@@ -34,6 +34,25 @@ Three checks, every `check_seconds`:
      baseline needed, no locally-tamperable trust anchor, matching the
      same "don't trust something a local admin could also tamper with"
      reasoning that moved integrity.py off a local baseline file.
+  4. A debugger is attached to the monitor agent. Dylib injection (#3) only
+     catches ONE way to patch a running process -- an attacker could
+     instead attach lldb/gdb directly and rewrite live Python heap objects
+     in place, no external library involved at all. Checked via the
+     kernel's own P_TRACED process flag (sysctl CTL_KERN/KERN_PROC/
+     KERN_PROC_PID), the same mechanism debuggers themselves rely on to
+     know a target is already claimed. The exact byte offset of p_flag
+     within struct kinfo_proc, and P_TRACED's value, were extracted by
+     compiling a tiny C program against the real macOS system headers
+     (never hand-guessed) and cross-checked against the returned struct's
+     actual size before being hardcoded here -- ctypes calls into sysctl
+     without correctly declared argtypes silently corrupt data rather than
+     erroring, which is exactly what happened on a first attempt at this
+     during development, caught by comparing the returned size against
+     the compiler's own sizeof(). Note: on this Mac, debugger attachment
+     is ALREADY blocked by default at the OS level (macOS's Developer
+     Tools authorization gate) -- for ANYONE, even root -- which is a
+     real, independent barrier this check adds a second layer behind, not
+     the only thing standing in the way.
 
 Reports both via eg_watcher_heartbeat() (supabase/anon_client_pivot.sql),
 which stamps its own server-side timestamp -- same principle as the main
@@ -53,6 +72,8 @@ adding an account without anyone noticing at all.
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
 import json
 import re
 import subprocess
@@ -90,6 +111,47 @@ _TRUSTED_LIB_PREFIXES = (
 # up against real vmmap output (verified against real captured output,
 # including a path with a space in it, before shipping this).
 _VMMAP_PATH_RE = re.compile(r"SM=\S+\s+(/.+)$")
+
+# ---- P_TRACED check: sysctl(CTL_KERN, KERN_PROC, KERN_PROC_PID, pid) ------
+# All four values below were extracted by compiling a tiny C program against
+# the REAL macOS system headers (<sys/sysctl.h>, <sys/proc.h>) on the actual
+# target OS/arch, never hand-guessed from documentation -- struct layouts
+# like kinfo_proc are not something worth risking a wrong offset on, since a
+# wrong offset fails silently (always reads as "not traced") rather than
+# erroring. _KINFO_PROC_SIZE is checked against sysctl's own returned size
+# every call as a cheap sanity guard against this exact failure mode.
+_CTL_KERN, _KERN_PROC, _KERN_PROC_PID = 1, 14, 1
+_P_FLAG_OFFSET = 32     # offsetof(struct kinfo_proc, kp_proc.p_flag)
+_P_TRACED = 0x800
+_KINFO_PROC_SIZE = 648  # sizeof(struct kinfo_proc) on this target
+
+_libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+_libc.sysctl.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_uint,
+                          ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t),
+                          ctypes.c_void_p, ctypes.c_size_t]
+_libc.sysctl.restype = ctypes.c_int
+
+
+def _is_debugger_attached(pid: int) -> bool | None:
+    """True if the kernel's P_TRACED flag is set for `pid`, None on any
+    lookup failure (process exited, sysctl error, or the returned struct
+    doesn't match the expected size -- treated as unreadable, not a
+    signal, rather than trusting a mismatched buffer)."""
+    try:
+        mib = (ctypes.c_int * 4)(_CTL_KERN, _KERN_PROC, _KERN_PROC_PID, pid)
+        size = ctypes.c_size_t(0)
+        if _libc.sysctl(mib, 4, None, ctypes.byref(size), None, 0) != 0:
+            return None
+        buf = ctypes.create_string_buffer(size.value)
+        if _libc.sysctl(mib, 4, buf, ctypes.byref(size), None, 0) != 0:
+            return None
+        if size.value != _KINFO_PROC_SIZE:
+            return None  # not the struct shape this was verified against
+        p_flag = int.from_bytes(
+            buf.raw[_P_FLAG_OFFSET:_P_FLAG_OFFSET + 4], "little")
+        return (p_flag & _P_TRACED) != 0
+    except Exception:
+        return None
 
 
 def _local_user_accounts() -> dict[str, int] | None:
@@ -174,15 +236,12 @@ def _loaded_library_paths(pid: int) -> set[str] | None:
     return paths or None
 
 
-def _untrusted_library() -> str | None:
+def _untrusted_library(pid: int) -> str | None:
     """The path of an untrusted loaded library, if the monitor agent has
     one loaded right now -- the classic signature of DYLD_INSERT_LIBRARIES-
-    style in-memory injection. None if the agent isn't running, vmmap
-    couldn't be read this cycle, or everything loaded is from a trusted
-    root -- none of those are themselves suspicious."""
-    pid = _monitor_agent_pid()
-    if pid is None:
-        return None
+    style in-memory injection. None if vmmap couldn't be read this cycle,
+    or everything loaded is from a trusted root -- neither is itself
+    suspicious."""
     paths = _loaded_library_paths(pid)
     if paths is None:
         return None
@@ -224,13 +283,14 @@ class SessionWatcher:
         with urllib.request.urlopen(req, timeout=15) as r:
             r.read()
 
-    def _check_once(self) -> tuple[bool, bool, bool]:
-        """Returns (new_account, wrong_user, untrusted_library). Baselines
-        silently on first run -- no accounts existing yet, or the baseline
-        file missing, both just mean "start fresh from here," matching the
-        established baseline-then-flag-new pattern used everywhere else in
-        this project. The library check needs no baseline at all -- see
-        _untrusted_library()."""
+    def _check_once(self) -> tuple[bool, bool, bool, bool]:
+        """Returns (new_account, wrong_user, untrusted_library,
+        debugger_attached). Baselines silently on first run -- no accounts
+        existing yet, or the baseline file missing, both just mean "start
+        fresh from here," matching the established baseline-then-flag-new
+        pattern used everywhere else in this project. The library and
+        debugger checks need no baseline at all -- see _untrusted_library()
+        and _is_debugger_attached()."""
         new_account = False
         current = _local_user_accounts()
         if current is not None:
@@ -255,13 +315,23 @@ class SessionWatcher:
                   f"expected '{self.expected_user}'", flush=True)
             wrong_user = True
 
-        untrusted_path = _untrusted_library()
-        untrusted_library = untrusted_path is not None
-        if untrusted_library:
-            print(f"[session_watcher] untrusted library loaded in monitor "
-                  f"agent: {untrusted_path}", flush=True)
+        untrusted_library = False
+        debugger_attached = False
+        pid = _monitor_agent_pid()
+        if pid is not None:
+            untrusted_path = _untrusted_library(pid)
+            untrusted_library = untrusted_path is not None
+            if untrusted_library:
+                print(f"[session_watcher] untrusted library loaded in "
+                      f"monitor agent: {untrusted_path}", flush=True)
 
-        return new_account, wrong_user, untrusted_library
+            traced = _is_debugger_attached(pid)
+            debugger_attached = bool(traced)
+            if debugger_attached:
+                print(f"[session_watcher] debugger attached to monitor "
+                      f"agent (pid {pid})", flush=True)
+
+        return new_account, wrong_user, untrusted_library, debugger_attached
 
     def run(self):
         print(f"[session_watcher] active, checking every "
@@ -269,11 +339,13 @@ class SessionWatcher:
               flush=True)
         while True:
             try:
-                new_account, wrong_user, untrusted_library = self._check_once()
+                (new_account, wrong_user, untrusted_library,
+                 debugger_attached) = self._check_once()
                 self._rpc("eg_watcher_heartbeat",
                           {"p_new_account": new_account,
                            "p_wrong_user": wrong_user,
-                           "p_untrusted_library": untrusted_library})
+                           "p_untrusted_library": untrusted_library,
+                           "p_debugger_attached": debugger_attached})
             except urllib.error.URLError as e:
                 print(f"[session_watcher] heartbeat network error: {e} "
                       f"-- will retry next cycle", flush=True)
