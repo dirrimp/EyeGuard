@@ -106,11 +106,23 @@ _TRUSTED_LIB_PREFIXES = (
 # vmmap's plain-text columns aren't fixed-width and a loaded library's path
 # can itself contain spaces (e.g. "Library/Application Support/...") -- a
 # naive whitespace split breaks on that. Every region line that references a
-# file has "SM=<mode>" immediately before the path with nothing after it, so
-# anchoring there and capturing the rest of the line is what actually holds
-# up against real vmmap output (verified against real captured output,
-# including a path with a space in it, before shipping this).
-_VMMAP_PATH_RE = re.compile(r"SM=\S+\s+(/.+)$")
+# file has "<current-prot>/<max-prot> SM=<mode>" immediately before the
+# path with nothing after it, so anchoring there and capturing both the
+# CURRENT protection and the path is what holds up against real vmmap
+# output (verified against real captured output, including a path with a
+# space in it, before shipping this).
+#
+# Only the CURRENT protection field is checked for 'x' -- not the max
+# protection. A first version of this check used the whole "cur/max" field,
+# which produced a real false positive in production: ordinary read-only
+# resource files (an AppKit .loctable, an asset catalog) commonly show
+# "r--/rwx" -- current is read-only (not executable code), max is just the
+# ceiling of what COULD be mprotect'd, which is a generic default for many
+# benign mappings, not itself suspicious. Checking current-only correctly
+# excludes plain data files while still catching a real loaded dylib, which
+# always shows a genuine "r-x" (or similar) CURRENT protection on its
+# executable segment.
+_VMMAP_LINE_RE = re.compile(r"([a-zA-Z-]+)/[a-zA-Z-]+\s+SM=\S+\s+(/.+)$")
 
 # ---- P_TRACED check: sysctl(CTL_KERN, KERN_PROC, KERN_PROC_PID, pid) ------
 # All four values below were extracted by compiling a tiny C program against
@@ -215,12 +227,16 @@ def _monitor_agent_pid() -> int | None:
         return None
 
 
-def _loaded_library_paths(pid: int) -> set[str] | None:
-    """Every file path vmmap reports as mapped into `pid`'s address space,
-    or None on any failure (this daemon already runs as root, so a failure
-    here means vmmap itself had a problem -- e.g. the process exited between
-    the pgrep and this call -- not a permissions issue; never treated as a
-    signal, just skip this cycle)."""
+def _loaded_executable_paths(pid: int) -> set[str] | None:
+    """File paths vmmap reports as mapped into `pid`'s address space WITH
+    currently-executable protection on at least one region -- i.e. paths
+    that could actually contain running code, not incidental read-only
+    data (resource files, preference caches, etc. commonly get mapped for
+    entirely unrelated reasons and must not be treated as "a loaded
+    library"). None on any failure (this daemon already runs as root, so a
+    failure here means vmmap itself had a problem -- e.g. the process
+    exited between the pgrep and this call -- not a permissions issue;
+    never treated as a signal, just skip this cycle)."""
     try:
         out = subprocess.run(
             ["vmmap", str(pid)],
@@ -230,9 +246,9 @@ def _loaded_library_paths(pid: int) -> set[str] | None:
         return None
     paths = set()
     for line in out.splitlines():
-        m = _VMMAP_PATH_RE.search(line)
-        if m:
-            paths.add(m.group(1))
+        m = _VMMAP_LINE_RE.search(line)
+        if m and "x" in m.group(1):
+            paths.add(m.group(2))
     return paths or None
 
 
@@ -242,7 +258,7 @@ def _untrusted_library(pid: int) -> str | None:
     style in-memory injection. None if vmmap couldn't be read this cycle,
     or everything loaded is from a trusted root -- neither is itself
     suspicious."""
-    paths = _loaded_library_paths(pid)
+    paths = _loaded_executable_paths(pid)
     if paths is None:
         return None
     for path in sorted(paths):
