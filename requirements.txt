@@ -14,6 +14,11 @@ nudenet>=3.4
 # tested tokenizer/processor behavior. NO torch / torchvision needed at runtime.
 transformers>=4.44,<5
 
+# Client-side encryption of uploaded review frames (eyeguard/frame_crypto.py)
+# -- so a managed-cloud Supabase breach or anon-key leak can't expose actual
+# image content, only whoever holds the private key (never this device).
+cryptography>=42
+
 # Menu bar app (pulls in pyobjc). Used by eyeguard.menubar / install_agent.sh.
 rumps>=0.4
 pyobjc-framework-Quartz>=10  # window titles via CGWindowList (Screen Recording)

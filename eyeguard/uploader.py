@@ -123,12 +123,19 @@ def _score(reason: str) -> float | None:
 
 class SupabaseUploader:
     def __init__(self, url: str, api_key: str, pending_path: str,
-                 retry_seconds: int = 60, heartbeat: bool = True):
+                 retry_seconds: int = 60, heartbeat: bool = True,
+                 encryption_public_key_pem: str | None = None):
         self.base = url.rstrip("/")
         self.api_key = api_key
         self.pending_path = Path(pending_path)
         self.retry_seconds = retry_seconds
         self.heartbeat = heartbeat
+        # When set, review-frame bytes are encrypted (see frame_crypto.py)
+        # before they ever leave this process -- what lands in Storage is
+        # opaque ciphertext, viewable only by whoever holds the matching
+        # private key (never this device). None = upload as plain JPEG,
+        # same as before this existed.
+        self.encryption_public_key_pem = encryption_public_key_pem
         self._suspended = False  # True between sleep/power-off and wake
         self._status_provider = None  # returns {screen_ok, frames_analyzed}
         self._heartbeat_failing = False  # logged on first failure + recovery only
@@ -352,8 +359,18 @@ class SupabaseUploader:
         local = rec.get("saved_frame")
         if not local or not Path(local).exists():
             return True  # flag with no image -> no alert; drop from queue
+        data = Path(local).read_bytes()
         remote = Path(local).name
-        self._put_image(remote, Path(local).read_bytes())    # raises on failure
+        if self.encryption_public_key_pem:
+            # Encrypt BEFORE this process ever hands the bytes to the network
+            # -- what lands in Storage is opaque ciphertext, not a viewable
+            # JPEG, so a data breach or anyone holding the anon key can't see
+            # actual frame content, only whoever holds the private key
+            # (never this device -- see eyeguard/frame_crypto.py).
+            from .frame_crypto import encrypt_frame
+            data = encrypt_frame(data, self.encryption_public_key_pem)
+            remote += ".enc"
+        self._put_image(remote, data)                         # raises on failure
         self._post_row(self._row(rec, remote))               # raises on failure
         return True
 
@@ -387,10 +404,12 @@ class SupabaseUploader:
         # exists for anon), so this key can create an image but never
         # overwrite or erase one. A 409 means it already exists (an earlier
         # attempt succeeded) -> fine.
+        content_type = ("application/octet-stream"
+                        if remote_path.endswith(".enc") else "image/jpeg")
         url = f"{self.base}/storage/v1/object/frames/{remote_path}"
         req = urllib.request.Request(
             url, data=data, method="POST",
-            headers=self._headers({"Content-Type": "image/jpeg"}))
+            headers=self._headers({"Content-Type": content_type}))
         try:
             with _opener.open(req, timeout=20) as r:
                 r.read()

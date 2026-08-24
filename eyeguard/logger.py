@@ -165,18 +165,37 @@ class FlagLogger:
             f.write(json.dumps(record) + "\n")
         return record
 
+    _TITLE_TRIM = 60
+
     def log_activity(self, context: dict | None = None) -> dict:
         """Log a clean (GREEN) browsing record: what app/site is active, with a
         timestamp and no image. This builds the full activity trail so a reviewer
-        sees everywhere the user went — not only frames the detector flagged."""
+        sees everywhere the user went — not only frames the detector flagged.
+
+        window_title is trimmed here specifically because this is the
+        highest-volume, routine, never-itself-an-incident record type (sampled
+        every ~20s by default) — a browser tab title can carry a full search
+        query or article headline, well beyond "which app/site was active."
+        When a URL is already present it's the real identifying signal, so the
+        title is dropped entirely as redundant; for non-browser apps with no
+        URL to fall back on, the title is kept (it's the only location signal
+        those rows have) but capped short, rather than logged in full."""
         ctx = context or {}
+        url = ctx.get("url")
+        title = ctx.get("window_title")
+        if url:
+            trimmed_title = None
+        elif title and len(title) > self._TITLE_TRIM:
+            trimmed_title = title[: self._TITLE_TRIM] + "…"
+        else:
+            trimmed_title = title
         record = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "verdict": "clear",
             "reason": "activity",
             "app": ctx.get("app"),
-            "url": ctx.get("url"),
-            "window_title": ctx.get("window_title"),
+            "url": url,
+            "window_title": trimmed_title,
         }
         with self.flag_log.open("a") as f:
             f.write(json.dumps(record) + "\n")
