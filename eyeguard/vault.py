@@ -28,6 +28,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from .integrity import IntegrityWatcher
 from .uploader import SupabaseUploader
 
 _BASE = Path(__file__).resolve().parent.parent
@@ -225,11 +226,15 @@ class SleepWatcher:
 class VaultDaemon:
     def __init__(self, uploader: SupabaseUploader, socket_path: str,
                  agent_timeout: int = 90, verify_peer: bool = True,
-                 expected_launcher: str | None = None):
+                 expected_launcher: str | None = None,
+                 integrity_enabled: bool = True,
+                 integrity_check_seconds: int = 300):
         self.uploader = uploader
         self.socket_path = socket_path
         self.agent_timeout = agent_timeout
         self.verify_peer = verify_peer
+        self.integrity_enabled = integrity_enabled
+        self.integrity_check_seconds = integrity_check_seconds
         # The managed agent must be launched as `<python> <base>/run_agent.py`.
         # Running via an absolute launcher path means the code dir wins sys.path,
         # so PYTHONPATH/cwd can't be used to shadow in fake code.
@@ -370,6 +375,17 @@ class VaultDaemon:
         # is pure redundancy, not a replacement that can race the old one.
         threading.Thread(target=SleepWatcher(self.uploader).run,
                          daemon=True).start()
+        if self.integrity_enabled:
+            # Deployed-code/config integrity: independent of the agent
+            # process entirely, so it keeps working even if the agent is
+            # killed or its own code is edited. See integrity.py's module
+            # docstring for why this lives here and not in menubar.py.
+            threading.Thread(
+                target=IntegrityWatcher(
+                    self.uploader, _BASE,
+                    check_seconds=self.integrity_check_seconds,
+                ).run,
+                daemon=True).start()
         print(f"[vault] listening on {self.socket_path}", flush=True)
         while True:
             try:
@@ -456,9 +472,13 @@ def main():
     sb = cfg.get("supabase", {})
     sock = sb.get("socket_path", "/var/run/eyeguard.sock")
     uploader = build_uploader_from_config(cfg)
+    fi = cfg.get("file_integrity", {})
     VaultDaemon(uploader, sock,
                 agent_timeout=int(sb.get("agent_timeout", 90)),
-                verify_peer=bool(sb.get("verify_peer", True))).serve()
+                verify_peer=bool(sb.get("verify_peer", True)),
+                integrity_enabled=bool(fi.get("enabled", True)),
+                integrity_check_seconds=int(fi.get("check_seconds", 300)),
+                ).serve()
 
 
 if __name__ == "__main__":
