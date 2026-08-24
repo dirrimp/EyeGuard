@@ -204,6 +204,15 @@ arbiter:
     - "a stylized 3D cartoon game character"
     - "a simple cartoon figure with a drawn smiley face"
     - "a video game character standing in a bedroom"
+    # PIXAR-STYLE 3D ANIMATED MOVIE CHARACTERS — a different failure mode from
+    # the blob-game-character case above: a photorealistic-lit Buzz Lightyear
+    # closeup (Toy Story-style animation) scored clip-red 0.90 on "a woman's
+    # bare naked buttocks". The existing cartoon anchors above are all
+    # flat/simple-style and didn't cover realistically-rendered 3D animated
+    # films.
+    - "a Pixar-style 3D animated movie character"
+    - "a closeup of an animated movie character's face"
+    - "a realistically rendered 3D cartoon character in a family movie"
     # PHOTO SLIDESHOWS / WEDDING + FAMILY PHOTOS (a woman in a modest summer
     # dress matched "a woman in a short skirt")
     - "a wedding or engagement photo of a couple"
@@ -469,6 +478,21 @@ context_risk:
     - "fortnite"
     - "minecraft"
     - "ishowspeed"
+    # Mainstream licensed streaming — verified live (2026-08-23/24) against
+    # actual saved frames: a completely benign Monk (Prime Video) dialogue
+    # scene scored clip-red 0.85 ("a topless woman with bare breasts") and
+    # clip-yellow up to 0.90 ("a low-cut top") on ordinary TV fashion; a
+    # Pixar-style animated Buzz Lightyear closeup on a free movie site scored
+    # clip-red 0.90 ("a woman's bare naked buttocks"). None of today's false
+    # REDs from these sources reached low_risk_red_min_confidence (0.93), so
+    # this discount alone would have suppressed every one of them while still
+    # letting a genuinely 0.93+ confident RED through.
+    - "prime video"
+    - "netflix"
+    - "hulu"
+    - "disney+"
+    - "hbo max"
+    - "7reels"          # the specific free-movie site that misfired above
 
   # HIGH RISK — real chance of suggestive content; keep and grade up.
   high_risk:
