@@ -65,6 +65,7 @@ for path, val in [
         ("supabase.heartbeat", sb.get("heartbeat")),
         ("file_integrity.enabled", cfg.get("file_integrity", {}).get("enabled")),
         ("session_watcher.enabled", cfg.get("session_watcher", {}).get("enabled")),
+        ("deploy_watcher.enabled", cfg.get("deploy_watcher", {}).get("enabled")),
         ("context_risk.enabled", cr.get("enabled")),
         ("activity_logging.enabled", cfg["activity_logging"].get("enabled")),
         ("drm.enabled", cfg["drm"].get("enabled")),
@@ -94,6 +95,7 @@ print("— security-critical code is still wired —")
 menu = (ROOT / "eyeguard" / "menubar.py").read_text()
 uploader_src = (ROOT / "eyeguard" / "uploader.py").read_text()
 session_watcher_src = (ROOT / "eyeguard" / "session_watcher.py").read_text()
+deploy_watcher_src = (ROOT / "eyeguard" / "deploy_watcher.py").read_text()
 check("eyeguard/vault.py deleted (admin-trust-model pivot)",
       not (ROOT / "eyeguard" / "vault.py").exists())
 check("no secret/service_role key anywhere in uploader.py",
@@ -106,6 +108,9 @@ check("menubar wires the (manifest-based) integrity watcher",
 check("session_watcher checks both new-account and wrong-user",
       "_local_user_accounts" in session_watcher_src
       and "_active_console_user" in session_watcher_src)
+check("deploy_watcher polls GitHub and actually deploys on change",
+      "_latest_main_sha" in deploy_watcher_src
+      and "_deploy" in deploy_watcher_src)
 check("menubar applies context-risk", "assess(" in menu)
 check("menubar log-tamper detection present", "report_tamper" in menu
       and "_check_log_tamper" in menu)
