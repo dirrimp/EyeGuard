@@ -2,7 +2,8 @@
   "_comment": "Copy to /etc/eyeguard/phone.json and fill in the CAPS values.",
 
   "supabase_url": "https://ucgldleacehxjjwwqomk.supabase.co",
-  "secret_file": "/etc/eyeguard/.supabase_secret",
+  "_key": "Admin-trust pivot (2026-08-24): the public anon/publishable key -- safe to commit, same one the Mac and every other client in this project uses. There is no secret key on the router anymore; every write goes through either flags' anon-scoped insert-only RLS policy or a SECURITY DEFINER RPC that stamps server-side.",
+  "api_key": "sb_publishable_y9pDf3aBNY4Le5u9tbUXzg_qCRvMn-b",
 
   "_home": "The phone's LAN identity when on home wifi. Set a Reserved IP for it in the router's Clients page first, and turn OFF Private Wi-Fi Address on the phone for this network -- otherwise the IP/MAC drift and capture silently stops matching.",
   "home_ip": "192.168.8.153",
@@ -17,9 +18,13 @@
   "green_repeat_seconds": 900,
   "heartbeat_seconds": 20,
 
-  "_router_check": "Router config tamper-evidence: periodically checks that AdGuard protection, Block-DoT, WAN default-deny, SSH key-only auth, GoodCloud staying disabled, the admin GUI staying HTTPS-only, and the WireGuard peer set all still match the hardened state -- flags a RED tamper alert on any drift. Baselines silently on first run.",
+  "_router_check": "Router config tamper-evidence: periodically checks that AdGuard protection, Block-DoT, WAN default-deny, SSH key-only auth, GoodCloud staying disabled, the admin GUI staying HTTPS-only, and the WireGuard peer set all still match the hardened state -- flags a RED tamper alert on any drift. The scalar checks compare directly against the fixed expected value every cycle (admin-trust pivot, 2026-08-24) -- NOT gated on the local baseline file also agreeing, since that file is exactly as editable as the config it's meant to catch drift in once SSH is in play. wg_peers still diffs against the local baseline -- a known, accepted residual (the peer set legitimately changes over time, unlike the fixed invariants).",
   "router_check_seconds": 300,
   "router_baseline_file": "/etc/eyeguard/router_baseline.json",
+
+  "_router_watcher": "A SEPARATE process (eyeguard-router-watcher.py, its own service) that verifies eyeguard-phone.py's on-disk hash against a manifest published server-side, and that the process is actually running -- catches the case where eyeguard-phone.py itself was edited to disable its own checks, which nothing INSIDE that same script could ever detect. router_script_version must match a version key already published via deploy/publish_router_manifest.sh.",
+  "router_script_version": "unknown",
+  "router_watcher_check_seconds": 300,
 
   "_tor": "Tor bypass detection: DNS-based classify() is blind to Tor by design (it resolves sites inside the encrypted circuit), so this matches outbound TCP:443 SYNs against the current public Guard-relay IP set (Tor's own Onionoo directory API) -- a client's first hop must be Guard-flagged. Refreshed periodically since guard relays churn; a failed refresh keeps the last-known-good list rather than going blind. Known accepted residual: pluggable transports/bridges (obfs4, meek, snowflake) are designed to evade exactly this kind of IP-list detection -- this catches default Tor Browser/Onion Browser usage, not a bridge-configured evasion.",
   "tor_refresh_seconds": 21600,
