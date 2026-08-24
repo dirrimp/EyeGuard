@@ -42,12 +42,20 @@ from pathlib import Path
 
 _MANIFEST_TIMEOUT = 15
 
+# Distinct from "the server told us this version has no manifest" -- a
+# network hiccup or a transient API error must never be treated as evidence
+# of anything (self-signing an unpublished version is a real signal; a
+# dropped connection is not), so it's raised instead of folded into the same
+# None the confirmed-absent case returns.
+class _ManifestUnreachable(Exception):
+    pass
+
 
 def _fetch_manifest(url: str, api_key: str, version: str) -> dict | None:
-    """{rel_path: "sha256:..."} for the given version, or None if the
-    server has no manifest published for it, or on any network failure.
-    Never raises -- a network hiccup should skip this cycle, not crash the
-    watcher or read as tamper."""
+    """{rel_path: "sha256:..."} for the given version, or None if the server
+    has confirmed no manifest is published for it. Raises
+    _ManifestUnreachable on any network/API failure -- the caller skips the
+    cycle rather than treating a dropped connection as an unknown version."""
     try:
         req = urllib.request.Request(
             f"{url.rstrip('/')}/rest/v1/release_manifests"
@@ -55,10 +63,10 @@ def _fetch_manifest(url: str, api_key: str, version: str) -> dict | None:
             headers={"apikey": api_key, "Authorization": f"Bearer {api_key}"})
         with urllib.request.urlopen(req, timeout=_MANIFEST_TIMEOUT) as r:
             rows = json.loads(r.read().decode())
-    except Exception:
-        return None
+    except Exception as e:
+        raise _ManifestUnreachable(str(e)) from e
     if not rows:
-        return None  # no manifest published for this exact version
+        return None  # confirmed: no manifest published for this exact version
     manifest = rows[0].get("manifest") or {}
     return manifest.get("files")
 
@@ -79,12 +87,17 @@ class IntegrityWatcher:
     in-progress update), and only once per path per drift episode, not every
     cycle -- identical debounce shape to the original git-based version.
 
-    If the server has no manifest for the locally-running `version` at all,
-    that's treated as a distinct soft "unknown version" signal (logged
-    locally, not reported as tamper) rather than conflated with genuine
-    content drift -- an out-of-date install isn't the same thing as a
-    tampered one.
+    If the server confirms no manifest exists for the locally-running
+    `version` at all, that's routed through the SAME 2-consecutive-check
+    debounce and report_tamper() alert as a file hash mismatch -- a version
+    string with no published manifest never came from the normal
+    build/publish process (only reachable with the maintainer's own
+    service_role key), so it's exactly as much a signal as an edited file,
+    not a softer one. A transient network/API failure is NOT the same thing
+    and is never treated as this signal -- see _ManifestUnreachable.
     """
+
+    _UNKNOWN_VERSION_KEY = "__unknown_version__"
 
     def __init__(self, uploader, base_dir: str | Path, url: str,
                  api_key: str, version: str, check_seconds: int = 300):
@@ -96,22 +109,21 @@ class IntegrityWatcher:
         self.check_seconds = check_seconds
         self._pending: dict[str, int] = {}   # path -> consecutive-mismatch count
         self._reported: set[str] = set()     # paths already alerted for THIS drift
-        self._warned_unknown_version = False  # log the soft warning once, not every cycle
 
     def _check_once(self):
-        manifest = _fetch_manifest(self.url, self.api_key, self.version)
+        try:
+            manifest = _fetch_manifest(self.url, self.api_key, self.version)
+        except _ManifestUnreachable:
+            return  # transient -- skip this cycle, never treated as a signal
+
         if manifest is None:
-            if not self._warned_unknown_version:
-                print(f"[integrity] no published manifest for version "
-                      f"'{self.version}' (or the server is unreachable) -- "
-                      f"integrity check paused, not treated as tamper",
-                      flush=True)
-                self._warned_unknown_version = True
+            self._note_mismatch(
+                self._UNKNOWN_VERSION_KEY,
+                f"no manifest has ever been published for the running "
+                f"version '{self.version}' -- this build did not come from "
+                f"the normal release/publish process")
             return
-        if self._warned_unknown_version:
-            print(f"[integrity] manifest for version '{self.version}' is "
-                  f"available again -- resuming checks", flush=True)
-            self._warned_unknown_version = False
+        self._clear(self._UNKNOWN_VERSION_KEY)
 
         for rel_path, expected_hash in manifest.items():
             live_hash = _local_hash(self.base_dir, rel_path)
