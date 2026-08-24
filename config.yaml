@@ -634,6 +634,19 @@ vm_monitor:
   enabled: true
   scan_seconds: 300   # VM installs are rare; no need to poll as often as extensions
 
+# Deployed-code/config integrity watcher (runs inside the ROOT vault daemon,
+# not the agent -- see eyeguard/integrity.py's module docstring for why).
+# Every git-tracked file under the deployed tree is compared against its
+# HEAD-committed content each cycle; any content change or deletion outside
+# a real `update.sh` deploy is reported through the same report_tamper()
+# path used by the existing flags.jsonl / flagged-frame tamper checks, which
+# already routes to a dedicated "tampering detected" alert email. Same
+# tamper-EVIDENT (not tamper-proof) standing philosophy as the rest of this
+# project -- see integrity.py for the honest limits.
+file_integrity:
+  enabled: true
+  check_seconds: 300   # config/code edits should be caught within 5 min
+
 # Text + signal layer. The image detector can't see the TEXTUAL side of
 # behavior — erotic text, sexual chat, explicit searches — because there's no
 # nude image to classify. These two on-device checks close that gap.
