@@ -1,10 +1,20 @@
 #!/bin/bash
 # EyeGuard hardened-runtime signing — run with sudo, from Dad's own session.
-# Signs the actual interpreter both the vault daemon and session agent run
-# as, so lldb-attach / DYLD_INSERT_LIBRARIES neutering-in-place no longer
-# works. Free (ad-hoc), no Apple Developer Program needed. Backs up first,
-# verifies the app still runs, restarts both processes, and rolls back
-# automatically if anything looks wrong after restart.
+# Signs the actual interpreter the session agent and session watcher both
+# run as, so lldb-attach / DYLD_INSERT_LIBRARIES neutering-in-place without
+# a restart no longer works. Free (ad-hoc), no Apple Developer Program
+# needed. Backs up first, verifies the app still runs, restarts both
+# processes, and rolls back automatically if anything looks wrong after
+# restart.
+#
+# Admin-trust-model pivot (2026-08-24): its relative importance has dropped
+# now that the monitored user has full admin and can just as easily
+# uninstall/replace the binary outright -- this still closes a real, DIFFERENT
+# gap the file-integrity manifest check can't (in-memory patching of a
+# RUNNING process without touching any file on disk, so the manifest stays
+# clean), so it's kept, just not oversold as the primary defense it used to
+# be when it was the one thing standing between a Standard user and a
+# privileged process.
 set -euo pipefail
 
 PYBIN="/Applications/EyeGuard.app/Contents/Resources/python/bin/python3.12"
@@ -55,9 +65,9 @@ echo "== 4/6: smoke test (unsigned-of-daemon-context import check) =="
 }
 echo "Smoke test OK."
 
-echo "== 5/6: restarting vault daemon + session agent =="
-launchctl kickstart -k system/com.eyeguard.vault
+echo "== 5/6: restarting session agent + session watcher =="
 launchctl kickstart -k "gui/${MONITORED_UID}/com.eyeguard.monitor"
+launchctl kickstart -k system/com.eyeguard.sessionwatcher
 sleep 5
 
 echo "== 6/6: verifying both are up and not crash-looping =="
@@ -66,25 +76,25 @@ echo "== 6/6: verifying both are up and not crash-looping =="
 # sudo, targeting jonahdirrim's domain from patrickdirrim's session returns
 # no pid line despite the process genuinely running per `ps`) -- so verify
 # via the process table instead, which is visible regardless of caller.
-VAULT_PID="$(pgrep -f "eyeguard\.vault --config" | head -1 || true)"
 AGENT_PID="$(pgrep -f "run_agent\.py" | head -1 || true)"
-if [ -z "${VAULT_PID:-}" ] || [ -z "${AGENT_PID:-}" ]; then
+WATCHER_PID="$(pgrep -f "eyeguard\.session_watcher" | head -1 || true)"
+if [ -z "${AGENT_PID:-}" ] || [ -z "${WATCHER_PID:-}" ]; then
   echo "One or both processes did not come back up -- restoring backup and restarting again." >&2
   cp "$BACKUP" "$PYBIN"
-  launchctl kickstart -k system/com.eyeguard.vault
   launchctl kickstart -k "gui/${MONITORED_UID}/com.eyeguard.monitor"
+  launchctl kickstart -k system/com.eyeguard.sessionwatcher
   exit 1
 fi
 sleep 3
-if ! ps -p "$VAULT_PID" > /dev/null || ! ps -p "$AGENT_PID" > /dev/null; then
+if ! ps -p "$AGENT_PID" > /dev/null || ! ps -p "$WATCHER_PID" > /dev/null; then
   echo "One or both processes died shortly after restart -- restoring backup and restarting again." >&2
   cp "$BACKUP" "$PYBIN"
-  launchctl kickstart -k system/com.eyeguard.vault
   launchctl kickstart -k "gui/${MONITORED_UID}/com.eyeguard.monitor"
+  launchctl kickstart -k system/com.eyeguard.sessionwatcher
   exit 1
 fi
 
 echo
-echo "SUCCESS. vault pid=$VAULT_PID agent pid=$AGENT_PID, both stable."
+echo "SUCCESS. agent pid=$AGENT_PID watcher pid=$WATCHER_PID, both stable."
 echo "Backup kept at: $BACKUP (safe to delete once you've confirmed heartbeats/flags are still landing normally over the next day)."
-echo "Next: check the Supabase device_status heartbeat is still advancing, and that flags still land normally."
+echo "Next: check the Supabase device_status heartbeat (both last_heartbeat and watcher_last_heartbeat) is still advancing, and that flags still land normally."

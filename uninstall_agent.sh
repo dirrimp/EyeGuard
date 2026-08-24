@@ -10,8 +10,8 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 if [ -f "$DIR/eg_authorize.sh" ]; then
   # shellcheck source=/dev/null
   source "$DIR/eg_authorize.sh"
-  if eg_authorize; then
-    eg_clean_beacon                    # authorized -> no gone-dark alert
+  if eg_authorized_stop; then
+    :   # authorized -> no gone-dark alert, RPC already set the clean beacon
   else
     echo "❌ Wrong password — EyeGuard was NOT removed."
     echo "   Removing it any other way will alert your accountability partner."

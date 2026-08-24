@@ -1,152 +1,141 @@
-"""Deployed-code/config integrity watcher — root-daemon-side tamper evidence.
+"""Deployed-code/config integrity watcher — packaged-app tamper evidence.
 
-Runs inside the vault daemon (root, LaunchDaemon), independent of the
-unprivileged session agent. Periodically confirms every git-tracked file in
-the deployed tree still byte-matches what's actually committed at HEAD, and
-reports drift via the SAME report_tamper() path already used by the agent's
-own flags.jsonl / flagged-frame tamper checks (menubar.py) -- so it composes
-with the existing "tamper: ..." -> dedicated alert-email routing, no new
-Supabase wiring needed.
+Admin-trust-model pivot (2026-08-24): the original version of this file
+diffed every git-tracked file in the deployed tree against `git show
+HEAD:<path>` in a live git repository -- correct for a git-clone-style
+deployment, but it doesn't generalize to a packaged, distributed `.app` (no
+git repo ships inside a bundle). This version instead fetches a PUBLISHED
+manifest fresh from Supabase on every check
+(supabase/anon_client_pivot.sql's `release_manifests` table, anon
+SELECT-only -- populated only by a release script using the maintainer's own
+key at build time, never the shipped app) and compares the running files'
+hashes against it.
 
-Why this needs to live here, not in menubar.py (the agent):
-  * The agent is a killable, restartable, user-run process. If someone edits
-    or deletes the agent's own code, a check running INSIDE the agent stops
-    running too -- it can't detect its own removal. This daemon is a
-    separate root process holding the network credentials directly; even a
-    fully broken/deleted agent doesn't stop it from checking and reporting.
-  * git itself is the baseline -- no separate baseline file to protect or
-    keep in sync. Every check re-reads `git show HEAD:<path>` fresh, so it
-    self-corrects across legitimate deploys (update.sh's `git reset --hard`
-    moves HEAD; the very next check just compares against the new HEAD)
-    without any manual reset step, unlike the log/frames tamper checks
-    which need retention to explicitly clear their stored baseline.
+Why fetch fresh every time rather than trust a locally-shipped copy of the
+manifest: a manifest sitting on disk next to the code has the exact same
+"I'd have to protect this file too" problem a locally-shipped git repo
+would -- a local admin could edit both the code AND the manifest to match.
+Fetching the canonical copy fresh from a server the local admin doesn't
+control is what makes this a real check rather than a check-yourself
+tautology -- the same reasoning that motivated using live git HEAD over a
+local baseline file in the original version.
 
-What this does NOT claim: this is tamper-EVIDENT, not tamper-PROOF, the
-same standing philosophy as everywhere else in this project. Someone with
-root could, in principle, edit a file and this exact watcher in the same
-sudo session before the next check cycle -- the mitigation is the same one
-this project already relies on elsewhere: a code change to the running
-daemon requires either a restart (loud, root-only, and independently
-crash-loop / gone-dark-detectable via the existing heartbeat path) or an
-in-place edit-without-restart (which this check WILL catch on its next
-cycle, since the check re-reads the file from disk each time, not from any
-cached/imported state).
+What this does NOT claim: this is tamper-EVIDENT, not tamper-PROOF, same
+standing philosophy as everywhere else in this project. A local admin could,
+in principle, patch a running process in memory without touching any file on
+disk at all (that's what deploy/harden_codesign.sh's hardened-runtime
+signing exists to raise the bar against) -- this check only ever sees what's
+actually on disk when it looks. And an admin who kills this process entirely
+just shows up as gone-dark, same as killing the main app for any other
+reason -- that's the design working as intended, not a gap.
 """
 
 from __future__ import annotations
 
 import hashlib
-import subprocess
-import threading
+import json
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
+_MANIFEST_TIMEOUT = 15
 
-def _git(repo_dir: Path, *args: str) -> tuple[bool, bytes]:
-    """Run git against repo_dir. (ok, stdout_bytes). Never raises."""
+# Distinct from "the server told us this version has no manifest" -- a
+# network hiccup or a transient API error must never be treated as evidence
+# of anything (self-signing an unpublished version is a real signal; a
+# dropped connection is not), so it's raised instead of folded into the same
+# None the confirmed-absent case returns.
+class _ManifestUnreachable(Exception):
+    pass
+
+
+def _fetch_manifest(url: str, api_key: str, version: str) -> dict | None:
+    """{rel_path: "sha256:..."} for the given version, or None if the server
+    has confirmed no manifest is published for it. Raises
+    _ManifestUnreachable on any network/API failure -- the caller skips the
+    cycle rather than treating a dropped connection as an unknown version."""
     try:
-        p = subprocess.run(
-            ["git", "-C", str(repo_dir), *args],
-            capture_output=True, timeout=15, check=False,
-        )
-        return p.returncode == 0, p.stdout
-    except Exception:
-        return False, b""
+        req = urllib.request.Request(
+            f"{url.rstrip('/')}/rest/v1/release_manifests"
+            f"?version=eq.{urllib.parse.quote(version)}&select=manifest",
+            headers={"apikey": api_key, "Authorization": f"Bearer {api_key}"})
+        with urllib.request.urlopen(req, timeout=_MANIFEST_TIMEOUT) as r:
+            rows = json.loads(r.read().decode())
+    except Exception as e:
+        raise _ManifestUnreachable(str(e)) from e
+    if not rows:
+        return None  # confirmed: no manifest published for this exact version
+    manifest = rows[0].get("manifest") or {}
+    return manifest.get("files")
 
 
-def _tracked_files(repo_dir: Path, exclude: set[str]) -> list[str] | None:
-    ok, out = _git(repo_dir, "ls-tree", "-r", "HEAD", "--name-only")
-    if not ok:
-        return None
-    return [ln for ln in out.decode("utf-8", "replace").splitlines()
-            if ln.strip() and ln.strip() not in exclude]
-
-
-def _committed_hash(repo_dir: Path, rel_path: str) -> str | None:
-    ok, out = _git(repo_dir, "show", f"HEAD:{rel_path}")
-    if not ok:
-        return None  # file deleted from HEAD, or path error -- not a live-file check
-    return hashlib.sha256(out).hexdigest()
-
-
-def _live_hash(repo_dir: Path, rel_path: str) -> str | None:
-    p = repo_dir / rel_path
+def _local_hash(base_dir: Path, rel_path: str) -> str | None:
     try:
-        return hashlib.sha256(p.read_bytes()).hexdigest()
+        return "sha256:" + hashlib.sha256(
+            (base_dir / rel_path).read_bytes()).hexdigest()
     except OSError:
         return None  # missing / unreadable
 
 
 class IntegrityWatcher:
-    """Periodically diffs every git-tracked file in repo_dir against its
-    HEAD-committed content. On drift, calls uploader.report_tamper() once
-    the SAME drift has persisted for two consecutive checks (matching the
-    existing 2-strikes debounce already used by menubar.py's log-tamper
-    check, to rule out a transient read racing a legitimate in-progress
-    deploy) -- and only once per path per drift episode, not every cycle.
+    """Periodically fetches the published manifest for `version` and diffs
+    every path it lists against the live file on disk. On drift, calls
+    uploader.report_tamper() once the SAME drift has persisted for two
+    consecutive checks (rules out a transient read racing a legitimate
+    in-progress update), and only once per path per drift episode, not every
+    cycle -- identical debounce shape to the original git-based version.
 
-    exclude: relative paths to skip (e.g. anything legitimately allowed to
-    differ from git, none by design today -- config.yaml is meant to be
-    byte-identical to what's committed, per this project's own standing
-    lesson about untracked local-only config patches going stale).
+    If the server confirms no manifest exists for the locally-running
+    `version` at all, that's routed through the SAME 2-consecutive-check
+    debounce and report_tamper() alert as a file hash mismatch -- a version
+    string with no published manifest never came from the normal
+    build/publish process (only reachable with the maintainer's own
+    service_role key), so it's exactly as much a signal as an edited file,
+    not a softer one. A transient network/API failure is NOT the same thing
+    and is never treated as this signal -- see _ManifestUnreachable.
     """
 
-    def __init__(self, uploader, repo_dir: str | Path,
-                 check_seconds: int = 300,
-                 exclude: set[str] | None = None):
+    _UNKNOWN_VERSION_KEY = "__unknown_version__"
+
+    def __init__(self, uploader, base_dir: str | Path, url: str,
+                 api_key: str, version: str, check_seconds: int = 300):
         self.uploader = uploader
-        self.repo_dir = Path(repo_dir)
+        self.base_dir = Path(base_dir)
+        self.url = url
+        self.api_key = api_key
+        self.version = version
         self.check_seconds = check_seconds
-        self.exclude = exclude or set()
         self._pending: dict[str, int] = {}   # path -> consecutive-mismatch count
         self._reported: set[str] = set()     # paths already alerted for THIS drift
-        self._last_head: str | None = None
 
     def _check_once(self):
-        ok, head_out = _git(self.repo_dir, "rev-parse", "HEAD")
-        head = head_out.decode().strip() if ok else None
-        if not ok or not head:
-            # Can't even read the repo state -- report once per occurrence,
-            # same debounce as everything else here, then stay quiet until
-            # it resolves (avoids spamming if e.g. disk is briefly busy).
-            self._note_mismatch("<repo>", "git repository unreadable "
-                                 "(HEAD unresolvable) -- deployed code may "
-                                 "have been removed or corrupted")
-            return
-        if head != self._last_head:
-            # A legitimate deploy (or a HEAD-moving tamper attempt) -- either
-            # way, start comparing against the NEW head from here on; no
-            # manual reset needed, this is what makes git-as-baseline work.
-            self._last_head = head
+        try:
+            manifest = _fetch_manifest(self.url, self.api_key, self.version)
+        except _ManifestUnreachable:
+            return  # transient -- skip this cycle, never treated as a signal
 
-        files = _tracked_files(self.repo_dir, self.exclude)
-        if files is None:
-            self._note_mismatch("<repo>", "git ls-tree failed -- could not "
-                                 "enumerate deployed files against HEAD")
+        if manifest is None:
+            self._note_mismatch(
+                self._UNKNOWN_VERSION_KEY,
+                f"no manifest has ever been published for the running "
+                f"version '{self.version}' -- this build did not come from "
+                f"the normal release/publish process")
             return
+        self._clear(self._UNKNOWN_VERSION_KEY)
 
-        seen_this_cycle = set()
-        for rel in files:
-            seen_this_cycle.add(rel)
-            committed = _committed_hash(self.repo_dir, rel)
-            live = _live_hash(self.repo_dir, rel)
-            if committed is None:
-                continue  # file legitimately not in HEAD at this path; skip
-            if live is None:
-                self._note_mismatch(rel, "deployed file is missing or "
-                                     "unreadable but is tracked at HEAD")
-            elif live != committed:
-                self._note_mismatch(rel, "deployed file content differs "
-                                     "from the committed/deployed version")
+        for rel_path, expected_hash in manifest.items():
+            live_hash = _local_hash(self.base_dir, rel_path)
+            if live_hash is None:
+                self._note_mismatch(rel_path, "file is missing or "
+                                     "unreadable but is listed in the "
+                                     "published manifest")
+            elif live_hash != expected_hash:
+                self._note_mismatch(rel_path, "file content differs from "
+                                     "the published known-good version")
             else:
-                self._clear(rel)
-
-        # A tracked path that's now MISSING from ls-tree entirely (e.g. HEAD
-        # itself was force-moved to an old commit that never had this file)
-        # isn't caught by the loop above -- but the next cycle's committed
-        # lookup already reflects the new HEAD, so nothing to add here; this
-        # comment exists only to record that case was considered, not missed.
-        _ = seen_this_cycle
+                self._clear(rel_path)
 
     def _note_mismatch(self, path: str, detail: str):
         n = self._pending.get(path, 0) + 1
@@ -158,7 +147,7 @@ class IntegrityWatcher:
                 self.uploader.report_tamper(msg)
             except Exception:
                 pass  # a failed report must never kill this thread
-            print(f"[vault] [integrity] {msg} -- reported", flush=True)
+            print(f"[integrity] {msg} -- reported", flush=True)
 
     def _clear(self, path: str):
         if path in self._pending or path in self._reported:
@@ -166,16 +155,16 @@ class IntegrityWatcher:
             self._reported.discard(path)
 
     def run(self):
-        """Blocks forever on its own daemon thread, same convention as
-        SleepWatcher.run() in vault.py."""
-        print(f"[vault] [integrity] watcher active, checking every "
-              f"{self.check_seconds}s against {self.repo_dir}", flush=True)
+        """Blocks forever on its own daemon thread."""
+        print(f"[integrity] watcher active, checking every "
+              f"{self.check_seconds}s against {self.base_dir} "
+              f"(version {self.version})", flush=True)
         while True:
             try:
                 self._check_once()
             except Exception as e:
                 # A bad check must never kill this thread -- same rule as
                 # every other background watcher in this project.
-                print(f"[vault] [integrity] check raised {e!r} -- "
-                      f"continuing", flush=True)
+                print(f"[integrity] check raised {e!r} -- continuing",
+                      flush=True)
             time.sleep(self.check_seconds)

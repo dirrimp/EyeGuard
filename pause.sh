@@ -8,8 +8,7 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 # shellcheck source=/dev/null
 source "$DIR/eg_authorize.sh"
 
-if eg_authorize; then
-  eg_clean_beacon                      # authorized -> no gone-dark alert
+if eg_authorized_stop; then
   launchctl unload "$PLIST" 2>/dev/null || true
   echo "✅ EyeGuard paused (authorized). Run ./resume.sh to start it again."
 else
