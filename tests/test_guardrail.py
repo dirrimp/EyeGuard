@@ -111,6 +111,13 @@ check("session_watcher checks both new-account and wrong-user",
 check("deploy_watcher polls GitHub and actually deploys on change",
       "_latest_main_sha" in deploy_watcher_src
       and "_deploy" in deploy_watcher_src)
+check("uploader encrypts review frames when encryption is configured",
+      "encrypt_frame" in uploader_src
+      and "encryption_public_key_pem" in uploader_src)
+enc_cfg = cfg.get("encryption", {})
+check("encryption.enabled=true always has a public_key_pem configured "
+      "(prevents flipping it on with an empty key)",
+      not enc_cfg.get("enabled") or bool(enc_cfg.get("public_key_pem")))
 check("menubar applies context-risk", "assess(" in menu)
 check("menubar log-tamper detection present", "report_tamper" in menu
       and "_check_log_tamper" in menu)

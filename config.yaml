@@ -644,6 +644,21 @@ vm_monitor:
 # routing to the same dedicated "tampering detected" alert email. Same
 # tamper-EVIDENT (not tamper-proof) standing philosophy as the rest of this
 # project -- see integrity.py for the honest limits.
+# Client-side review-frame encryption (2026-08-24): even with managed (not
+# self-hosted) Supabase, this closes what the vendor itself could see --
+# without it, a Storage breach or anyone holding the anon key could pull
+# every uploaded review frame and view it directly (a real JPEG sitting in
+# a bucket). With this on, what lands in Storage is opaque ciphertext (see
+# eyeguard/frame_crypto.py) -- only whoever holds the PRIVATE key can ever
+# view it again, via deploy/decrypt_frame.py. public_key_pem is, by
+# definition, safe to commit here (same reasoning as api_key already being
+# fine to commit) -- the PRIVATE key must never exist on this device or in
+# this repo; generate the keypair on a separate machine you control and
+# paste only the public half below.
+encryption:
+  enabled: false   # flip to true once public_key_pem below is filled in
+  public_key_pem: ""
+
 file_integrity:
   enabled: true
   check_seconds: 300   # config/code edits should be caught within 5 min

@@ -376,10 +376,16 @@ class EyeGuardApp(rumps.App):
         pending = Path(sb.get("pending_file", "pending_uploads.jsonl"))
         if not pending.is_absolute():
             pending = _BASE / pending
+        enc = self.cfg.get("encryption", {})
+        pubkey = enc.get("public_key_pem") if enc.get("enabled") else None
         up = SupabaseUploader(url=sb["url"], api_key=api_key,
                               pending_path=str(pending),
                               retry_seconds=int(sb.get("retry_seconds", 60)),
-                              heartbeat=bool(sb.get("heartbeat", True)))
+                              heartbeat=bool(sb.get("heartbeat", True)),
+                              encryption_public_key_pem=pubkey)
+        if pubkey:
+            print("[uploader] review-frame encryption on (private key never "
+                  "on this device)", flush=True)
         up.start()
         print("[uploader] cloud sync on", flush=True)
         return up
