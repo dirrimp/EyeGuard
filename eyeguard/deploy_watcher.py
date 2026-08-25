@@ -139,6 +139,21 @@ class DeployWatcher:
                         "system/com.eyeguard.sessionwatcher"], timeout=30)
         self._rpc("eg_report_deploy", {"p_sha": sha, "p_summary": summary})
         print(f"[deploy_watcher] {datetime.now().isoformat()} deployed {sha[:9]}.", flush=True)
+        # Restart this daemon too -- unconditionally, same as monitor/
+        # sessionwatcher above, not gated on "did deploy_watcher.py itself
+        # change" (a future deploy could touch a shared module this file
+        # imports, e.g. net.py, with the same stale-code-in-memory problem).
+        # Confirmed live (2026-08-25): this PR's own fix to this file would
+        # otherwise never take effect on a running instance -- the process
+        # keeps executing whatever was already loaded, indefinitely, until
+        # something else restarts it. MUST be the last statement in this
+        # method: `kickstart -k` on your own label stops the calling process
+        # almost immediately, so everything above (deploy the code, restart
+        # the other services, report the deploy) has to have already fully
+        # completed. KeepAlive=true in the plist brings a fresh instance
+        # straight back up running the code that was just deployed.
+        subprocess.run(["launchctl", "kickstart", "-k",
+                        "system/com.eyeguard.deploywatcher"], timeout=30)
 
     def _check_once(self):
         deployed = _deployed_sha(self.code_dir)
