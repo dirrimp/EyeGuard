@@ -80,7 +80,10 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
+
+from .net import opener as _opener
 
 _BASE = Path(__file__).resolve().parent.parent
 _BASELINE_PATH = _BASE / "session_watcher_baseline.json"
@@ -290,13 +293,22 @@ class SessionWatcher:
         self.check_seconds = check_seconds
 
     def _rpc(self, name: str, params: dict):
+        # Bound to the physical interface (see eyeguard/net.py) -- this call
+        # used plain urllib.request.urlopen() until 2026-08-25, unprotected
+        # from the same on-demand-VPN-tunnel instability uploader.py was
+        # fixed against on 2026-08-19. At this class's 120s check_seconds,
+        # just TWO consecutive failures already exceed
+        # eg_check_gone_dark()'s 3-minute watcher_last_heartbeat threshold --
+        # confirmed live: several consecutive "heartbeat network error" lines
+        # in a row in this daemon's own log, a real risk of a false "session
+        # watcher went dark" email from exactly this gap.
         req = urllib.request.Request(
             f"{self.base}/rest/v1/rpc/{name}",
             data=json.dumps(params).encode(), method="POST",
             headers={"apikey": self.api_key,
                      "Authorization": f"Bearer {self.api_key}",
                      "Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=15) as r:
+        with _opener.open(req, timeout=15) as r:
             r.read()
 
     def _check_once(self) -> tuple[bool, bool, bool, bool]:
@@ -316,7 +328,7 @@ class SessionWatcher:
             else:
                 added = set(current) - set(baseline)
                 if added:
-                    print(f"[session_watcher] new account(s) detected: "
+                    print(f"[session_watcher] {datetime.now().isoformat()} new account(s) detected: "
                           f"{sorted(added)}", flush=True)
                     new_account = True
                 # Baseline always advances to the current set -- an added
@@ -327,7 +339,7 @@ class SessionWatcher:
         wrong_user = False
         active = _active_console_user()
         if active is not None and active != self.expected_user:
-            print(f"[session_watcher] active console user is '{active}', "
+            print(f"[session_watcher] {datetime.now().isoformat()} active console user is '{active}', "
                   f"expected '{self.expected_user}'", flush=True)
             wrong_user = True
 
@@ -338,19 +350,19 @@ class SessionWatcher:
             untrusted_path = _untrusted_library(pid)
             untrusted_library = untrusted_path is not None
             if untrusted_library:
-                print(f"[session_watcher] untrusted library loaded in "
+                print(f"[session_watcher] {datetime.now().isoformat()} untrusted library loaded in "
                       f"monitor agent: {untrusted_path}", flush=True)
 
             traced = _is_debugger_attached(pid)
             debugger_attached = bool(traced)
             if debugger_attached:
-                print(f"[session_watcher] debugger attached to monitor "
+                print(f"[session_watcher] {datetime.now().isoformat()} debugger attached to monitor "
                       f"agent (pid {pid})", flush=True)
 
         return new_account, wrong_user, untrusted_library, debugger_attached
 
     def run(self):
-        print(f"[session_watcher] active, checking every "
+        print(f"[session_watcher] {datetime.now().isoformat()} active, checking every "
               f"{self.check_seconds}s (expected user: {self.expected_user})",
               flush=True)
         while True:
@@ -363,12 +375,12 @@ class SessionWatcher:
                            "p_untrusted_library": untrusted_library,
                            "p_debugger_attached": debugger_attached})
             except urllib.error.URLError as e:
-                print(f"[session_watcher] heartbeat network error: {e} "
+                print(f"[session_watcher] {datetime.now().isoformat()} heartbeat network error: {e} "
                       f"-- will retry next cycle", flush=True)
             except Exception as e:
                 # A bad check must never kill this daemon -- same rule as
                 # every other background watcher in this project.
-                print(f"[session_watcher] check raised {e!r} -- continuing",
+                print(f"[session_watcher] {datetime.now().isoformat()} check raised {e!r} -- continuing",
                       flush=True)
             time.sleep(self.check_seconds)
 
