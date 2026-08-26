@@ -28,7 +28,10 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
+
+from .net import opener as _opener
 
 _BASE = Path(__file__).resolve().parent.parent
 _GITHUB_API = "https://api.github.com"
@@ -43,10 +46,10 @@ def _github_get(path: str) -> dict | list | None:
             f"{_GITHUB_API}{path}",
             headers={"Accept": "application/vnd.github+json",
                      "User-Agent": "eyeguard-deploy-watcher"})
-        with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:
+        with _opener.open(req, timeout=_TIMEOUT) as r:
             return json.loads(r.read().decode())
     except Exception as e:
-        print(f"[deploy_watcher] GitHub API request failed: {e} -- "
+        print(f"[deploy_watcher] {datetime.now().isoformat()} GitHub API request failed: {e} -- "
               f"skipping this cycle", flush=True)
         return None
 
@@ -105,7 +108,7 @@ class DeployWatcher:
             headers={"apikey": self.api_key,
                      "Authorization": f"Bearer {self.api_key}",
                      "Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=15) as r:
+        with _opener.open(req, timeout=15) as r:
             r.read()
 
     def _deploy(self, sha: str, summary: str):
@@ -115,7 +118,7 @@ class DeployWatcher:
         might have advanced to mid-deploy -- a merge landing in the middle
         of this just gets picked up cleanly on the NEXT poll cycle instead
         of being silently folded in."""
-        print(f"[deploy_watcher] deploying {sha[:9]}...", flush=True)
+        print(f"[deploy_watcher] {datetime.now().isoformat()} deploying {sha[:9]}...", flush=True)
         subprocess.run(["git", "-C", str(self.code_dir), "fetch", "origin",
                         "main"], check=True, timeout=60)
         subprocess.run(["git", "-C", str(self.code_dir), "reset", "--hard",
@@ -135,7 +138,22 @@ class DeployWatcher:
         subprocess.run(["launchctl", "kickstart", "-k",
                         "system/com.eyeguard.sessionwatcher"], timeout=30)
         self._rpc("eg_report_deploy", {"p_sha": sha, "p_summary": summary})
-        print(f"[deploy_watcher] deployed {sha[:9]}.", flush=True)
+        print(f"[deploy_watcher] {datetime.now().isoformat()} deployed {sha[:9]}.", flush=True)
+        # Restart this daemon too -- unconditionally, same as monitor/
+        # sessionwatcher above, not gated on "did deploy_watcher.py itself
+        # change" (a future deploy could touch a shared module this file
+        # imports, e.g. net.py, with the same stale-code-in-memory problem).
+        # Confirmed live (2026-08-25): this PR's own fix to this file would
+        # otherwise never take effect on a running instance -- the process
+        # keeps executing whatever was already loaded, indefinitely, until
+        # something else restarts it. MUST be the last statement in this
+        # method: `kickstart -k` on your own label stops the calling process
+        # almost immediately, so everything above (deploy the code, restart
+        # the other services, report the deploy) has to have already fully
+        # completed. KeepAlive=true in the plist brings a fresh instance
+        # straight back up running the code that was just deployed.
+        subprocess.run(["launchctl", "kickstart", "-k",
+                        "system/com.eyeguard.deploywatcher"], timeout=30)
 
     def _check_once(self):
         deployed = _deployed_sha(self.code_dir)
@@ -146,22 +164,22 @@ class DeployWatcher:
         self._deploy(latest, summary)
 
     def run(self):
-        print(f"[deploy_watcher] active, checking every "
+        print(f"[deploy_watcher] {datetime.now().isoformat()} active, checking every "
               f"{self.check_seconds}s against {self.owner}/{self.repo}",
               flush=True)
         while True:
             try:
                 self._check_once()
             except urllib.error.URLError as e:
-                print(f"[deploy_watcher] network error: {e} -- will retry "
+                print(f"[deploy_watcher] {datetime.now().isoformat()} network error: {e} -- will retry "
                       f"next cycle", flush=True)
             except subprocess.CalledProcessError as e:
-                print(f"[deploy_watcher] deploy step failed: {e} -- "
+                print(f"[deploy_watcher] {datetime.now().isoformat()} deploy step failed: {e} -- "
                       f"will retry next cycle", flush=True)
             except Exception as e:
                 # A bad check must never kill this daemon -- same rule as
                 # every other background watcher in this project.
-                print(f"[deploy_watcher] check raised {e!r} -- continuing",
+                print(f"[deploy_watcher] {datetime.now().isoformat()} check raised {e!r} -- continuing",
                       flush=True)
             time.sleep(self.check_seconds)
 
