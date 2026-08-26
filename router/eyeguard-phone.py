@@ -73,6 +73,38 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
+# ---- throttled failure logging for the liveness signals -------------------
+# Both home_ping_alive() and wg_rx_bytes() used to fail with a bare
+# `except Exception: return None`/`return False` -- completely silent, no
+# log line at all. Confirmed live (2026-08-25) this is exactly why a real
+# phone-dark false-alarm pattern (firing every time the phone sleeps, while
+# away from home with the tunnel otherwise healthy) couldn't be diagnosed
+# without direct SSH access to the router. If wg_interface in phone.json is
+# even slightly stale post-AmneziaWG-migration (the exact class of drift PR
+# #48 already found once, for the wg->awg binary rename), `awg show
+# <bad-iface> transfer` fails and this signal silently stops contributing
+# -- indistinguishable, from the logs, from "everything's fine and the tunnel
+# is just quiet." Logged only on the failing/recovered transition, not every
+# heartbeat_seconds tick, so a sustained outage doesn't spam the log.
+_LIVENESS_FAIL_STATE = {"wg": None, "ping": None}
+
+
+def _log_liveness_failure(signal, detail):
+    with _LOCK:
+        if _LIVENESS_FAIL_STATE[signal] != detail:
+            print(f"[eyeguard-phone] {now_iso()} {signal} liveness signal "
+                  f"FAILING: {detail}", flush=True)
+            _LIVENESS_FAIL_STATE[signal] = detail
+
+
+def _log_liveness_recovered(signal):
+    with _LOCK:
+        if _LIVENESS_FAIL_STATE[signal] is not None:
+            print(f"[eyeguard-phone] {now_iso()} {signal} liveness signal "
+                  f"recovered", flush=True)
+            _LIVENESS_FAIL_STATE[signal] = None
+
+
 # ---- HTTP via curl -------------------------------------------------------
 
 def _curl(args, timeout=15):
@@ -123,8 +155,10 @@ def home_ping_alive():
                        capture_output=True, text=True, timeout=3)
         out = subprocess.run(["ip", "neigh", "show", HOME_IP],
                              capture_output=True, text=True, timeout=3).stdout
+        _log_liveness_recovered("ping")
         return "REACHABLE" in out or "DELAY" in out
-    except Exception:
+    except Exception as ex:
+        _log_liveness_failure("ping", f"{type(ex).__name__}: {ex}")
         return False
 
 
@@ -136,9 +170,18 @@ def wg_rx_bytes():
     if not WG_IFACE:
         return None
     try:
-        out = subprocess.run(["awg", "show", WG_IFACE, "transfer"],
-                             capture_output=True, text=True).stdout
-    except Exception:
+        proc = subprocess.run(["awg", "show", WG_IFACE, "transfer"],
+                              capture_output=True, text=True, timeout=5)
+        if proc.returncode != 0:
+            # The original code never checked this -- a bad interface name
+            # (e.g. stale post-migration) or a missing/renamed binary exits
+            # non-zero with stderr explaining why, but stdout alone (what
+            # used to be read) can come back empty and silent either way.
+            raise RuntimeError(f"awg show exited {proc.returncode}: "
+                               f"{proc.stderr.strip()}")
+        out = proc.stdout
+    except Exception as ex:
+        _log_liveness_failure("wg", f"{type(ex).__name__}: {ex}")
         return None
     total, found = 0, False
     for line in out.splitlines():
@@ -152,7 +195,19 @@ def wg_rx_bytes():
                 found = True
             except ValueError:
                 pass
-    return total if found else None
+    if not found:
+        # The command itself succeeded (no exception above), but no peer in
+        # its output matched WG_PEER -- either the interface is up but has
+        # the WRONG peer set (wg_peer stale in phone.json), or WG_IFACE
+        # itself is subtly wrong (exists, but isn't actually the phone's
+        # tunnel). Different failure mode from the exception above, same
+        # silent-by-default problem before this logging existed.
+        _log_liveness_failure(
+            "wg", f"no peer matching wg_peer={WG_PEER!r} in "
+            f"'awg show {WG_IFACE} transfer' output")
+        return None
+    _log_liveness_recovered("wg")
+    return total
 
 
 # ---- classification ------------------------------------------------------
