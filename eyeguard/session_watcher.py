@@ -77,6 +77,7 @@ import ctypes.util
 import json
 import re
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -284,6 +285,123 @@ def _save_baseline(accounts: dict[str, int]):
         pass  # a failed save just means the next cycle re-derives it
 
 
+# ---- sleep/wake awareness (2026-08-27) -------------------------------------
+# Confirmed live: every "session watcher went dark" alert landed 3:05-3:21
+# after a `pmset -g log` "Entering Sleep state" line -- right at
+# eg_check_gone_dark()'s 3-minute threshold, every time. Root cause: this
+# daemon has no sleep/wake awareness at all -- during real system sleep its
+# own process is genuinely suspended (can't heartbeat, can't run anything)
+# and the server has no way to tell "legitimately asleep" from "disabled."
+# The main app already solved this for itself via NSWorkspace notifications
+# (menubar.py, GUI-session only) -- this daemon has no GUI session to
+# subscribe to, so it needs the kernel-level equivalent, IORegisterForSystemPower.
+# This is the exact same mechanism (and largely the same code) the original,
+# now-deleted vault.py used for the identical reason -- see git history at
+# 71f700c:eyeguard/vault.py for the version this was adapted from.
+_IOKit = ctypes.CDLL("/System/Library/Frameworks/IOKit.framework/IOKit")
+_CF = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+
+_IOServiceInterestCallback = ctypes.CFUNCTYPE(
+    None, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p)
+
+_IOKit.IORegisterForSystemPower.restype = ctypes.c_uint32
+_IOKit.IORegisterForSystemPower.argtypes = [
+    ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+    _IOServiceInterestCallback, ctypes.POINTER(ctypes.c_uint32)]
+_IOKit.IONotificationPortGetRunLoopSource.restype = ctypes.c_void_p
+_IOKit.IONotificationPortGetRunLoopSource.argtypes = [ctypes.c_void_p]
+_IOKit.IOAllowPowerChange.restype = ctypes.c_int
+_IOKit.IOAllowPowerChange.argtypes = [ctypes.c_uint32, ctypes.c_long]
+
+_CF.CFRunLoopGetCurrent.restype = ctypes.c_void_p
+_CF.CFRunLoopAddSource.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+_CF.CFRunLoopRun.restype = None
+_kCFRunLoopDefaultMode = ctypes.c_void_p.in_dll(_CF, "kCFRunLoopDefaultMode")
+
+# IOMessage.h: iokit_common_msg(x) = 0xe0000000 | x
+_K_CAN_SLEEP = 0xE0000270
+_K_WILL_SLEEP = 0xE0000280
+_K_WILL_NOT_SLEEP = 0xE0000290
+_K_HAS_POWERED_ON = 0xE0000300
+_K_WILL_POWER_OFF = 0xE0000250  # real shutdown, not sleep
+_K_WILL_RESTART = 0xE0000310
+
+
+class SleepWatcher:
+    """Root-level sleep/wake via IOKit, so this daemon can tell the server
+    "expect a gap, this is a real sleep" BEFORE it actually suspends -- see
+    eg_watcher_report_sleep() in supabase/fix_watcher_dark_sleep_awareness.sql
+    for how eg_check_gone_dark() uses the signal (bounded, not indefinite --
+    see that file for the full reasoning)."""
+
+    def __init__(self, watcher: "SessionWatcher"):
+        self.watcher = watcher
+        self._root_port = 0
+        self._callback = None  # kept alive so ctypes can't GC the trampoline
+
+    def _report_sleep(self, reason: str):
+        ts = datetime.now().isoformat()
+        try:
+            self.watcher._rpc("eg_watcher_report_sleep", {})
+            print(f"[session_watcher] {ts} IOKit: {reason} -- reported sleep "
+                  f"to server", flush=True)
+        except Exception as e:
+            # Best-effort: if this fails, branch (d) just alerts normally
+            # after 3 minutes, same as before this feature existed -- no
+            # worse than the pre-fix behavior, never blocks the sleep itself.
+            print(f"[session_watcher] {ts} IOKit: {reason} -- failed to "
+                  f"report sleep: {e!r}", flush=True)
+
+    def _handle(self, refcon, service, message_type, message_arg):
+        try:
+            if message_type == _K_WILL_SLEEP:
+                self._report_sleep("WillSleep")
+                _IOKit.IOAllowPowerChange(self._root_port, message_arg)
+            elif message_type == _K_CAN_SLEEP:
+                _IOKit.IOAllowPowerChange(self._root_port, message_arg)
+            elif message_type == _K_WILL_NOT_SLEEP:
+                # Sleep was requested then cancelled/vetoed -- nothing to
+                # undo here (unlike vault.py's old _suspended flag), since
+                # the sleep signal only ever explains a gap that's already
+                # happened; if the Mac never actually slept, the watcher's
+                # own next heartbeat lands normally within check_seconds and
+                # nothing was ever at risk of a false "recovered" state.
+                pass
+            elif message_type == _K_HAS_POWERED_ON:
+                ts = datetime.now().isoformat()
+                print(f"[session_watcher] {ts} IOKit: HasPoweredOn -- "
+                      f"forcing an immediate check-in", flush=True)
+                # Don't wait for the next scheduled check_seconds tick --
+                # closes the window between wake and the next normal
+                # heartbeat as fast as possible.
+                self.watcher.heartbeat_now()
+            elif message_type in (_K_WILL_POWER_OFF, _K_WILL_RESTART):
+                kind = "WillPowerOff" if message_type == _K_WILL_POWER_OFF \
+                    else "WillRestart"
+                self._report_sleep(kind)
+                _IOKit.IOAllowPowerChange(self._root_port, message_arg)
+        except Exception:
+            pass  # a bad power notification must never kill this thread
+
+    def run(self):
+        """Blocks forever running a CFRunLoop -- call on its own daemon thread."""
+        notify_port = ctypes.c_void_p()
+        notifier = ctypes.c_uint32()
+        self._callback = _IOServiceInterestCallback(self._handle)
+        self._root_port = _IOKit.IORegisterForSystemPower(
+            None, ctypes.byref(notify_port), self._callback, ctypes.byref(notifier))
+        if not self._root_port:
+            print("[session_watcher] IORegisterForSystemPower failed -- "
+                  "sleep-awareness disabled, dark-alert false positives on "
+                  "sleep are possible again", flush=True)
+            return
+        rl_source = _IOKit.IONotificationPortGetRunLoopSource(notify_port)
+        _CF.CFRunLoopAddSource(_CF.CFRunLoopGetCurrent(), rl_source,
+                                _kCFRunLoopDefaultMode)
+        print("[session_watcher] IOKit sleep/wake watcher active", flush=True)
+        _CF.CFRunLoopRun()
+
+
 class SessionWatcher:
     def __init__(self, url: str, api_key: str, expected_user: str,
                  check_seconds: int = 120):
@@ -361,27 +479,43 @@ class SessionWatcher:
 
         return new_account, wrong_user, untrusted_library, debugger_attached
 
+    def _check_and_heartbeat(self):
+        """One check-and-report cycle -- shared by the scheduled loop below
+        and SleepWatcher's HasPoweredOn handler, which calls this out of
+        cycle right after wake so a real check-in doesn't wait for the next
+        scheduled check_seconds tick."""
+        try:
+            (new_account, wrong_user, untrusted_library,
+             debugger_attached) = self._check_once()
+            self._rpc("eg_watcher_heartbeat",
+                      {"p_new_account": new_account,
+                       "p_wrong_user": wrong_user,
+                       "p_untrusted_library": untrusted_library,
+                       "p_debugger_attached": debugger_attached})
+        except urllib.error.URLError as e:
+            print(f"[session_watcher] {datetime.now().isoformat()} heartbeat network error: {e} "
+                  f"-- will retry next cycle", flush=True)
+        except Exception as e:
+            # A bad check must never kill this daemon -- same rule as
+            # every other background watcher in this project.
+            print(f"[session_watcher] {datetime.now().isoformat()} check raised {e!r} -- continuing",
+                  flush=True)
+
+    def heartbeat_now(self):
+        """Called from SleepWatcher's IOKit callback thread on wake -- runs
+        the same check-and-heartbeat logic inline. A wake-triggered call
+        racing the scheduled loop's own call is harmless (both just report
+        the current state; eg_watcher_heartbeat() is idempotent-safe to call
+        more often than check_seconds)."""
+        self._check_and_heartbeat()
+
     def run(self):
         print(f"[session_watcher] {datetime.now().isoformat()} active, checking every "
               f"{self.check_seconds}s (expected user: {self.expected_user})",
               flush=True)
+        threading.Thread(target=SleepWatcher(self).run, daemon=True).start()
         while True:
-            try:
-                (new_account, wrong_user, untrusted_library,
-                 debugger_attached) = self._check_once()
-                self._rpc("eg_watcher_heartbeat",
-                          {"p_new_account": new_account,
-                           "p_wrong_user": wrong_user,
-                           "p_untrusted_library": untrusted_library,
-                           "p_debugger_attached": debugger_attached})
-            except urllib.error.URLError as e:
-                print(f"[session_watcher] {datetime.now().isoformat()} heartbeat network error: {e} "
-                      f"-- will retry next cycle", flush=True)
-            except Exception as e:
-                # A bad check must never kill this daemon -- same rule as
-                # every other background watcher in this project.
-                print(f"[session_watcher] {datetime.now().isoformat()} check raised {e!r} -- continuing",
-                      flush=True)
+            self._check_and_heartbeat()
             time.sleep(self.check_seconds)
 
 
