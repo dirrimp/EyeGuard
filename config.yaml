@@ -546,7 +546,7 @@ supabase:
   # the monitored user has full admin on their own Mac.
   api_key: sb_publishable_y9pDf3aBNY4Le5u9tbUXzg_qCRvMn-b
   # Persistent offline queue: flags wait here until they upload successfully.
-  pending_file: /Library/Application Support/EyeGuard/pending_uploads.jsonl
+  pending_file: /Users/jonahdirrim/Library/Application Support/EyeGuard-data/pending_uploads.jsonl
   # How often (seconds) to retry the offline backlog.
   retry_seconds: 60
   # Heartbeat: pulse device_status every retry cycle so a server-side job can
