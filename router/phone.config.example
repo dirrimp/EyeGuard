@@ -14,7 +14,8 @@
   "wg_ip": "10.1.0.2",
   "wg_peer": "PHONE_WIREGUARD_PUBLIC_KEY",
 
-  "dark_buffer_seconds": 60,
+  "_dark_buffer": "Confirmed live (2026-08-27): 60s left almost no safety margin. heartbeat_loop() polls every heartbeat_seconds (20s) and, while away, the only liveness signal is the WireGuard rx-byte counter driven by the 25s Persistent Keepalive -- 20 and 25 beat against each other (gcd=5), so periodically a poll lands just before a keepalive arrives and the gap since the last confirmed rx-increase stretches to ~45s even under ideal conditions. With dark_buffer_seconds=60 that leaves ~15s of margin against normal jitter (a slow `awg show` call, a delayed keepalive, one dropped packet) -- not enough, and it was flapping alive/dark/alive purely from timing noise while the phone was just asleep. Each flap inserts a real row into the flags table (not a debounced status update), so this was polluting the actual review queue, not just email. 150s gives real margin (heartbeat+keepalive worst case ~45s vs a 150s cutoff) while still catching a genuinely-dead phone within about the same couple-minute ballpark as the Mac-side dark-detection thresholds elsewhere in this system.",
+  "dark_buffer_seconds": 150,
   "green_repeat_seconds": 900,
   "heartbeat_seconds": 20,
 
