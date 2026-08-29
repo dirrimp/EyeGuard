@@ -233,7 +233,21 @@ class SupabaseUploader:
             try:
                 extra = self._status_provider() or {}
                 if "screen_ok" in extra:
-                    params["p_screen_ok"] = bool(extra["screen_ok"])
+                    screen_ok = bool(extra["screen_ok"])
+                    # Confirmed live (2026-08-29): recently_resumed() was
+                    # defined but never actually called anywhere -- dead
+                    # code since the admin-trust pivot deleted the old
+                    # vault.py this was originally written for. Result: a
+                    # real 'lost view of the screen' alert fired on ordinary
+                    # wake (timing matched agent_diagnostic.log's own frozen-
+                    # probe recovery to the second). Omit the key entirely
+                    # during the grace window rather than forcing True --
+                    # eg_heartbeat()'s coalesce(p_screen_ok, screen_ok) then
+                    # just keeps whatever was last reported (almost always
+                    # True, from before sleep) instead of asserting a value
+                    # this process doesn't actually know yet.
+                    if not (screen_ok is False and self.recently_resumed()):
+                        params["p_screen_ok"] = screen_ok
                 if "frames_analyzed" in extra:
                     params["p_frames_analyzed"] = int(extra["frames_analyzed"])
                 if "detector_ok" in extra:
