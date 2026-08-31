@@ -121,8 +121,27 @@ class SupabaseUploader:
 
     # ---- worker -------------------------------------------------------------
 
+    def _log_diag(self, msg: str):
+        """Append a timestamped line to agent_diagnostic.log (same file
+        menubar.py's own _log_diag() writes the screen-probe lines to, same
+        directory pending_path already lives in post the 2026-08-27
+        pending_file fix). Confirmed live (2026-08-31): the plist defines no
+        stdout/stderr path at all -- like the frozen-probe gap this same
+        file already closed once before -- so _heartbeat_ok()/_failed()'s
+        bare print() calls below were going nowhere, making a real spike of
+        'monitoring went dark' alerts undiagnosable after the fact (no way
+        to tell DNS error vs timeout vs something else). Best-effort: a
+        failure here must never break the heartbeat loop trying to report
+        through it."""
+        try:
+            with (self.pending_path.parent / "agent_diagnostic.log").open("a") as f:
+                f.write(f"{datetime.now().isoformat()} {msg}\n")
+        except Exception:
+            pass
+
     def _heartbeat_ok(self):
         if self._heartbeat_failing:
+            self._log_diag("heartbeat recovered")
             print(f"[uploader] {datetime.now().isoformat()} heartbeat recovered",
                   flush=True)
             self._heartbeat_failing = False
@@ -136,6 +155,9 @@ class SupabaseUploader:
         # Timestamped so a later alert email can actually be correlated to a
         # specific line here instead of just "somewhere in this log".
         if not self._heartbeat_failing:
+            self._log_diag(f"heartbeat FAILING ({context}): "
+                            f"{type(e).__name__}: {e} -- retrying every "
+                            f"{self.retry_seconds}s, next line is on recovery")
             print(f"[uploader] {datetime.now().isoformat()} heartbeat FAILING "
                   f"({context}): {type(e).__name__}: {e} -- retrying every "
                   f"{self.retry_seconds}s, next log line is on recovery",
