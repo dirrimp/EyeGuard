@@ -40,6 +40,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -173,10 +174,20 @@ class SupabaseUploader:
             except Exception as e:
                 self._heartbeat_failed(e, "startup pulse")
         while not self._stop.is_set():
-            try:
-                self._flush()
-            except Exception:
-                pass  # never let the uploader crash the app
+            # Heartbeat FIRST, flush second -- confirmed live (2026-09-01):
+            # each upload is its own fresh TCP+TLS connection (~1.3s, no
+            # connection reuse), and _flush() processes the ENTIRE pending
+            # backlog sequentially. With a real backlog of 270 records that's
+            # ~5.7 minutes for one flush cycle -- comfortably longer than
+            # eg_check_gone_dark()'s 3-minute threshold. Heartbeat used to
+            # run AFTER flush, so a big backlog directly delayed the one
+            # signal that keeps "monitoring went dark" from firing -- a real
+            # structural bug, not network flakiness (zero heartbeat
+            # exceptions were ever logged; the calls just weren't happening
+            # in time). This reorder means the accountability signal is
+            # never held hostage behind a backlog of ordinary activity
+            # uploads -- _flush() itself is also now capped per cycle (see
+            # its own docstring) as defense in depth.
             if self.heartbeat:
                 try:
                     if self._suspended:
@@ -186,6 +197,10 @@ class SupabaseUploader:
                     self._heartbeat_ok()
                 except Exception as e:
                     self._heartbeat_failed(e, "worker loop")
+            try:
+                self._flush()
+            except Exception:
+                pass  # never let the uploader crash the app
             self._wake.wait(self.retry_seconds)
             self._wake.clear()
 
@@ -289,6 +304,17 @@ class SupabaseUploader:
         with _opener.open(req, timeout=15) as r:
             r.read()
 
+    # Each upload is its own fresh TCP+TLS connection (~1.3s, confirmed live
+    # 2026-09-01 -- no connection reuse across calls) -- an unbounded flush
+    # against a real backlog (270 records observed live) takes minutes in
+    # one call. Heartbeat now runs before flush (see _worker()) so a slow
+    # flush can no longer delay it, but a multi-minute-long single call is
+    # still bad for responsiveness generally -- this caps how much one
+    # _flush() call processes, so a big backlog drains gradually over
+    # several retry_seconds-spaced cycles (each starting with a fresh
+    # heartbeat) instead of in one long blocking pass.
+    _MAX_PER_FLUSH = 25
+
     def _flush(self):
         with self._lock:
             if not self.pending_path.exists():
@@ -297,21 +323,48 @@ class SupabaseUploader:
                      if l.strip()]
         if not lines:
             return
-        remaining: list[str] = []
-        for line in lines:
+        batch = lines[:self._MAX_PER_FLUSH]
+        sent_lines: list[str] = []
+        for line in batch:
             try:
                 rec = json.loads(line)
             except json.JSONDecodeError:
-                continue  # drop malformed
+                sent_lines.append(line)       # malformed -> drop, same as before
+                continue
             try:
                 sent = self._upload(rec)      # True = done (sent or dropped)
             except urllib.error.URLError:
                 sent = False                  # offline -> keep for retry
             except Exception:
                 sent = False                  # transient server error -> retry
-            if not sent:
-                remaining.append(line)
+            if sent:
+                sent_lines.append(line)
+        if not sent_lines:
+            return
+        # Re-read the CURRENT file rather than blindly overwriting with what
+        # was in-memory before the (potentially slow) upload loop ran --
+        # enqueue() may have appended new lines while this batch was
+        # uploading (lock only held for the read above and the write below,
+        # not across the network calls in between, so this window is real).
+        # Removing exactly the sent lines from a fresh read means a record
+        # enqueued mid-flush can never be silently dropped by this write-back.
         with self._lock:
+            if not self.pending_path.exists():
+                return
+            current = [l for l in self.pending_path.read_text().splitlines()
+                       if l.strip()]
+            # Remove exactly len(sent_lines) copies of each distinct sent
+            # line, not just "any line matching this content" -- two records
+            # can legitimately be byte-identical (e.g. two "activity" pulses
+            # for the same app in the same second), and removing without
+            # counting could drop more of them than were actually sent.
+            to_remove = Counter(sent_lines)
+            remaining = []
+            for l in current:
+                if to_remove.get(l, 0) > 0:
+                    to_remove[l] -= 1
+                else:
+                    remaining.append(l)
             tmp = self.pending_path.with_suffix(".tmp")
             tmp.write_text("\n".join(remaining) + ("\n" if remaining else ""))
             tmp.replace(self.pending_path)
