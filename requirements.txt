@@ -23,3 +23,13 @@ cryptography>=42
 rumps>=0.4
 pyobjc-framework-Quartz>=10  # window titles via CGWindowList (Screen Recording)
 pyobjc-framework-Vision
+
+# eyeguard/findmy_watcher.py -- cross-checks the router's phone-dark signal
+# against Apple's Find My network, which reports device status via a
+# system-level background privilege third-party VPN apps (including
+# AmneziaWG) are never granted -- so it stays current through exactly the
+# iOS background-suspension gaps that cause false phone-dark alerts.
+# UNOFFICIAL, reverse-engineered iCloud API (no official Apple API exists
+# for this) -- real fragility risk if Apple changes their private API,
+# accepted knowingly (2026-08-31).
+pyicloud>=1.0
