@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- EyeGuard Find My cross-check (2026-08-31) -- see
+     eyeguard/findmy_watcher.py's module docstring for the full reasoning.
+     Installed to /Library/LaunchAgents (root-owned, so the monitored user
+     runs it but can't edit it -- same pattern as com.eyeguard.monitor.plist),
+     runs as the monitored user (no root needed -- only reads a credential
+     file in the user's own data directory). LimitLoadToSessionType
+     Background, not Aqua -- this does no GUI/screen work at all, unlike the
+     main app, so it shouldn't need an active GUI login to run.
+     StandardOutPath/StandardErrorPath point at the user-writable data dir,
+     NOT the root-owned code tree -- learned from the pending_uploads.jsonl
+     PermissionError incident (2026-08-27) earlier in this same project. -->
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.eyeguard.findmy</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Applications/EyeGuard.app/Contents/Resources/python/bin/python3.12</string>
+    <string>-m</string>
+    <string>eyeguard.findmy_watcher</string>
+    <string>--config</string>
+    <string>/Library/Application Support/EyeGuard/config.yaml</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Library/Application Support/EyeGuard</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONPATH</key><string>/Library/Application Support/EyeGuard</string>
+  </dict>
+  <key>LimitLoadToSessionType</key><string>Background</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/jonahdirrim/Library/Application Support/EyeGuard-data/findmy_watcher.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/jonahdirrim/Library/Application Support/EyeGuard-data/findmy_watcher.err.log</string>
+</dict></plist>

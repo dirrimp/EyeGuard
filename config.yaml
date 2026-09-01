@@ -699,6 +699,19 @@ session_watcher:
   check_seconds: 120
   expected_user: jonahdirrim
 
+# Find My cross-check (2026-08-31) -- see eyeguard/findmy_watcher.py's own
+# docstring for the full reasoning. Credentials are deliberately NOT here
+# (this file is git-tracked) -- they live in EyeGuard-data/.findmy_credentials.json
+# (chmod 600), written once by `findmy_watcher.py --setup`, which only Jonah
+# can run since it needs an interactive 2FA code from his own phone.
+findmy:
+  enabled: true
+  check_seconds: 600
+  # Substring match against the device name in Find My (Settings -> [name] ->
+  # Find My -> the list under "My Devices"), NOT the AmneziaWG peer name --
+  # different system, matched by whatever the phone is actually named there.
+  device_name_contains: "iPhone"
+
 # Auto-deploy watcher: polls the public GitHub repo for main's latest
 # commit and deploys it the moment it changes -- the merge into main
 # (GitHub branch protection + Dad's PR review) is the only approval gate,
