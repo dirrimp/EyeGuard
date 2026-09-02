@@ -710,7 +710,22 @@ findmy:
   # Substring match against the device name in Find My (Settings -> [name] ->
   # Find My -> the list under "My Devices"), NOT the AmneziaWG peer name --
   # different system, matched by whatever the phone is actually named there.
-  device_name_contains: "iPhone"
+  # CONFIRMED LIVE (2026-09-02): a bare "iPhone" is too broad -- this Apple
+  # ID has visibility into a large shared/family group, and several OTHER
+  # people's iPhones also match "iPhone" (some with fresher live-location
+  # data than Jonah's own, at any given check). Scoped to "Jonah's iPhone"
+  # specifically -- matches only Jonah's own devices (findmy_watcher.py
+  # separately picks the freshest among Jonah's own multiple listed
+  # iPhones, since old previously-owned ones never fully leave this list).
+  # NOTE: that apostrophe is U+2019 (curly), not a straight ASCII apostrophe
+  # -- confirmed via the actual device name string returned by Apple's API.
+  # A straight apostrophe here would silently match ZERO devices, not just
+  # match broadly like the old "iPhone" value did -- worse than the bug
+  # this was meant to fix. Verify with python3 -c "print([hex(ord(c)) for c
+  # in open('config.yaml').read() if ...])" style byte-checking, not visual
+  # inspection, if this ever needs editing again -- the two characters are
+  # visually near-identical in most fonts/terminals.
+  device_name_contains: "Jonah’s iPhone"
 
 # Auto-deploy watcher: polls the public GitHub repo for main's latest
 # commit and deploys it the moment it changes -- the merge into main

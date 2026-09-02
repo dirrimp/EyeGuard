@@ -200,20 +200,49 @@ class FindMyWatcher:
                   f"'findmy_watcher.py --setup' again", flush=True)
             return None
 
+        # Confirmed live (2026-09-02): this Apple ID has visibility into a
+        # large shared/family group -- device_name_contains alone is NOT
+        # enough to identify the right phone. Two real hazards found: (1)
+        # several OTHER family members' devices also contain "iPhone" in
+        # their name, so a broad match string can pick a stranger's phone,
+        # not just Jonah's own; (2) Jonah's own Find My history has FOUR old
+        # iPhones still listed (previously-owned devices never fully expire
+        # from this list) alongside the current one -- taking the FIRST
+        # name match, as this used to, depended entirely on API ordering
+        # luck (confirmed: the current phone happened to sort first, but
+        # nothing guarantees that stays true). Fixed to collect EVERY
+        # device matching device_name_contains that has ANY live location
+        # data (retired devices report loc=None, naturally excluding them),
+        # then pick whichever has the MOST RECENT timestamp -- the
+        # genuinely-in-use phone, not whichever the API happened to list
+        # first. Still depends on device_name_contains being scoped tightly
+        # enough to exclude other family members (e.g. "Jonah's iPhone", not
+        # a bare "iPhone") -- this fixes the ordering hazard, not the
+        # scoping one, which is a config.yaml concern.
+        candidates: list[tuple[float, str]] = []
         for device in api.devices:
             name = (device.status().get("name") or "") + " " + \
                    (device.status().get("deviceDisplayName") or "")
             if self.device_name_contains in name.lower():
                 loc = device.location
-                if not loc or "timeStamp" not in loc:
-                    return None
-                # Apple's timeStamp is epoch milliseconds.
-                return datetime.fromtimestamp(loc["timeStamp"] / 1000,
-                                               tz=timezone.utc)
+                if loc and "timeStamp" in loc:
+                    candidates.append((loc["timeStamp"], name))
+        if candidates:
+            candidates.sort(key=lambda c: c[0], reverse=True)
+            ts_ms, matched_name = candidates[0]
+            if len(candidates) > 1:
+                print(f"[findmy_watcher] {datetime.now().isoformat()} "
+                      f"{len(candidates)} devices matched "
+                      f"{self.device_name_contains!r} with live location "
+                      f"data -- picked the freshest: {matched_name!r}",
+                      flush=True)
+            # Apple's timeStamp is epoch milliseconds.
+            return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
         print(f"[findmy_watcher] {datetime.now().isoformat()} no device "
-              f"matching {self.device_name_contains!r} found in Find My -- "
-              f"check config.yaml's findmy.device_name_contains against the "
-              f"actual name in Settings -> [name] -> Find My", flush=True)
+              f"matching {self.device_name_contains!r} has live location "
+              f"data in Find My -- check config.yaml's "
+              f"findmy.device_name_contains against the actual name in "
+              f"Settings -> [name] -> Find My", flush=True)
         return None
 
     def run(self):
