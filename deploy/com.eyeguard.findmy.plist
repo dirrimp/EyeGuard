@@ -6,9 +6,16 @@
      Installed to /Library/LaunchAgents (root-owned, so the monitored user
      runs it but can't edit it -- same pattern as com.eyeguard.monitor.plist),
      runs as the monitored user (no root needed -- only reads a credential
-     file in the user's own data directory). LimitLoadToSessionType
-     Background, not Aqua -- this does no GUI/screen work at all, unlike the
-     main app, so it shouldn't need an active GUI login to run.
+     file in the user's own data directory). LimitLoadToSessionType Aqua --
+     originally tried Background (this does no GUI/screen work, unlike the
+     main app), but that failed to bootstrap into gui/<uid> at all
+     ("Bootstrap failed: 5: Input/output error", confirmed live 2026-09-01,
+     also didn't auto-load at the next login) -- Background apparently
+     doesn't map onto the per-user gui/<uid> domain the same way Aqua does.
+     Matching com.eyeguard.monitor.plist's proven-working Aqua setting
+     instead, even though this agent doesn't need any actual GUI capability
+     -- Jonah being logged into a GUI session is true anyway whenever this
+     should be running.
      StandardOutPath/StandardErrorPath point at the user-writable data dir,
      NOT the root-owned code tree -- learned from the pending_uploads.jsonl
      PermissionError incident (2026-08-27) earlier in this same project. -->
@@ -28,7 +35,7 @@
   <dict>
     <key>PYTHONPATH</key><string>/Library/Application Support/EyeGuard</string>
   </dict>
-  <key>LimitLoadToSessionType</key><string>Background</string>
+  <key>LimitLoadToSessionType</key><string>Aqua</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>/Users/jonahdirrim/Library/Application Support/EyeGuard-data/findmy_watcher.out.log</string>
