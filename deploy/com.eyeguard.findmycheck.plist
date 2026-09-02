@@ -9,28 +9,34 @@
      file in the user's own data directory). LimitLoadToSessionType Aqua,
      matching com.eyeguard.monitor.plist's proven-working setting.
 
-     LABEL RENAMED from com.eyeguard.findmy to com.eyeguard.findmywatcher
-     (2026-09-01), confirmed necessary via direct isolation testing: the
-     original label failed 'Bootstrap failed: 5: Input/output error' on
-     EVERY attempt (bootstrap, bootout, load, across multiple session-type
-     variants, across a full reboot) -- but a throwaway plist with identical
-     content and a FRESH label bootstrapped cleanly on the first try, and
-     the original label failed again even stripped down to nothing but
-     Label+ProgramArguments+RunAtLoad. `sfltool dumpbtm` showed multiple
-     different "generations" already registered for the original identifier
-     from the earlier failed attempts -- launchd/Background Task Management
-     appears to have gotten this specific label into a stuck/corrupted
-     registration state that neither bootstrap nor bootout could clear.
-     Renaming sidesteps it entirely rather than chasing the corrupted state
-     further. If this ever recurs for some OTHER label in this project,
-     renaming (not endless bootstrap/bootout retries) is the fix that
-     actually worked here.
+     LABEL RENAMED A SECOND TIME, com.eyeguard.findmywatcher ->
+     com.eyeguard.findmycheck (2026-09-02). The first rename (from
+     com.eyeguard.findmy, 2026-09-01) fixed a poisoned-registration
+     "Bootstrap failed: 5: Input/output error" -- but findmywatcher then
+     accumulated its OWN crash-loop history (a real bug: pyicloud's internal
+     requests calls had no timeout and could hang indefinitely, confirmed
+     live; see eyeguard/findmy_watcher.py's socket.setdefaulttimeout(30)
+     fix) before that bug was found and fixed. Once findmywatcher had
+     crash-looped enough times, IT got poisoned the identical way findmy
+     originally did -- bootstrap failing with the same I/O error even after
+     a full reboot, disable/enable cycling, and a fresh copy of an
+     already-fixed plist/binary. Confirmed this is really about crash-loop
+     HISTORY poisoning a label's registration, not anything about the label
+     string itself or the file on disk.
+
+     Renaming again, now that the underlying hang bug is actually fixed
+     (this label should never crash-loop the way findmywatcher did), is the
+     fix that already worked once for exactly this problem. If this EVER
+     happens a third time, the underlying code should be suspect first --
+     a label that crash-loops enough times seems to reliably poison itself
+     on this Mac's launchd/BTM state, so a fresh label only buys a clean
+     slate, it doesn't fix a code bug still causing crashes.
 
      StandardOutPath/StandardErrorPath point at the user-writable data dir,
      NOT the root-owned code tree -- learned from the pending_uploads.jsonl
      PermissionError incident (2026-08-27) earlier in this same project. -->
 <plist version="1.0"><dict>
-  <key>Label</key><string>com.eyeguard.findmywatcher</string>
+  <key>Label</key><string>com.eyeguard.findmycheck</string>
   <key>ProgramArguments</key>
   <array>
     <string>/Applications/EyeGuard.app/Contents/Resources/python/bin/python3.12</string>
