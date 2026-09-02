@@ -6,21 +6,31 @@
      Installed to /Library/LaunchAgents (root-owned, so the monitored user
      runs it but can't edit it -- same pattern as com.eyeguard.monitor.plist),
      runs as the monitored user (no root needed -- only reads a credential
-     file in the user's own data directory). LimitLoadToSessionType Aqua --
-     originally tried Background (this does no GUI/screen work, unlike the
-     main app), but that failed to bootstrap into gui/<uid> at all
-     ("Bootstrap failed: 5: Input/output error", confirmed live 2026-09-01,
-     also didn't auto-load at the next login) -- Background apparently
-     doesn't map onto the per-user gui/<uid> domain the same way Aqua does.
-     Matching com.eyeguard.monitor.plist's proven-working Aqua setting
-     instead, even though this agent doesn't need any actual GUI capability
-     -- Jonah being logged into a GUI session is true anyway whenever this
-     should be running.
+     file in the user's own data directory). LimitLoadToSessionType Aqua,
+     matching com.eyeguard.monitor.plist's proven-working setting.
+
+     LABEL RENAMED from com.eyeguard.findmy to com.eyeguard.findmywatcher
+     (2026-09-01), confirmed necessary via direct isolation testing: the
+     original label failed 'Bootstrap failed: 5: Input/output error' on
+     EVERY attempt (bootstrap, bootout, load, across multiple session-type
+     variants, across a full reboot) -- but a throwaway plist with identical
+     content and a FRESH label bootstrapped cleanly on the first try, and
+     the original label failed again even stripped down to nothing but
+     Label+ProgramArguments+RunAtLoad. `sfltool dumpbtm` showed multiple
+     different "generations" already registered for the original identifier
+     from the earlier failed attempts -- launchd/Background Task Management
+     appears to have gotten this specific label into a stuck/corrupted
+     registration state that neither bootstrap nor bootout could clear.
+     Renaming sidesteps it entirely rather than chasing the corrupted state
+     further. If this ever recurs for some OTHER label in this project,
+     renaming (not endless bootstrap/bootout retries) is the fix that
+     actually worked here.
+
      StandardOutPath/StandardErrorPath point at the user-writable data dir,
      NOT the root-owned code tree -- learned from the pending_uploads.jsonl
      PermissionError incident (2026-08-27) earlier in this same project. -->
 <plist version="1.0"><dict>
-  <key>Label</key><string>com.eyeguard.findmy</string>
+  <key>Label</key><string>com.eyeguard.findmywatcher</string>
   <key>ProgramArguments</key>
   <array>
     <string>/Applications/EyeGuard.app/Contents/Resources/python/bin/python3.12</string>
