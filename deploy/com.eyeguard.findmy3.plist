@@ -9,34 +9,34 @@
      file in the user's own data directory). LimitLoadToSessionType Aqua,
      matching com.eyeguard.monitor.plist's proven-working setting.
 
-     LABEL RENAMED A SECOND TIME, com.eyeguard.findmywatcher ->
-     com.eyeguard.findmycheck (2026-09-02). The first rename (from
-     com.eyeguard.findmy, 2026-09-01) fixed a poisoned-registration
-     "Bootstrap failed: 5: Input/output error" -- but findmywatcher then
-     accumulated its OWN crash-loop history (a real bug: pyicloud's internal
-     requests calls had no timeout and could hang indefinitely, confirmed
-     live; see eyeguard/findmy_watcher.py's socket.setdefaulttimeout(30)
-     fix) before that bug was found and fixed. Once findmywatcher had
-     crash-looped enough times, IT got poisoned the identical way findmy
-     originally did -- bootstrap failing with the same I/O error even after
-     a full reboot, disable/enable cycling, and a fresh copy of an
-     already-fixed plist/binary. Confirmed this is really about crash-loop
-     HISTORY poisoning a label's registration, not anything about the label
-     string itself or the file on disk.
+     LABEL RENAMED A THIRD TIME (2026-09-02): findmy -> findmywatcher ->
+     findmycheck -> findmy3. Confirmed pattern across all three: a label
+     that crash-loops enough times poisons its own registration in
+     launchd/Background Task Management on this Mac -- "Bootstrap failed:
+     5: Input/output error" on every subsequent attempt, surviving reboot,
+     disable/enable cycling, and fresh plist/binary copies. Renaming has
+     reliably worked as a clean-slate workaround each time, but only buys
+     time if the underlying crash is actually fixed -- findmywatcher was
+     poisoned by a real bug (pyicloud requests calls with no timeout,
+     could hang forever -- fixed via socket.setdefaulttimeout(30)), and
+     findmycheck was ALREADY poisoned again (14+ runs) before a crash-log
+     fallback (findmy_watcher_crash.log, since StandardErrorPath was
+     staying completely empty through every crash) could even be added and
+     deployed to see why.
 
-     Renaming again, now that the underlying hang bug is actually fixed
-     (this label should never crash-loop the way findmywatcher did), is the
-     fix that already worked once for exactly this problem. If this EVER
-     happens a third time, the underlying code should be suspect first --
-     a label that crash-loops enough times seems to reliably poison itself
-     on this Mac's launchd/BTM state, so a fresh label only buys a clean
-     slate, it doesn't fix a code bug still causing crashes.
+     Added ThrottleInterval=60 this time -- not present on the first two
+     renames. If this crash-loops again, it now respawns at most once a
+     minute instead of launchd's default ~10s minimum, buying real time to
+     read findmy_watcher_crash.log and react before enough runs accumulate
+     to poison this label too. If the crash log stays EMPTY despite a
+     crash-loop, that's a different, more serious finding -- something is
+     killing the process before Python's own exception handling ever runs.
 
      StandardOutPath/StandardErrorPath point at the user-writable data dir,
      NOT the root-owned code tree -- learned from the pending_uploads.jsonl
      PermissionError incident (2026-08-27) earlier in this same project. -->
 <plist version="1.0"><dict>
-  <key>Label</key><string>com.eyeguard.findmycheck</string>
+  <key>Label</key><string>com.eyeguard.findmy3</string>
   <key>ProgramArguments</key>
   <array>
     <string>/Applications/EyeGuard.app/Contents/Resources/python/bin/python3.12</string>
@@ -54,6 +54,7 @@
   <key>LimitLoadToSessionType</key><string>Aqua</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>60</integer>
   <key>StandardOutPath</key><string>/Users/jonahdirrim/Library/Application Support/EyeGuard-data/findmy_watcher.out.log</string>
   <key>StandardErrorPath</key><string>/Users/jonahdirrim/Library/Application Support/EyeGuard-data/findmy_watcher.err.log</string>
 </dict></plist>
