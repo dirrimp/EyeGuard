@@ -347,12 +347,31 @@ if __name__ == "__main__":
         # all -- a meaningfully different, more serious finding than a
         # normal unhandled exception.
         import traceback
+        tb = f"\n--- {datetime.now().isoformat()} ---\n" + traceback.format_exc()
+        # Hardcoded absolute path, NOT Path.home() -- if home-directory
+        # resolution itself is what's going wrong under launchd (unproven,
+        # but Path.home() depends on $HOME/pwd lookups that could behave
+        # differently in a stripped launchd environment), a dynamic path
+        # could silently fail here too, hidden by this except-and-continue,
+        # making the "empty crash log" finding meaningless either way.
+        # Matches the exact path this file's own plist already hardcodes
+        # for StandardOutPath/StandardErrorPath.
+        wrote = False
         try:
-            crash_dir = Path.home() / "Library" / "Application Support" / "EyeGuard-data"
-            crash_dir.mkdir(parents=True, exist_ok=True)
-            with (crash_dir / "findmy_watcher_crash.log").open("a") as f:
-                f.write(f"\n--- {datetime.now().isoformat()} ---\n")
-                f.write(traceback.format_exc())
+            crash_path = Path("/Users/jonahdirrim/Library/Application Support/EyeGuard-data/findmy_watcher_crash.log")
+            crash_path.parent.mkdir(parents=True, exist_ok=True)
+            with crash_path.open("a") as f:
+                f.write(tb)
+            wrote = True
         except Exception:
-            pass  # even the crash logger must never raise
+            pass
+        if not wrote:
+            # Last-resort fallback: /tmp is world-writable regardless of
+            # user/home-resolution issues -- if even THIS fails, something
+            # more fundamental than a permissions/path problem is going on.
+            try:
+                with open("/tmp/findmy_watcher_crash.log", "a") as f:
+                    f.write(tb)
+            except Exception:
+                pass
         raise
