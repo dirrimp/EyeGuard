@@ -324,4 +324,35 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise  # argparse's own --help/bad-args exit -- not a crash, don't log it
+    except BaseException:
+        # Confirmed live (2026-09-02): this LaunchAgent crash-looped
+        # (launchctl showing runs climbing fast, exit code 78/EX_CONFIG)
+        # with a COMPLETELY EMPTY StandardErrorPath log every single time --
+        # running the exact same command manually, outside launchd, worked
+        # fine and printed normally. Something about launchd's invocation
+        # environment is different enough to cause a crash before Python's
+        # own default traceback-to-stderr even reaches the log file (or
+        # reaches it in a way this specific launchd config doesn't capture
+        # -- unconfirmed which). This is a last-resort catch specifically to
+        # find out: writes the full traceback to a fixed path in the SAME
+        # user-writable data dir every other diagnostic file in this project
+        # already uses, independent of whatever is going wrong with
+        # stdout/stderr capture under launchd. If this file appears empty
+        # too after a crash, the process is being killed externally (jetsam,
+        # a signal) before Python's own exception machinery ever runs at
+        # all -- a meaningfully different, more serious finding than a
+        # normal unhandled exception.
+        import traceback
+        try:
+            crash_dir = Path.home() / "Library" / "Application Support" / "EyeGuard-data"
+            crash_dir.mkdir(parents=True, exist_ok=True)
+            with (crash_dir / "findmy_watcher_crash.log").open("a") as f:
+                f.write(f"\n--- {datetime.now().isoformat()} ---\n")
+                f.write(traceback.format_exc())
+        except Exception:
+            pass  # even the crash logger must never raise
+        raise
