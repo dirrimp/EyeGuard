@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import getpass
 import json
+import socket
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,6 +73,22 @@ from pathlib import Path
 from .net import opener as _opener
 
 _BASE = Path(__file__).resolve().parent.parent
+
+# Confirmed live (2026-09-02): pyicloud's internal requests.Session() calls
+# have no explicit timeout set anywhere -- unlike this project's own network
+# code (see net.py's module docstring for the exact same class of problem,
+# fixed there but that fix only covers OUR OWN opener, not third-party
+# libraries' independent networking). Watched a real bootstrapped run hang
+# for 3+ minutes with no progress and no exception, on a Mac already known
+# to have intermittent DNS/tunnel instability -- a plain `requests` call
+# with no timeout blocks forever on a hung connection rather than failing
+# cleanly, which meant every check_seconds cycle could silently wedge the
+# whole watcher instead of erroring, retrying, or even being catchable by
+# run()'s own try/except. socket.setdefaulttimeout() is process-global and
+# applies to every socket this interpreter opens, including ones inside
+# pyicloud/requests/urllib3 that never set their own -- turns an indefinite
+# hang into a clean, catchable TimeoutError after a bounded wait instead.
+socket.setdefaulttimeout(30)
 
 
 def _data_dir(cfg: dict) -> Path:
