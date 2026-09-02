@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import getpass
 import json
+import socket
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,6 +73,22 @@ from pathlib import Path
 from .net import opener as _opener
 
 _BASE = Path(__file__).resolve().parent.parent
+
+# Confirmed live (2026-09-02): pyicloud's internal requests.Session() calls
+# have no explicit timeout set anywhere -- unlike this project's own network
+# code (see net.py's module docstring for the exact same class of problem,
+# fixed there but that fix only covers OUR OWN opener, not third-party
+# libraries' independent networking). Watched a real bootstrapped run hang
+# for 3+ minutes with no progress and no exception, on a Mac already known
+# to have intermittent DNS/tunnel instability -- a plain `requests` call
+# with no timeout blocks forever on a hung connection rather than failing
+# cleanly, which meant every check_seconds cycle could silently wedge the
+# whole watcher instead of erroring, retrying, or even being catchable by
+# run()'s own try/except. socket.setdefaulttimeout() is process-global and
+# applies to every socket this interpreter opens, including ones inside
+# pyicloud/requests/urllib3 that never set their own -- turns an indefinite
+# hang into a clean, catchable TimeoutError after a bounded wait instead.
+socket.setdefaulttimeout(30)
 
 
 def _data_dir(cfg: dict) -> Path:
@@ -163,6 +180,20 @@ class FindMyWatcher:
         with _opener.open(req, timeout=15) as r:
             r.read()
 
+    def _alert_session_expired(self):
+        """Called the moment login fails or a fresh 2FA challenge is needed
+        -- Jonah asked for this to be immediate, not a delayed staleness
+        check (see supabase/findmy_session_expired_alert.sql). Debounced
+        server-side, so calling this every check_seconds while the session
+        stays dead only sends one email, not one per cycle. Best-effort:
+        must never raise back into the caller (which is already mid-error-
+        handling for the login failure itself)."""
+        try:
+            self._rpc("eg_report_findmy_session_expired", {})
+        except Exception as e:
+            print(f"[findmy_watcher] {datetime.now().isoformat()} failed to "
+                  f"report session-expired: {e!r}", flush=True)
+
     def _find_my_last_seen(self) -> datetime | None:
         """Returns the phone's Find My last-seen timestamp, or None if the
         credentials/session aren't set up yet, the session has expired
@@ -188,6 +219,7 @@ class FindMyWatcher:
             print(f"[findmy_watcher] {datetime.now().isoformat()} login "
                   f"failed: {e} -- may need 'findmy_watcher.py --setup' "
                   f"re-run (session expired or password changed)", flush=True)
+            self._alert_session_expired()
             return None
 
         if api.requires_2fa:
@@ -198,6 +230,7 @@ class FindMyWatcher:
             print(f"[findmy_watcher] {datetime.now().isoformat()} session "
                   f"needs a fresh 2FA challenge -- run "
                   f"'findmy_watcher.py --setup' again", flush=True)
+            self._alert_session_expired()
             return None
 
         # Confirmed live (2026-09-02): this Apple ID has visibility into a
