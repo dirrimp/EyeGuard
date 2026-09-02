@@ -326,7 +326,25 @@ class EyeGuardApp(rumps.App):
         sleep or shutdown does NOT trigger a gone-dark alert), and go back to
         alive on wake. A manual stop (launchctl unload) sends SIGTERM with NO
         power-off notification, so it sends no clean beacon -> the monitor going
-        dark still alerts. That's the tamper-evidence we want."""
+        dark still alerts. That's the tamper-evidence we want.
+
+        ALSO registers for screensDidSleep/screensDidWake (2026-09-02) --
+        confirmed live via agent_diagnostic.log cross-referenced against
+        `pmset -g log`: 4 real "lost view of the screen" false alarms in one
+        night, NONE of them within recently_resumed()'s grace window of an
+        actual SYSTEM wake (that part of the fix is confirmed working --
+        checked a real system wake the same night, zero false alarm). These
+        4 were display-only sleep/wake -- the screen blanking on its own
+        idle timer while the Mac stayed fully awake and running the whole
+        time. NSWorkspaceWillSleep/DidWake are SYSTEM-sleep-specific and
+        never fire for this, so the grace period never engaged. This is
+        deliberately NOT wired to suspend()/resume() -- the Mac never
+        actually went offline, calling suspend() would incorrectly post
+        status='clean_shutdown' for a mere display blank, wrongly
+        suppressing OTHER real alerts (branch (a) gone-dark, branch (f)
+        suspend-abuse) that should still apply normally throughout. Only
+        extends the same recently_resumed() grace window uploader.py
+        already uses for real wakes."""
         try:
             from AppKit import NSWorkspace
             from Foundation import NSOperationQueue
@@ -341,6 +359,9 @@ class EyeGuardApp(rumps.App):
             nc.addObserverForName_object_queue_usingBlock_(
                 "NSWorkspaceDidWakeNotification", None, q,
                 lambda n: self._power_event("resume", "wake"))
+            nc.addObserverForName_object_queue_usingBlock_(
+                "NSWorkspaceScreensDidWakeNotification", None, q,
+                lambda n: self._screen_wake_event())
         except Exception as e:
             print(f"[power] observer setup failed: {e}", flush=True)
 
@@ -351,6 +372,20 @@ class EyeGuardApp(rumps.App):
         try:
             up.suspend() if action == "suspend" else up.resume()
             print(f"[power] {name} -> {action}", flush=True)
+        except Exception:
+            pass
+
+    def _screen_wake_event(self):
+        """Display-only wake -- see _register_power_observers()'s docstring.
+        Only extends the grace window; never touches _suspended or posts a
+        beacon, since the Mac was never actually offline."""
+        up = self._uploader
+        if up is None:
+            return
+        try:
+            up.note_screen_resumed()
+            self._log_diag("screens woke (display-sleep only) -- extending "
+                            "the screen_ok grace window")
         except Exception:
             pass
 
