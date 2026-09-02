@@ -229,6 +229,23 @@ class SupabaseUploader:
         except Exception as e:
             self._heartbeat_failed(e, "resume beacon")
 
+    def note_screen_resumed(self):
+        """Display-only wake (NSWorkspaceScreensDidWakeNotification, not a
+        full system resume) -- see menubar.py's _register_power_observers()
+        docstring for the full reasoning. Confirmed live (2026-09-02): 4
+        real 'lost view of the screen' false alarms in one night, none
+        within recently_resumed()'s grace window of an actual SYSTEM wake
+        (that part already confirmed working) -- these were the display
+        blanking on its own idle timer while the Mac stayed fully awake,
+        which NSWorkspaceWillSleep/DidWake never fire for at all.
+        Deliberately does NOT set self._suspended or send any beacon -- the
+        Mac was never actually offline, the normal heartbeat loop kept
+        running the whole time; this only extends the same grace window
+        recently_resumed() already uses for real wakes, so a capture
+        briefly seeing a blank/black display during the display-sleep
+        transition doesn't get misread as a real blind condition."""
+        self._resumed_at = time.time()
+
     def authorized_stop(self, password: str) -> bool:
         """Ask the server to verify `password` and, only if correct, set
         status='clean_shutdown' -- one atomic RPC call (eg_authorized_stop),
