@@ -1,0 +1,53 @@
+Find My cross-check -- runs via Jonah's own user crontab, not a LaunchAgent
+=============================================================================
+
+Why: eyeguard/findmy_watcher.py as a per-user GUI-domain LaunchAgent
+(com.eyeguard.findmy / findmywatcher / findmycheck / findmy3 / findmy4 /
+findmy5 -- six labels tried, 2026-09-01/02) reproducibly crash-looped under
+launchd specifically -- exit 78 (EX_CONFIG), ZERO output in StandardOutPath,
+StandardErrorPath, or the hardcoded-path crash logger (see
+findmy_watcher.py's own module docstring), even before Python's first print
+statement. Ruled out as the cause, each with a direct test: environment
+variables (reproduced launchd's exact minimal env via `env -i` -- ran
+fine), ThrottleInterval, and `-m module` vs. direct-script invocation
+(matched com.eyeguard.monitor.plist's own working pattern exactly -- still
+crashed). The actual mechanism was never conclusively identified -- most
+likely candidate, unconfirmed, is launchd applying some form of stricter
+trust/sandboxing enforcement specifically to freshly-registered GUI-domain
+jobs using this ad-hoc-signed (not Developer-ID-signed) binary, that
+com.eyeguard.monitor never had to clear since it's been running
+continuously since before this specific investigation. Also separately
+confirmed: repeated crash-looping poisons a label's own launchd/Background
+Task Management registration -- "Bootstrap failed: 5: Input/output error"
+on every later attempt, surviving reboot and disable/enable cycling, only
+fixed by renaming to an unused label -- which is WHY there are 6 abandoned
+labels in this project's history instead of 1.
+
+cron sidesteps all of this -- it's a completely separate, much older
+scheduling mechanism with no launchd/BTM registration or trust model
+involved at all.
+
+Setup (run once, as jonahdirrim, no sudo needed -- crontab is per-user):
+
+    crontab -e
+
+Add this line (adjust the check_seconds-matching interval if
+config.yaml's findmy.check_seconds is ever changed from the 600s default --
+cron's schedule REPLACES that field's role entirely in this mode, the
+Python side no longer sleeps/loops on its own with --once):
+
+    */10 * * * * /Applications/EyeGuard.app/Contents/Resources/python/bin/python3.12 "/Library/Application Support/EyeGuard/run_findmy.py" --once --config "/Library/Application Support/EyeGuard/config.yaml" >> "/Users/jonahdirrim/Library/Application Support/EyeGuard-data/findmy_watcher.out.log" 2>&1
+
+Verify it's installed:
+
+    crontab -l
+
+Verify it's actually running (wait for the next :00/:10/:20/... mark, then):
+
+    tail -5 "/Users/jonahdirrim/Library/Application Support/EyeGuard-data/findmy_watcher.out.log"
+
+One-time interactive login is UNCHANGED -- still needs to be run directly,
+by Jonah, in a real terminal (needs a 2FA code from his own phone):
+
+    cd "/Library/Application Support/EyeGuard"
+    /Applications/EyeGuard.app/Contents/Resources/python/bin/python3.12 -m eyeguard.findmy_watcher --setup

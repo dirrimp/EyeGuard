@@ -278,20 +278,28 @@ class FindMyWatcher:
               f"Settings -> [name] -> Find My", flush=True)
         return None
 
+    def check_once(self):
+        """One check-and-report cycle. Shared by run() (the old
+        LaunchAgent-loop mode, kept for now in case cron ever needs
+        replacing) and the cron entry point (--once, see main()) -- cron
+        itself handles the every-check_seconds scheduling in that mode, so
+        this just does a single cycle and returns."""
+        try:
+            last_seen = self._find_my_last_seen()
+            if last_seen is not None:
+                self._rpc("eg_report_findmy_status",
+                          {"p_last_seen": last_seen.isoformat()})
+        except Exception as e:
+            # A bad check must never kill the caller -- same rule as every
+            # other background watcher in this project.
+            print(f"[findmy_watcher] {datetime.now().isoformat()} check "
+                  f"raised {e!r} -- continuing", flush=True)
+
     def run(self):
         print(f"[findmy_watcher] {datetime.now().isoformat()} active, "
               f"checking every {self.check_seconds}s", flush=True)
         while True:
-            try:
-                last_seen = self._find_my_last_seen()
-                if last_seen is not None:
-                    self._rpc("eg_report_findmy_status",
-                              {"p_last_seen": last_seen.isoformat()})
-            except Exception as e:
-                # A bad check must never kill this watcher -- same rule as
-                # every other background watcher in this project.
-                print(f"[findmy_watcher] {datetime.now().isoformat()} check "
-                      f"raised {e!r} -- continuing", flush=True)
+            self.check_once()
             time.sleep(self.check_seconds)
 
 
@@ -304,6 +312,20 @@ def main():
                    help="Interactive one-time (or re-run if the session "
                         "expired) Apple ID login. Run this yourself, in a "
                         "real terminal -- needs a 2FA code from your phone.")
+    p.add_argument("--once", action="store_true",
+                   help="Run a single check-and-report cycle and exit, "
+                        "instead of looping forever. For cron -- see "
+                        "deploy/findmy-cron.txt. Switched to this (2026-09-02) "
+                        "after a LaunchAgent running this same script "
+                        "reproducibly crash-looped under launchd's GUI "
+                        "domain (exit 78/EX_CONFIG, zero log output "
+                        "anywhere, not reproducible by running the exact "
+                        "same command+environment directly) -- ruled out "
+                        "environment variables, ThrottleInterval, and "
+                        "-m-module-vs-direct-script invocation as the cause "
+                        "before giving up on diagnosing it further and "
+                        "switching to cron, which doesn't go through "
+                        "launchd/Background Task Management at all.")
     args = p.parse_args()
     cfg = load_config(args.config)
 
@@ -316,11 +338,15 @@ def main():
         print("[findmy_watcher] disabled in config, exiting", flush=True)
         return
     sb = cfg.get("supabase", {})
-    FindMyWatcher(
+    watcher = FindMyWatcher(
         cfg=cfg, url=sb["url"], api_key=sb["api_key"],
         device_name_contains=fm.get("device_name_contains", "iPhone"),
         check_seconds=int(fm.get("check_seconds", 600)),
-    ).run()
+    )
+    if args.once:
+        watcher.check_once()
+    else:
+        watcher.run()
 
 
 if __name__ == "__main__":
