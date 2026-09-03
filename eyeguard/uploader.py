@@ -80,6 +80,10 @@ class SupabaseUploader:
         # is off (NSWorkspaceScreensDidSleepNotification -> DidWake), not just
         # the short post-wake grace window recently_resumed() covers -- see
         # note_screen_asleep()'s own docstring.
+        self._outage_started_at = 0.0  # time.time() when the CURRENT heartbeat
+        # outage began (0.0 = not currently failing)
+        self._outage_confirmed_offline = True  # rolling per-outage flag; see
+        # _heartbeat_failed()'s use of net.general_internet_reachable()
         self._lock = threading.Lock()          # guards the pending file
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -150,6 +154,29 @@ class SupabaseUploader:
             print(f"[uploader] {datetime.now().isoformat()} heartbeat recovered",
                   flush=True)
             self._heartbeat_failing = False
+            # Retroactive context only -- the real-time gone-dark alert (if
+            # this gap was long enough) already fired unconditionally off
+            # the server's own clock, before this ever runs; nothing here
+            # can retract or delay that, by design. This is purely a
+            # best-effort, self-reported, LOWER-TRUST follow-up (same
+            # standing as every other local-only signal in this project --
+            # tamper-evident, not proof) telling the partners whether the
+            # gap looked like "no network reachable at all" (e.g. the Mac
+            # left with no wifi around) vs. "Supabase specifically was
+            # unreachable while the rest of the internet worked fine" (the
+            # case actually worth being suspicious of). Floored at 180s
+            # (the gone-dark threshold) so trivial sub-threshold blips that
+            # never even alerted don't generate noise.
+            gap_seconds = time.time() - self._outage_started_at
+            self._outage_started_at = 0.0
+            if gap_seconds >= 180:
+                try:
+                    self._rpc("eg_report_network_gap", {
+                        "p_confirmed_offline": self._outage_confirmed_offline,
+                        "p_gap_seconds": gap_seconds})
+                except Exception:
+                    pass  # best-effort context -- never let this break recovery
+            self._outage_confirmed_offline = True
 
     def _heartbeat_failed(self, e: Exception, context: str):
         # Logged only on the FIRST failure and again on recovery -- a sustained
@@ -160,6 +187,8 @@ class SupabaseUploader:
         # Timestamped so a later alert email can actually be correlated to a
         # specific line here instead of just "somewhere in this log".
         if not self._heartbeat_failing:
+            self._outage_started_at = time.time()
+            self._outage_confirmed_offline = True
             self._log_diag(f"heartbeat FAILING ({context}): "
                             f"{type(e).__name__}: {e} -- retrying every "
                             f"{self.retry_seconds}s, next line is on recovery")
@@ -168,6 +197,18 @@ class SupabaseUploader:
                   f"{self.retry_seconds}s, next log line is on recovery",
                   flush=True)
             self._heartbeat_failing = True
+        # Sampled on EVERY retry, not just the first -- a long outage might
+        # start with the whole network down and partially recover (wifi
+        # back but Supabase specifically still blocked), which must NOT be
+        # reported as "confirmed offline the whole time." One False sample
+        # anywhere in the outage permanently clears the flag for it.
+        if self._outage_confirmed_offline:
+            try:
+                from .net import general_internet_reachable
+                if general_internet_reachable():
+                    self._outage_confirmed_offline = False
+            except Exception:
+                pass  # best-effort -- inability to check is not evidence either way
 
     def _worker(self):
         # Pulse once right away so "last seen" is fresh the moment we start.
