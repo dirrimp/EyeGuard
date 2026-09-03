@@ -76,6 +76,10 @@ class SupabaseUploader:
         self._status_provider = None  # returns {screen_ok, frames_analyzed}
         self._heartbeat_failing = False  # logged on first failure + recovery only
         self._resumed_at = 0.0  # time.time() of the last resume() call
+        self._display_asleep = False  # True for the WHOLE duration the display
+        # is off (NSWorkspaceScreensDidSleepNotification -> DidWake), not just
+        # the short post-wake grace window recently_resumed() covers -- see
+        # note_screen_asleep()'s own docstring.
         self._lock = threading.Lock()          # guards the pending file
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -245,6 +249,24 @@ class SupabaseUploader:
         briefly seeing a blank/black display during the display-sleep
         transition doesn't get misread as a real blind condition."""
         self._resumed_at = time.time()
+        self._display_asleep = False
+
+    def note_screen_asleep(self):
+        """Display-only sleep start (NSWorkspaceScreensDidSleepNotification)
+        -- the missing other half of note_screen_resumed()'s pair (2026-09-03).
+        recently_resumed()'s grace window only covers the first ~2 minutes
+        AFTER waking; it does nothing for the sleep itself, which routinely
+        runs much longer (a real ~14-minute display sleep alerted 'lost view
+        of the screen' after the 2026-09-02 debounce fix, confirmed via
+        agent_diagnostic.log cross-referenced against the probe's own
+        frozen-since-19:48/woke-at-20:02 timestamps). Nothing risky can
+        happen on a screen that's off, same reasoning already applied to the
+        phone (phone_unlock_active_use_signal.sql) and to session_watcher's
+        own IOKit sleep-awareness -- so screen_ok=false is simply not
+        reported at all for the whole sleep duration, reserving the alert
+        for when the Mac is actually awake and in use but capture is
+        genuinely broken, which is the only case that matters."""
+        self._display_asleep = True
 
     def authorized_stop(self, password: str) -> bool:
         """Ask the server to verify `password` and, only if correct, set
@@ -300,7 +322,17 @@ class SupabaseUploader:
                     # just keeps whatever was last reported (almost always
                     # True, from before sleep) instead of asserting a value
                     # this process doesn't actually know yet.
-                    if not (screen_ok is False and self.recently_resumed()):
+                    # Omit p_screen_ok entirely (rather than forcing True)
+                    # during the post-wake grace window OR while the display
+                    # is currently, legitimately asleep -- eg_heartbeat()'s
+                    # coalesce(p_screen_ok, screen_ok) then just keeps
+                    # whatever was last reported instead of asserting a
+                    # value this process doesn't actually know yet, or
+                    # reporting a "problem" that isn't one. See
+                    # note_screen_asleep()'s docstring for why the sleep
+                    # itself (not just the post-wake catch-up) needs this.
+                    if not (screen_ok is False and
+                            (self.recently_resumed() or self._display_asleep)):
                         params["p_screen_ok"] = screen_ok
                 if "frames_analyzed" in extra:
                     params["p_frames_analyzed"] = int(extra["frames_analyzed"])

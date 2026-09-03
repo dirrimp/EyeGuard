@@ -362,6 +362,16 @@ class EyeGuardApp(rumps.App):
             nc.addObserverForName_object_queue_usingBlock_(
                 "NSWorkspaceScreensDidWakeNotification", None, q,
                 lambda n: self._screen_wake_event())
+            # The docstring above already described this pairing; the actual
+            # observer registration was missing until 2026-09-03 -- only the
+            # wake half existed, so nothing suppressed screen_ok=false for
+            # the SLEEP itself (only the short post-wake catch-up window),
+            # and a long, ordinary display sleep alerted "lost view of the
+            # screen" once the 2026-09-02 debounce fix let it persist past
+            # 2 minutes. See uploader.py's note_screen_asleep() docstring.
+            nc.addObserverForName_object_queue_usingBlock_(
+                "NSWorkspaceScreensDidSleepNotification", None, q,
+                lambda n: self._screen_sleep_event())
         except Exception as e:
             print(f"[power] observer setup failed: {e}", flush=True)
 
@@ -386,6 +396,22 @@ class EyeGuardApp(rumps.App):
             up.note_screen_resumed()
             self._log_diag("screens woke (display-sleep only) -- extending "
                             "the screen_ok grace window")
+        except Exception:
+            pass
+
+    def _screen_sleep_event(self):
+        """Display-only sleep start -- see _register_power_observers()'s
+        docstring and uploader.py's note_screen_asleep(). Suppresses
+        screen_ok=false reporting for the whole sleep, not just a post-wake
+        grace window; never touches _suspended or posts a beacon, since the
+        Mac isn't actually offline."""
+        up = self._uploader
+        if up is None:
+            return
+        try:
+            up.note_screen_asleep()
+            self._log_diag("screen went to sleep (display-sleep only) -- "
+                            "suppressing screen_ok reporting until it wakes")
         except Exception:
             pass
 
