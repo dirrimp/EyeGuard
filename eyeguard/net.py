@@ -170,6 +170,40 @@ def resolve_via_physical_interface(hostname: str, iface: str) -> str | None:
     return None
 
 
+def general_internet_reachable() -> bool:
+    """Best-effort: is there a path to the general internet right now at
+    all, independent of Supabase specifically and independent of DNS (a raw
+    IP connect to the same well-known resolvers already used above, bound
+    to the physical interface like everything else here)? Used only to tell
+    "the whole network is genuinely down" (nothing risky possible either)
+    apart from "this Mac's path to Supabase specifically is broken while
+    the rest of the internet works fine" -- see uploader.py's
+    note_screen_asleep()'s sibling reasoning and _heartbeat_failed()'s use
+    of this. Feeds only a RETROACTIVE follow-up email once reconnected
+    (eg_report_network_gap), never the real-time gone-dark alert itself,
+    which must stay fail-safe and unconditional regardless of what this
+    returns -- a client that can't reach the internet also can't call the
+    RPC that reports it couldn't. Never raises: any failure here just means
+    "couldn't confirm reachable" (False), not "confirmed unreachable"."""
+    iface = physical_interface()
+    for ip in _DNS_SERVERS:  # 1.1.1.1 / 8.8.8.8 -- effectively always-up anycast
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            if iface:
+                sock.setsockopt(socket.IPPROTO_IP, _IP_BOUND_IF,
+                                 socket.if_nametoindex(iface))
+            sock.settimeout(3)
+            sock.connect((ip, 443))
+            return True
+        except Exception:
+            continue
+        finally:
+            if sock is not None:
+                sock.close()
+    return False
+
+
 class _BoundHTTPSConnection(http.client.HTTPSConnection):
     """Binds to the physical interface before connecting, so this request's
     route is independent of the system default route. Falls back to normal
