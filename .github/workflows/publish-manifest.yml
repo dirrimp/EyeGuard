@@ -1,0 +1,56 @@
+name: Publish release manifest
+
+# Automatically republishes the file-integrity manifest whenever a merge to
+# main touches any file eyeguard/integrity.py's IntegrityWatcher covers
+# (see deploy/gen_manifest.py's _covered_files() -- eyeguard/*.py or
+# run_agent.py). Without this, every such merge needs a manual step (Dad,
+# on his own machine, with the service_role key) before the manifest
+# matches what's actually deployed -- forgotten twice already (see
+# deploy/RELEASE_CHECKLIST.md), both times causing real tamper-alert spam
+# once the mismatch surfaced.
+#
+# SUPABASE_SERVICE_ROLE_KEY lives ONLY as a GitHub Actions secret here --
+# never in this repo, never on the monitored Mac, never in any session
+# working on this codebase. Same admin-trust boundary as everywhere else
+# in this project (the Supabase SQL editor, this key) -- Dad, never Jonah.
+#
+# One-time setup (Dad only): repo Settings -> Secrets and variables ->
+# Actions -> New repository secret, name it exactly
+# SUPABASE_SERVICE_ROLE_KEY, value from the Supabase dashboard (Project
+# Settings -> API -> service_role, "reveal"). Requires repo admin access to
+# add -- after that, this workflow needs no further manual steps, ever,
+# for as long as the secret stays valid.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "eyeguard/**.py"
+      - "run_agent.py"
+
+jobs:
+  publish-manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+
+      - name: Read version from config.yaml
+        id: version
+        run: |
+          V=$(python3 -c "import yaml; print(yaml.safe_load(open('config.yaml'))['file_integrity']['version'])")
+          echo "value=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Publish manifest
+        env:
+          SUPABASE_URL: https://ucgldleacehxjjwwqomk.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
+            echo "::error::SUPABASE_SERVICE_ROLE_KEY secret is not set -- add it in repo Settings > Secrets and variables > Actions (see this file's header). Falling back to the manual deploy/publish_manifest.sh step for now."
+            exit 1
+          fi
+          ./deploy/publish_manifest.sh "${{ steps.version.outputs.value }}"
