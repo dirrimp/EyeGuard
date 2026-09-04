@@ -376,9 +376,24 @@ class EyeGuardApp(rumps.App):
             print(f"[power] observer setup failed: {e}", flush=True)
 
     def _power_event(self, action: str, name: str):
+        """Confirmed live (2026-09-04): this used a bare print() with no
+        stdout capture configured in com.eyeguard.monitor.plist -- same
+        class of gap already closed once before for heartbeat fail/recover
+        (see uploader.py's _log_diag() docstring). Left a real incident
+        undiagnosable: three real system sleeps (confirmed via `pmset -g
+        log`) produced zero trace of whether NSWorkspaceWillSleepNotification
+        even fired for this process, let alone whether the resulting
+        suspend() beacon succeeded -- session_watcher.py's OWN IOKit
+        registration is confirmed (via ITS OWN log) to have missed all
+        three, and this file's silence meant there was no way to tell
+        whether the main app's separate, higher-level NSWorkspace-based
+        detection caught what IOKit didn't. Logging the notification firing
+        itself (not just success/failure, which _heartbeat_failed()/_ok()
+        already route to the same log) closes that specific gap."""
         up = self._uploader
         if up is None:
             return
+        self._log_diag(f"power event: {name} -> {action}")
         try:
             up.suspend() if action == "suspend" else up.resume()
             print(f"[power] {name} -> {action}", flush=True)
