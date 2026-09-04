@@ -52,6 +52,11 @@ NOISE = [n.lower() for n in CONF.get("noise_domains", [])]
 APP_MAP = {k.lower(): v for k, v in CONF.get("app_map", {}).items()}
 DARK = int(CONF.get("dark_buffer_seconds", 30))
 GREEN_THROTTLE = int(CONF.get("green_repeat_seconds", 900))
+# LAN sleep-signal relay (2026-09-04) -- see sleep_relay_loop()'s own
+# docstring below and eyeguard/session_watcher.py's SleepWatcher for the
+# Mac side. Optional: the listener never starts if unset.
+SLEEP_RELAY_TOKEN = CONF.get("sleep_relay_token", "")
+SLEEP_RELAY_PORT = int(CONF.get("sleep_relay_port", 51900))
 HEARTBEAT_SECONDS = int(CONF.get("heartbeat_seconds", 20))
 ROUTER_CHECK_SECONDS = int(CONF.get("router_check_seconds", 300))
 ROUTER_BASELINE_PATH = Path(CONF.get("router_baseline_file",
@@ -769,7 +774,65 @@ def router_check_loop():
         time.sleep(ROUTER_CHECK_SECONDS)
 
 
+def sleep_relay_loop():
+    """LAN relay for the Mac's WillSleep signal (2026-09-04).
+
+    The Mac's own WillSleep handler (eyeguard/session_watcher.py's
+    SleepWatcher) races a tight, OS-shared deadline to call
+    IOAllowPowerChange -- confirmed live (2026-09-03/04) that a WAN network
+    call made from inside that handler is genuinely risky: DNS + VPN
+    tunnel + internet round trip, all squeezed into a window other system
+    daemons are simultaneously eating into (pmset -g log's own "PM Client
+    Acks: Delays to Sleep notifications" lines). A UDP packet to THIS
+    router, on the same LAN, needs none of that -- no DNS, no tunnel, no
+    internet hop, just a same-subnet send that returns essentially
+    instantly whether or not anything answers. This router then relays the
+    signal to Supabase over its own already-reliable, non-time-pressured
+    connection -- the Mac only needs to reach as far as this router, not
+    all the way to Supabase, during the one moment that's hardest.
+
+    Reuses eg_watcher_report_sleep() directly -- no new RPC, no new column.
+    The relay produces IDENTICAL server-side state to the Mac calling it
+    directly; this router is just a more reliable messenger for the exact
+    same message.
+
+    Security: SLEEP_RELAY_TOKEN is a plain shared string, not HMAC-signed --
+    deliberately not hardened further, because the worst case a forged
+    packet achieves (suppressing one "session watcher went dark" alert) is
+    EXACTLY what anyone already holding the public anon key can already do
+    directly via eg_report_suspend() with zero authentication at all
+    (accepted residual since 2026-08-24, supabase/anon_client_pivot.sql) --
+    this LAN channel adds a new PATH to an already-accepted capability, not
+    a new capability. Only reachable from the LAN itself (not exposed over
+    the WireGuard tunnel or WAN), so it doesn't even extend that residual's
+    existing reach.
+
+    Only runs if this router doesn't ALSO happen to be genuinely down or
+    unreachable from the Mac at that exact moment (e.g. a router reboot
+    mid-sleep-transition) -- in that case the Mac's own direct (WAN)
+    fallback attempt still applies, same as before this existed. This is
+    an additional path, not a replacement for that fallback."""
+    import socket as _socket
+    sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+    sock.bind(("0.0.0.0", SLEEP_RELAY_PORT))
+    print(f"[eyeguard-phone] sleep relay listening on UDP :{SLEEP_RELAY_PORT}",
+          flush=True)
+    while True:
+        try:
+            data, addr = sock.recvfrom(512)
+            msg = json.loads(data.decode())
+            if msg.get("token") != SLEEP_RELAY_TOKEN:
+                continue  # wrong/missing token -- silently ignore, no reply
+            sb_rpc("eg_watcher_report_sleep", {})
+            print(f"[eyeguard-phone] relayed sleep signal from {addr[0]} "
+                  f"({msg.get('reason', '?')})", flush=True)
+        except Exception as e:
+            print(f"[eyeguard-phone] sleep relay error: {e!r}", flush=True)
+
+
 def main():
+    if SLEEP_RELAY_TOKEN:
+        threading.Thread(target=sleep_relay_loop, daemon=True).start()
     threading.Thread(target=router_check_loop, daemon=True).start()
     threading.Thread(target=tor_refresh_loop, daemon=True).start()
     threads = []
