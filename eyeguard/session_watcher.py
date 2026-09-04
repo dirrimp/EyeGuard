@@ -340,9 +340,29 @@ class SleepWatcher:
         self._callback = None  # kept alive so ctypes can't GC the trampoline
 
     def _report_sleep(self, reason: str):
+        """Confirmed live (2026-09-03/04): two real "session watcher went
+        dark" false alarms, both landing ~3 min after an actual WillSleep
+        (cross-referenced against `pmset -g log`'s own Sleep entries) --
+        this IS the exact case eg_watcher_report_sleep() exists to suppress,
+        yet the signal wasn't there. Root cause: this call used the same
+        15s timeout as every other RPC in this class, but WillSleep runs
+        under a tight, OS-shared deadline (IOAllowPowerChange must be
+        called promptly -- `pmset -g log`'s own "PM Client Acks: Delays to
+        Sleep notifications" lines show OTHER system daemons routinely
+        eating 1-3s of that shared budget already). A 15s attempt is far
+        more likely to still be hanging when the OS's patience runs out
+        than to either succeed fast or fail fast -- worse than not trying
+        at all, since it also risks delaying IOAllowPowerChange itself.
+        Cut to 3s: fails fast on a bad network, and 3s is comfortably
+        enough for is a healthy connection's actual RTT to Supabase (this
+        project's own heartbeats normally complete in ~1.3s). This does NOT
+        eliminate the underlying race -- a sufficiently bad blip can still
+        lose the signal, and branch (d) alerting normally in that case is
+        the same accepted, documented fallback as before (no worse than
+        pre-fix behavior) -- it just meaningfully narrows the window."""
         ts = datetime.now().isoformat()
         try:
-            self.watcher._rpc("eg_watcher_report_sleep", {})
+            self.watcher._rpc("eg_watcher_report_sleep", {}, timeout=3)
             print(f"[session_watcher] {ts} IOKit: {reason} -- reported sleep "
                   f"to server", flush=True)
         except Exception as e:
@@ -410,7 +430,7 @@ class SessionWatcher:
         self.expected_user = expected_user
         self.check_seconds = check_seconds
 
-    def _rpc(self, name: str, params: dict):
+    def _rpc(self, name: str, params: dict, timeout: int = 15):
         # Bound to the physical interface (see eyeguard/net.py) -- this call
         # used plain urllib.request.urlopen() until 2026-08-25, unprotected
         # from the same on-demand-VPN-tunnel instability uploader.py was
@@ -420,13 +440,17 @@ class SessionWatcher:
         # confirmed live: several consecutive "heartbeat network error" lines
         # in a row in this daemon's own log, a real risk of a false "session
         # watcher went dark" email from exactly this gap.
+        #
+        # `timeout` is caller-overridable (2026-09-04) for SleepWatcher's
+        # WillSleep call specifically -- see _report_sleep()'s docstring for
+        # why 15s is actively harmful there, not just slow.
         req = urllib.request.Request(
             f"{self.base}/rest/v1/rpc/{name}",
             data=json.dumps(params).encode(), method="POST",
             headers={"apikey": self.api_key,
                      "Authorization": f"Bearer {self.api_key}",
                      "Content-Type": "application/json"})
-        with _opener.open(req, timeout=15) as r:
+        with _opener.open(req, timeout=timeout) as r:
             r.read()
 
     def _check_once(self) -> tuple[bool, bool, bool, bool]:
