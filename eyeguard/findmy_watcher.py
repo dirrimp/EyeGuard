@@ -71,6 +71,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .net import opener as _opener
+from .net import hardened_dns as _hardened_dns
 
 _BASE = Path(__file__).resolve().parent.parent
 
@@ -135,25 +136,31 @@ def setup(cfg: dict):
     from pyicloud import PyiCloudService
     from pyicloud.exceptions import PyiCloudFailedLoginException
 
-    try:
-        api = PyiCloudService(apple_id, password,
-                               cookie_directory=str(_cookie_dir(cfg)))
-    except PyiCloudFailedLoginException as e:
-        print(f"Login failed: {e}")
-        return
-
-    if api.requires_2fa:
-        code = input("Enter the 2FA code Apple just sent to your device: ").strip()
-        if not api.validate_2fa_code(code):
-            print("That code didn't validate -- nothing was saved, try again.")
+    # See net.py's hardened_dns() docstring (2026-09-04): pyicloud manages
+    # its own requests.Session(), so this is the only way to give its calls
+    # the same tunnel-resilient DNS resolution every other HTTP call in this
+    # project already gets.
+    with _hardened_dns():
+        try:
+            api = PyiCloudService(apple_id, password,
+                                   cookie_directory=str(_cookie_dir(cfg)))
+        except PyiCloudFailedLoginException as e:
+            print(f"Login failed: {e}")
             return
-        # Reduces how often future runs need a fresh 2FA challenge -- this
-        # trusts the SESSION, not the device, and only lasts as long as
-        # Apple's own trust window (weeks/months, not indefinite).
-        api.trust_session()
 
-    devices = [d.status().get("deviceDisplayName", "?") + ": " + d.status().get("name", "?")
-               for d in api.devices]
+        if api.requires_2fa:
+            code = input("Enter the 2FA code Apple just sent to your device: ").strip()
+            if not api.validate_2fa_code(code):
+                print("That code didn't validate -- nothing was saved, try again.")
+                return
+            # Reduces how often future runs need a fresh 2FA challenge --
+            # this trusts the SESSION, not the device, and only lasts as
+            # long as Apple's own trust window (weeks/months, not
+            # indefinite).
+            api.trust_session()
+
+        devices = [d.status().get("deviceDisplayName", "?") + ": " + d.status().get("name", "?")
+                   for d in api.devices]
     print(f"Login succeeded. Devices visible in Find My: {devices}")
     _save_credentials(cfg, apple_id, password)
     print(f"Saved to {_credentials_path(cfg)} (chmod 600). "
@@ -212,54 +219,64 @@ class FindMyWatcher:
         from pyicloud import PyiCloudService
         from pyicloud.exceptions import PyiCloudFailedLoginException
 
-        try:
-            api = PyiCloudService(apple_id, password,
-                                   cookie_directory=str(_cookie_dir(self.cfg)))
-        except PyiCloudFailedLoginException as e:
-            print(f"[findmy_watcher] {datetime.now().isoformat()} login "
-                  f"failed: {e} -- may need 'findmy_watcher.py --setup' "
-                  f"re-run (session expired or password changed)", flush=True)
-            self._alert_session_expired()
-            return None
+        # See net.py's hardened_dns() docstring (2026-09-04): pyicloud
+        # manages its own requests.Session(), so this is the only way to
+        # give its calls the same tunnel-resilient DNS resolution every
+        # other HTTP call in this project already gets. Confirmed live: a
+        # real PyiCloudAPIResponseException("Request failed to iCloud")
+        # traced directly to idmsa.apple.com failing to resolve while on
+        # the AmneziaWG tunnel -- the exact failure mode this whole module
+        # exists to route around, just never wired up for this file.
+        with _hardened_dns():
+            try:
+                api = PyiCloudService(apple_id, password,
+                                       cookie_directory=str(_cookie_dir(self.cfg)))
+            except PyiCloudFailedLoginException as e:
+                print(f"[findmy_watcher] {datetime.now().isoformat()} login "
+                      f"failed: {e} -- may need 'findmy_watcher.py --setup' "
+                      f"re-run (session expired or password changed)", flush=True)
+                self._alert_session_expired()
+                return None
 
-        if api.requires_2fa:
-            # The saved session's trust expired -- nothing this unattended
-            # loop can do (2FA needs Jonah's own device), surface it clearly
-            # and wait for a manual --setup re-run rather than looping
-            # forever on the same dead session.
-            print(f"[findmy_watcher] {datetime.now().isoformat()} session "
-                  f"needs a fresh 2FA challenge -- run "
-                  f"'findmy_watcher.py --setup' again", flush=True)
-            self._alert_session_expired()
-            return None
+            if api.requires_2fa:
+                # The saved session's trust expired -- nothing this
+                # unattended loop can do (2FA needs Jonah's own device),
+                # surface it clearly and wait for a manual --setup re-run
+                # rather than looping forever on the same dead session.
+                print(f"[findmy_watcher] {datetime.now().isoformat()} "
+                      f"session needs a fresh 2FA challenge -- run "
+                      f"'findmy_watcher.py --setup' again", flush=True)
+                self._alert_session_expired()
+                return None
 
-        # Confirmed live (2026-09-02): this Apple ID has visibility into a
-        # large shared/family group -- device_name_contains alone is NOT
-        # enough to identify the right phone. Two real hazards found: (1)
-        # several OTHER family members' devices also contain "iPhone" in
-        # their name, so a broad match string can pick a stranger's phone,
-        # not just Jonah's own; (2) Jonah's own Find My history has FOUR old
-        # iPhones still listed (previously-owned devices never fully expire
-        # from this list) alongside the current one -- taking the FIRST
-        # name match, as this used to, depended entirely on API ordering
-        # luck (confirmed: the current phone happened to sort first, but
-        # nothing guarantees that stays true). Fixed to collect EVERY
-        # device matching device_name_contains that has ANY live location
-        # data (retired devices report loc=None, naturally excluding them),
-        # then pick whichever has the MOST RECENT timestamp -- the
-        # genuinely-in-use phone, not whichever the API happened to list
-        # first. Still depends on device_name_contains being scoped tightly
-        # enough to exclude other family members (e.g. "Jonah's iPhone", not
-        # a bare "iPhone") -- this fixes the ordering hazard, not the
-        # scoping one, which is a config.yaml concern.
-        candidates: list[tuple[float, str]] = []
-        for device in api.devices:
-            name = (device.status().get("name") or "") + " " + \
-                   (device.status().get("deviceDisplayName") or "")
-            if self.device_name_contains in name.lower():
-                loc = device.location
-                if loc and "timeStamp" in loc:
-                    candidates.append((loc["timeStamp"], name))
+            # Confirmed live (2026-09-02): this Apple ID has visibility into
+            # a large shared/family group -- device_name_contains alone is
+            # NOT enough to identify the right phone. Two real hazards
+            # found: (1) several OTHER family members' devices also contain
+            # "iPhone" in their name, so a broad match string can pick a
+            # stranger's phone, not just Jonah's own; (2) Jonah's own Find
+            # My history has FOUR old iPhones still listed (previously-owned
+            # devices never fully expire from this list) alongside the
+            # current one -- taking the FIRST name match, as this used to,
+            # depended entirely on API ordering luck (confirmed: the current
+            # phone happened to sort first, but nothing guarantees that
+            # stays true). Fixed to collect EVERY device matching
+            # device_name_contains that has ANY live location data (retired
+            # devices report loc=None, naturally excluding them), then pick
+            # whichever has the MOST RECENT timestamp -- the genuinely-in-
+            # use phone, not whichever the API happened to list first. Still
+            # depends on device_name_contains being scoped tightly enough to
+            # exclude other family members (e.g. "Jonah's iPhone", not a
+            # bare "iPhone") -- this fixes the ordering hazard, not the
+            # scoping one, which is a config.yaml concern.
+            candidates: list[tuple[float, str]] = []
+            for device in api.devices:
+                name = (device.status().get("name") or "") + " " + \
+                       (device.status().get("deviceDisplayName") or "")
+                if self.device_name_contains in name.lower():
+                    loc = device.location
+                    if loc and "timeStamp" in loc:
+                        candidates.append((loc["timeStamp"], name))
         if candidates:
             candidates.sort(key=lambda c: c[0], reverse=True)
             ts_ms, matched_name = candidates[0]
