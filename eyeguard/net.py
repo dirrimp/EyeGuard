@@ -50,6 +50,7 @@ reliable path, never remove the one that worked before this existed.
 
 from __future__ import annotations
 
+import contextlib
 import http.client
 import os
 import socket
@@ -168,6 +169,55 @@ def resolve_via_physical_interface(hostname: str, iface: str) -> str | None:
         except Exception:
             continue
     return None
+
+
+@contextlib.contextmanager
+def hardened_dns():
+    """Confirmed live (2026-09-04): eyeguard/findmy_watcher.py hit the
+    exact same "nodename nor servname provided" DNS failure this whole
+    module exists to route around (idmsa.apple.com, while on the AmneziaWG
+    tunnel at the station) -- but pyicloud manages its own requests.Session()
+    internally, with no way to hand it this module's own physical-
+    interface-bound opener the way every other HTTP call in this project
+    already does. socket.getaddrinfo is the one layer pyicloud (via
+    requests -> urllib3) can't avoid going through, so this patches THAT
+    instead, narrowly, for the duration of a `with` block.
+
+    Every lookup made inside the block tries resolve_via_physical_interface()
+    first; only on failure (or no physical interface found) does it fall
+    through to the ORIGINAL system resolver -- so this can only ever ADD a
+    more reliable path, never remove the one that worked before this
+    existed. Restores the original getaddrinfo unconditionally on exit,
+    even on an exception, so a caller elsewhere in the same process is
+    never left with a patched resolver by accident.
+
+    Does NOT bind the actual data connection to the physical interface the
+    way _BoundHTTPSConnection does for this project's own HTTP calls (see
+    this module's own docstring for why DNS alone wasn't originally
+    considered sufficient) -- pyicloud/requests/urllib3 don't expose a
+    clean hook for that the way http.client.HTTPSConnection.connect() does.
+    Accepted, narrower scope: this fixes the DNS-resolution failure mode
+    actually observed and confirmed live; a tunnel instability that
+    manifests as a data-connection failure AFTER successful DNS resolution
+    is not covered by this specific fix."""
+    original = socket.getaddrinfo
+    iface = physical_interface()
+
+    def _patched(host, *args, **kwargs):
+        if iface and isinstance(host, str):
+            ip = resolve_via_physical_interface(host, iface)
+            if ip:
+                try:
+                    return original(ip, *args, **kwargs)
+                except Exception:
+                    pass
+        return original(host, *args, **kwargs)
+
+    socket.getaddrinfo = _patched
+    try:
+        yield
+    finally:
+        socket.getaddrinfo = original
 
 
 def general_internet_reachable() -> bool:
