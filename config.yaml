@@ -698,6 +698,22 @@ session_watcher:
   enabled: true
   check_seconds: 120
   expected_user: jonahdirrim
+  # LAN sleep-signal relay (2026-09-04) -- see eyeguard/session_watcher.py's
+  # SleepWatcher._lan_relay() and router/eyeguard-phone.py's
+  # sleep_relay_loop() for the full reasoning. sleep_relay_router_ip is a
+  # GUESS based on phone.config.example's home_ip (192.168.8.153) implying
+  # a 192.168.8.0/24 subnet with the router itself at the usual .1 --
+  # VERIFY this against the router's actual LAN address (its admin page,
+  # or `route -n get default` while on home wifi) before relying on it;
+  # wrong just means the LAN relay silently never reaches anything and the
+  # direct fallback below still applies, same as before this existed.
+  # sleep_relay_token MUST match router/phone.config.example's real deployed
+  # value (router/etc/eyeguard/phone.json's sleep_relay_token) EXACTLY --
+  # this one was freshly generated for this feature, not reused from
+  # anywhere else.
+  sleep_relay_router_ip: "192.168.8.1"
+  sleep_relay_port: 51900
+  sleep_relay_token: "ee55e696988dda6272676277bcf6b22bba0d7ece7562b8ec"
 
 # Find My cross-check (2026-08-31) -- see eyeguard/findmy_watcher.py's own
 # docstring for the full reasoning. Credentials are deliberately NOT here

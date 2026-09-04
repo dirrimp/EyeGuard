@@ -23,6 +23,10 @@
   "router_check_seconds": 300,
   "router_baseline_file": "/etc/eyeguard/router_baseline.json",
 
+  "_sleep_relay": "LAN relay for the Mac's WillSleep signal (2026-09-04) -- see eyeguard-phone.py's sleep_relay_loop() and eyeguard/session_watcher.py's SleepWatcher for the full reasoning. Set sleep_relay_token to any random string (must match config.yaml's session_watcher.sleep_relay_token on the Mac exactly) to enable; leave blank/omit to disable the listener entirely (the Mac's direct WAN attempt still works on its own either way, same as before this existed). Not internet-facing -- only reachable from the LAN.",
+  "sleep_relay_token": "",
+  "sleep_relay_port": 51900,
+
   "_router_watcher": "A SEPARATE process (eyeguard-router-watcher.py, its own service) that verifies eyeguard-phone.py's on-disk hash against a manifest published server-side, and that the process is actually running -- catches the case where eyeguard-phone.py itself was edited to disable its own checks, which nothing INSIDE that same script could ever detect. router_script_version must match a version key already published via deploy/publish_router_manifest.sh.",
   "router_script_version": "unknown",
   "router_watcher_check_seconds": 300,

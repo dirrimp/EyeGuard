@@ -339,18 +339,83 @@ class SleepWatcher:
         self._root_port = 0
         self._callback = None  # kept alive so ctypes can't GC the trampoline
 
-    def _report_sleep(self, reason: str):
-        ts = datetime.now().isoformat()
+    def _lan_relay(self, reason: str) -> bool:
+        """Fire-and-forget UDP packet to the router's sleep-relay listener
+        (router/eyeguard-phone.py's sleep_relay_loop()) -- see _report_sleep()'s
+        docstring for the full reasoning. A UDP send to a LAN address needs
+        no DNS, no VPN tunnel, no internet round trip; it returns
+        essentially instantly whether or not the router is even listening,
+        which is exactly the property this needs given IOKit's tight
+        WillSleep deadline. Returns True only if the SEND itself succeeded
+        without error -- UDP has no delivery confirmation, so this does NOT
+        mean the router received or relayed it, only that this attempt
+        didn't block or raise. That's fine: it's one of two independent
+        attempts _report_sleep() makes, not the only one. No-ops (returns
+        False immediately) if the relay isn't configured."""
+        if not (self.watcher.sleep_relay_router_ip
+                and self.watcher.sleep_relay_token):
+            return False
+        import socket as _socket
+        sock = None
         try:
-            self.watcher._rpc("eg_watcher_report_sleep", {})
-            print(f"[session_watcher] {ts} IOKit: {reason} -- reported sleep "
-                  f"to server", flush=True)
+            sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+            sock.settimeout(0.5)  # a UDP send essentially never blocks; this
+            # is a sanity ceiling, not a real constraint in practice.
+            payload = json.dumps({"token": self.watcher.sleep_relay_token,
+                                   "reason": reason}).encode()
+            sock.sendto(payload, (self.watcher.sleep_relay_router_ip,
+                                   self.watcher.sleep_relay_port))
+            return True
+        except Exception:
+            return False
+        finally:
+            if sock is not None:
+                sock.close()
+
+    def _report_sleep(self, reason: str):
+        """Confirmed live (2026-09-03/04): two real "session watcher went
+        dark" false alarms, both landing ~3 min after an actual WillSleep
+        (cross-referenced against `pmset -g log`'s own Sleep entries) --
+        this IS the exact case eg_watcher_report_sleep() exists to suppress,
+        yet the signal wasn't there. Root cause: the direct call below races
+        a tight, OS-shared deadline for calling IOAllowPowerChange (`pmset
+        -g log`'s own "PM Client Acks: Delays to Sleep notifications" lines
+        show OTHER system daemons routinely eating 1-3s of that shared
+        budget already) -- any WAN network call in this window is
+        genuinely risky: DNS + VPN tunnel + internet round trip, all before
+        the OS runs out of patience.
+
+        Primary fix: _lan_relay() above -- a UDP packet to the router on
+        the same LAN needs none of that, so it sidesteps the race instead
+        of just narrowing it. The direct call below still runs too, as a
+        fallback for when the router itself isn't reachable (e.g. away from
+        home with no LAN at all) -- now with a short 3s timeout (this
+        project's own heartbeats normally complete in ~1.3s on a healthy
+        connection) so it fails fast rather than still hanging when the
+        OS's patience runs out. Neither attempt blocks the other; both are
+        best-effort. If BOTH fail (or the relay isn't configured AND the
+        direct call fails), branch (d) just alerts normally after 3
+        minutes, same as before this feature existed -- no worse than the
+        pre-fix behavior, never blocks the sleep itself."""
+        ts = datetime.now().isoformat()
+        relay_sent = self._lan_relay(reason)
+        if relay_sent:
+            print(f"[session_watcher] {ts} IOKit: {reason} -- sent LAN "
+                  f"relay to router", flush=True)
+        try:
+            self.watcher._rpc("eg_watcher_report_sleep", {}, timeout=3)
+            print(f"[session_watcher] {ts} IOKit: {reason} -- also reported "
+                  f"sleep directly to server", flush=True)
         except Exception as e:
-            # Best-effort: if this fails, branch (d) just alerts normally
-            # after 3 minutes, same as before this feature existed -- no
-            # worse than the pre-fix behavior, never blocks the sleep itself.
-            print(f"[session_watcher] {ts} IOKit: {reason} -- failed to "
-                  f"report sleep: {e!r}", flush=True)
+            # Best-effort: if this ALSO fails, branch (d) just alerts
+            # normally after 3 minutes, same as before this feature existed
+            # -- no worse than the pre-fix behavior, never blocks the sleep
+            # itself. Not a real problem if the LAN relay already got
+            # through -- this is belt-and-suspenders, not the only path.
+            print(f"[session_watcher] {ts} IOKit: {reason} -- direct report "
+                  f"failed: {e!r}"
+                  f"{' (LAN relay was sent though)' if relay_sent else ''}",
+                  flush=True)
 
     def _handle(self, refcon, service, message_type, message_arg):
         try:
@@ -404,13 +469,23 @@ class SleepWatcher:
 
 class SessionWatcher:
     def __init__(self, url: str, api_key: str, expected_user: str,
-                 check_seconds: int = 120):
+                 check_seconds: int = 120, sleep_relay_router_ip: str = "",
+                 sleep_relay_port: int = 51900, sleep_relay_token: str = ""):
         self.base = url.rstrip("/")
         self.api_key = api_key
         self.expected_user = expected_user
         self.check_seconds = check_seconds
+        # LAN sleep-signal relay (2026-09-04) -- see SleepWatcher's
+        # _report_sleep() docstring and router/eyeguard-phone.py's
+        # sleep_relay_loop() for the full reasoning. Optional: an empty
+        # router_ip/token just means _report_sleep() skips the LAN attempt
+        # and falls back to the direct call only, same as before this
+        # existed.
+        self.sleep_relay_router_ip = sleep_relay_router_ip
+        self.sleep_relay_port = sleep_relay_port
+        self.sleep_relay_token = sleep_relay_token
 
-    def _rpc(self, name: str, params: dict):
+    def _rpc(self, name: str, params: dict, timeout: int = 15):
         # Bound to the physical interface (see eyeguard/net.py) -- this call
         # used plain urllib.request.urlopen() until 2026-08-25, unprotected
         # from the same on-demand-VPN-tunnel instability uploader.py was
@@ -420,13 +495,20 @@ class SessionWatcher:
         # confirmed live: several consecutive "heartbeat network error" lines
         # in a row in this daemon's own log, a real risk of a false "session
         # watcher went dark" email from exactly this gap.
+        #
+        # `timeout` is caller-overridable (2026-09-04) for SleepWatcher's
+        # WillSleep call specifically -- see _report_sleep()'s docstring for
+        # why 15s is actively harmful there, not just slow. The LAN relay
+        # added the same day is the primary fix for that call; this direct
+        # attempt (now with a short timeout too) is only the fallback for
+        # when the router itself isn't reachable (e.g. away from home).
         req = urllib.request.Request(
             f"{self.base}/rest/v1/rpc/{name}",
             data=json.dumps(params).encode(), method="POST",
             headers={"apikey": self.api_key,
                      "Authorization": f"Bearer {self.api_key}",
                      "Content-Type": "application/json"})
-        with _opener.open(req, timeout=15) as r:
+        with _opener.open(req, timeout=timeout) as r:
             r.read()
 
     def _check_once(self) -> tuple[bool, bool, bool, bool]:
@@ -535,6 +617,9 @@ def main():
         url=sb["url"], api_key=sb["api_key"],
         expected_user=sw["expected_user"],
         check_seconds=int(sw.get("check_seconds", 120)),
+        sleep_relay_router_ip=sw.get("sleep_relay_router_ip", ""),
+        sleep_relay_port=int(sw.get("sleep_relay_port", 51900)),
+        sleep_relay_token=sw.get("sleep_relay_token", ""),
     ).run()
 
 
