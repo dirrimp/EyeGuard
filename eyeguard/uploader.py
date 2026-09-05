@@ -84,6 +84,9 @@ class SupabaseUploader:
         # outage began (0.0 = not currently failing)
         self._outage_confirmed_offline = True  # rolling per-outage flag; see
         # _heartbeat_failed()'s use of net.general_internet_reachable()
+        self._rpc_lock = threading.Lock()  # serializes _rpc() calls -- see
+        # _rpc()'s own docstring for the real race this closes (confirmed
+        # live 2026-09-04/05, the sibling bug in session_watcher.py)
         self._lock = threading.Lock()          # guards the pending file
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -387,12 +390,34 @@ class SupabaseUploader:
         self._rpc("eg_report_suspend", {})
 
     def _rpc(self, name: str, params: dict):
-        req = urllib.request.Request(
-            f"{self.base}/rest/v1/rpc/{name}", data=json.dumps(params).encode(),
-            method="POST",
-            headers=self._headers({"Content-Type": "application/json"}))
-        with _opener.open(req, timeout=15) as r:
-            r.read()
+        """Confirmed live (2026-09-04/05, first caught in session_watcher.py's
+        IOKit-triggered analog of this same pattern): _worker() (background
+        thread, regular timer-driven heartbeat) and suspend()/resume()
+        (main thread, NSWorkspace notification callback) both call through
+        here independently, with no coordination between them. A real
+        overnight sleep showed the exact failure this enables: WillSleep
+        fires, the sleep beacon's RPC starts, but if the regular heartbeat's
+        OWN RPC (already in flight, or about to fire on its own 60s timer)
+        happens to COMPLETE afterward, its status='alive' write silently
+        overwrites the beacon's status='clean_shutdown' moments before the
+        Mac actually suspends -- leaving no valid signal for the whole
+        sleep, even though neither individual call failed or logged
+        anything wrong. This lock fully serializes every call through here
+        (heartbeat, suspend beacon, network-gap report) so two of them can
+        never be in flight at once -- whichever thread gets here first
+        completes its entire round-trip before the other's write can even
+        begin, eliminating the race instead of just narrowing it. All
+        three RPCs here are small and infrequent (never the high-volume
+        flag/image uploads, which use their own separate request calls,
+        not this method), so serializing them costs at most one RPC's
+        round-trip of extra latency, never a meaningful delay."""
+        with self._rpc_lock:
+            req = urllib.request.Request(
+                f"{self.base}/rest/v1/rpc/{name}", data=json.dumps(params).encode(),
+                method="POST",
+                headers=self._headers({"Content-Type": "application/json"}))
+            with _opener.open(req, timeout=15) as r:
+                r.read()
 
     # Each upload is its own fresh TCP+TLS connection (~1.3s, confirmed live
     # 2026-09-01 -- no connection reuse across calls) -- an unbounded flush

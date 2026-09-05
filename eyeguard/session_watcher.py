@@ -484,6 +484,8 @@ class SessionWatcher:
         self.sleep_relay_router_ip = sleep_relay_router_ip
         self.sleep_relay_port = sleep_relay_port
         self.sleep_relay_token = sleep_relay_token
+        self._rpc_lock = threading.Lock()  # serializes _rpc() calls -- see
+        # _rpc()'s own docstring for the real race this closes
 
     def _rpc(self, name: str, params: dict, timeout: int = 15):
         # Bound to the physical interface (see eyeguard/net.py) -- this call
@@ -502,14 +504,36 @@ class SessionWatcher:
         # added the same day is the primary fix for that call; this direct
         # attempt (now with a short timeout too) is only the fallback for
         # when the router itself isn't reachable (e.g. away from home).
-        req = urllib.request.Request(
-            f"{self.base}/rest/v1/rpc/{name}",
-            data=json.dumps(params).encode(), method="POST",
-            headers={"apikey": self.api_key,
-                     "Authorization": f"Bearer {self.api_key}",
-                     "Content-Type": "application/json"})
-        with _opener.open(req, timeout=timeout) as r:
-            r.read()
+        #
+        # CONFIRMED LIVE (2026-09-04/05): _check_and_heartbeat() (main
+        # thread, regular 120s timer loop) and SleepWatcher's
+        # IOKit-triggered _report_sleep() (its own daemon thread) both call
+        # through here independently, with no coordination. A real
+        # overnight sleep showed the exact failure this enables: WillSleep
+        # fires and eg_watcher_report_sleep()'s RPC starts, but if the
+        # regular loop's OWN eg_watcher_heartbeat() call happens to COMPLETE
+        # afterward, its unconditional watcher_sleep_signaled_at=null (see
+        # that RPC's own definition) silently erases the sleep signal
+        # moments before the Mac actually suspends -- leaving no valid
+        # signal for the whole night, even though neither individual call
+        # failed or logged anything wrong. This lock fully serializes every
+        # call through here so two can never be in flight at once --
+        # whichever thread gets here first completes its entire round-trip
+        # before the other's write can even begin. Worst-case added latency
+        # for the time-critical WillSleep call: about one regular
+        # heartbeat's typical duration (~1.3s, this project's own observed
+        # RTT elsewhere) if one happens to already be in flight -- a small
+        # price against IOKit's much larger patience budget, and far better
+        # than silently losing the signal entirely.
+        with self._rpc_lock:
+            req = urllib.request.Request(
+                f"{self.base}/rest/v1/rpc/{name}",
+                data=json.dumps(params).encode(), method="POST",
+                headers={"apikey": self.api_key,
+                         "Authorization": f"Bearer {self.api_key}",
+                         "Content-Type": "application/json"})
+            with _opener.open(req, timeout=timeout) as r:
+                r.read()
 
     def _check_once(self) -> tuple[bool, bool, bool, bool]:
         """Returns (new_account, wrong_user, untrusted_library,
