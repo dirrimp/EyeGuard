@@ -585,11 +585,26 @@ class SessionWatcher:
 
         return new_account, wrong_user, untrusted_library, debugger_attached
 
-    def _check_and_heartbeat(self):
+    def _check_and_heartbeat(self, confirmed_awake: bool = False):
         """One check-and-report cycle -- shared by the scheduled loop below
         and SleepWatcher's HasPoweredOn handler, which calls this out of
         cycle right after wake so a real check-in doesn't wait for the next
-        scheduled check_seconds tick."""
+        scheduled check_seconds tick.
+
+        `confirmed_awake` (2026-09-06): True ONLY when this call originates
+        from a genuine IOKit HasPoweredOn event (see heartbeat_now() below),
+        never from the plain scheduled loop. Root LaunchDaemons like this
+        one can get a few seconds of scheduled CPU time during an ordinary
+        Maintenance Sleep DarkWake blip -- confirmed live overnight
+        2026-09-05/06 (49 DarkWake cycles, zero IOKit wake events, yet the
+        scheduled loop's own tick still advanced watcher_last_heartbeat each
+        time it happened to run). That's fine for watcher_last_heartbeat
+        itself (still an accurate "last time this process ran"), but it
+        must NOT be mistaken for a real wake by the server's sleep
+        corroboration logic. Passing this through only from the IOKit path
+        lets eg_watcher_heartbeat() stamp a separate,
+        DarkWake-blip-immune watcher_confirmed_awake_at -- see that RPC's
+        SQL definition (fix_darkwake_heartbeat_drift.sql) for how it's used."""
         try:
             (new_account, wrong_user, untrusted_library,
              debugger_attached) = self._check_once()
@@ -597,7 +612,8 @@ class SessionWatcher:
                       {"p_new_account": new_account,
                        "p_wrong_user": wrong_user,
                        "p_untrusted_library": untrusted_library,
-                       "p_debugger_attached": debugger_attached})
+                       "p_debugger_attached": debugger_attached,
+                       "p_confirmed_awake": confirmed_awake})
         except urllib.error.URLError as e:
             print(f"[session_watcher] {datetime.now().isoformat()} heartbeat network error: {e} "
                   f"-- will retry next cycle", flush=True)
@@ -608,12 +624,15 @@ class SessionWatcher:
                   flush=True)
 
     def heartbeat_now(self):
-        """Called from SleepWatcher's IOKit callback thread on wake -- runs
-        the same check-and-heartbeat logic inline. A wake-triggered call
-        racing the scheduled loop's own call is harmless (both just report
-        the current state; eg_watcher_heartbeat() is idempotent-safe to call
-        more often than check_seconds)."""
-        self._check_and_heartbeat()
+        """Called from SleepWatcher's IOKit callback thread on a real
+        HasPoweredOn wake ONLY (see that handler's own call site) -- runs
+        the same check-and-heartbeat logic inline, with confirmed_awake=True
+        so the server can tell this apart from an ordinary DarkWake-blip
+        tick of the scheduled loop. A wake-triggered call racing the
+        scheduled loop's own call is harmless (both just report the current
+        state; eg_watcher_heartbeat() is idempotent-safe to call more often
+        than check_seconds)."""
+        self._check_and_heartbeat(confirmed_awake=True)
 
     def run(self):
         print(f"[session_watcher] {datetime.now().isoformat()} active, checking every "
