@@ -80,6 +80,9 @@ class SupabaseUploader:
         # is off (NSWorkspaceScreensDidSleepNotification -> DidWake), not just
         # the short post-wake grace window recently_resumed() covers -- see
         # note_screen_asleep()'s own docstring.
+        self._drm_active = False  # True while menubar.py's own black-frame +
+        # known-streaming-service check is currently matching -- see
+        # note_drm_playing()'s own docstring.
         self._outage_started_at = 0.0  # time.time() when the CURRENT heartbeat
         # outage began (0.0 = not currently failing)
         self._outage_confirmed_offline = True  # rolling per-outage flag; see
@@ -312,6 +315,35 @@ class SupabaseUploader:
         genuinely broken, which is the only case that matters."""
         self._display_asleep = True
 
+    def note_drm_playing(self):
+        """DRM-protected streaming video confirmed active (2026-09-07):
+        menubar.py's own black-frame probe matched BOTH a near-uniform-black
+        capture AND a known streaming service (netflix, disney+, etc, see
+        config.yaml's drm.services) in the active app/URL/title -- macOS
+        itself blanks screen-capture APIs to black for DRM content, this is
+        not a capture failure. Confirmed live: a full hour of Disney+
+        playback (Safari, 'Ant-Man') produced a real 'lost view of the
+        screen' alert even though the display was demonstrably on the whole
+        time (an active NSWorkspace PreventUserIdleDisplaySleep assertion
+        for HTMLMediaElement playback, cross-referenced via `pmset -g log`,
+        held continuously through the entire black period). Same suppression
+        principle as note_screen_asleep() -- screen_ok=false is simply not
+        reported while this is true, since there is a known-benign
+        explanation and the title/service is already recorded separately via
+        logger.log_drm() for the report. Any explicit text/URL signal found
+        during this same window still flags normally through the completely
+        independent OCR/signal-term pipeline (menubar.py's _signals_on
+        block) -- this only suppresses the blindness alert, nothing else."""
+        self._drm_active = True
+
+    def note_drm_cleared(self):
+        """The other half of note_drm_playing()'s pair -- called once the
+        black-frame + known-service match stops holding (video paused,
+        ended, or a different app/site became active), so a LATER, genuinely
+        unrelated capture failure isn't silently suppressed forever by a
+        stale DRM flag."""
+        self._drm_active = False
+
     def authorized_stop(self, password: str) -> bool:
         """Ask the server to verify `password` and, only if correct, set
         status='clean_shutdown' -- one atomic RPC call (eg_authorized_stop),
@@ -367,8 +399,10 @@ class SupabaseUploader:
                     # True, from before sleep) instead of asserting a value
                     # this process doesn't actually know yet.
                     # Omit p_screen_ok entirely (rather than forcing True)
-                    # during the post-wake grace window OR while the display
-                    # is currently, legitimately asleep -- eg_heartbeat()'s
+                    # during the post-wake grace window, while the display
+                    # is currently, legitimately asleep, OR while a known
+                    # DRM streaming service is confirmed playing (2026-09-07,
+                    # see note_drm_playing()'s docstring) -- eg_heartbeat()'s
                     # coalesce(p_screen_ok, screen_ok) then just keeps
                     # whatever was last reported instead of asserting a
                     # value this process doesn't actually know yet, or
@@ -376,7 +410,8 @@ class SupabaseUploader:
                     # note_screen_asleep()'s docstring for why the sleep
                     # itself (not just the post-wake catch-up) needs this.
                     if not (screen_ok is False and
-                            (self.recently_resumed() or self._display_asleep)):
+                            (self.recently_resumed() or self._display_asleep
+                             or self._drm_active)):
                         params["p_screen_ok"] = screen_ok
                 if "frames_analyzed" in extra:
                     params["p_frames_analyzed"] = int(extra["frames_analyzed"])

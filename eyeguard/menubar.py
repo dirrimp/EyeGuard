@@ -77,8 +77,23 @@ class EyeGuardApp(rumps.App):
         self._drm_black_mean = float(self._drm.get("black_mean", 20))
         self._drm_black_std = float(self._drm.get("black_std", 10))
         self._drm_repeat = int(self._drm.get("repeat_seconds", 1800))
+        self._drm_sticky_seconds = int(self._drm.get("sticky_seconds", 300))
         self._last_drm_title = None
         self._last_drm_time = 0.0
+        # Sticky DRM-service memory (2026-09-07): _drm_service() alone only
+        # matches when the app/URL/title currently CONTAINS a known service
+        # name -- but confirmed live, fullscreen DRM video routinely blanks
+        # the window title to None the moment playback actually starts (the
+        # exact moment the black-frame signature begins too), e.g. Safari's
+        # title went "Ant-Man | Disney+" -> None right as a real hour-long
+        # black stretch started. Without this, the match is lost at exactly
+        # the moment it's needed. Remembers the last confirmed (app, service)
+        # pair for a bounded window so a later title-less black frame from
+        # the SAME app still attributes correctly, instead of falling back
+        # to being reported as an unexplained capture failure.
+        self._drm_sticky_service = None
+        self._drm_sticky_app = None
+        self._drm_sticky_until = 0.0
         self._ext = self.cfg.get("extensions", {})
         self._ext_on = bool(self._ext.get("enabled"))
         self._ext_scan = int(self._ext.get("scan_seconds", 60))
@@ -722,9 +737,16 @@ class EyeGuardApp(rumps.App):
                                 last_activity_log = now2
                         # DRM streaming video macOS blanks to black -> yellow flag
                         # tagged with the title (the pixels are unrecoverable).
+                        # Also suppresses the server-side "lost view of the
+                        # screen" alert while active (2026-09-07) -- see
+                        # uploader.note_drm_playing()'s docstring. Uses the
+                        # sticky lookup, not the raw one, so a fullscreen
+                        # video's blanked title doesn't lose attribution
+                        # right when it matters most.
                         if self._drm_on:
-                            svc = self._drm_service(actx)
-                            if svc and self._screen_is_black():
+                            svc = self._drm_service_sticky(actx)
+                            black_now = self._screen_is_black()
+                            if svc and black_now:
                                 title = (actx.get("window_title")
                                          or actx.get("url") or svc)
                                 now3 = time.time()
@@ -737,6 +759,10 @@ class EyeGuardApp(rumps.App):
                                     self._record_flag(Verdict.ALERT, actx)
                                     self._last_drm_title = title
                                     self._last_drm_time = now3
+                                if uploader is not None:
+                                    uploader.note_drm_playing()
+                            elif uploader is not None:
+                                uploader.note_drm_cleared()
                         # SIGNAL flag: explicit term in the URL / search / title
                         # (search queries surface here even with no image).
                         if self._signals_on and not self._is_suppressed(actx):
@@ -863,6 +889,25 @@ class EyeGuardApp(rumps.App):
         for s in self._drm_services:
             if s in hay:
                 return s
+        return None
+
+    def _drm_service_sticky(self, ctx: dict) -> str | None:
+        """Like _drm_service(), but falls back to the last confirmed match
+        for the same app within drm.sticky_seconds when the current context
+        has no title/URL to match against -- see this class's __init__ for
+        why (fullscreen DRM video blanking the title is the exact moment
+        this matters). Refreshes the sticky window on every fresh match."""
+        svc = self._drm_service(ctx)
+        now = time.time()
+        if svc:
+            self._drm_sticky_service = svc
+            self._drm_sticky_app = ctx.get("app")
+            self._drm_sticky_until = now + self._drm_sticky_seconds
+            return svc
+        if (self._drm_sticky_service is not None
+                and ctx.get("app") == self._drm_sticky_app
+                and now <= self._drm_sticky_until):
+            return self._drm_sticky_service
         return None
 
     def _screen_is_black(self) -> bool:

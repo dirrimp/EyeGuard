@@ -584,6 +584,13 @@ drm:
   black_std: 10
   # Re-flag the same title at most this often (seconds) while it keeps playing.
   repeat_seconds: 1800
+  # Keep attributing black frames to the last-confirmed service for this long
+  # after the title/URL stops matching (2026-09-07) -- fullscreen DRM video
+  # routinely blanks the window title the moment playback actually starts,
+  # right when attribution matters most. Also suppresses the server-side
+  # "lost view of the screen" alert for this same window (see
+  # uploader.note_drm_playing()'s docstring).
+  sticky_seconds: 300
 
 # Browser-extension monitoring. Extensions can defeat monitoring — a title
 # spoofer hides the site from the trail, an image/canvas/overlay extension can
