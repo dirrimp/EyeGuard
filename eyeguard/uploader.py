@@ -176,13 +176,55 @@ class SupabaseUploader:
             gap_seconds = time.time() - self._outage_started_at
             self._outage_started_at = 0.0
             if gap_seconds >= 180:
-                try:
-                    self._rpc("eg_report_network_gap", {
-                        "p_confirmed_offline": self._outage_confirmed_offline,
-                        "p_gap_seconds": gap_seconds})
-                except Exception:
-                    pass  # best-effort context -- never let this break recovery
+                self._queue_network_gap(self._outage_confirmed_offline, gap_seconds)
             self._outage_confirmed_offline = True
+        # Retry any previously-queued gap report on EVERY successful
+        # heartbeat, not just this transition -- see _queue_network_gap()'s
+        # docstring for why a single attempt right on recovery isn't enough.
+        self._flush_network_gap()
+
+    def _queue_network_gap(self, confirmed_offline: bool, gap_seconds: float):
+        """Persist a network-gap follow-up so it survives a failed first
+        attempt (2026-09-08). The original code tried eg_report_network_gap()
+        exactly once, at the single least reliable moment possible -- the
+        instant a connection that was JUST failing is used again, before
+        it's had any chance to prove stable. Confirmed live: a real
+        80-minute gap on 2026-09-06/07 produced no follow-up email at all,
+        while the main heartbeat itself did recover and kept working --
+        consistent with that one extra RPC call landing on a connection
+        still settling down. Now written to disk first and retried on
+        every subsequent successful heartbeat until it actually lands, same
+        durability principle as the flag-record pending queue. Keeps only
+        the OLDEST unresolved report -- if another outage ends before this
+        one flushes, its own call queues nothing new (rare in practice,
+        gap_seconds already includes everything up to the point THIS
+        outage recovered; losing a second concurrent gap's exact duration
+        is an accepted, bounded loss of precision, not of the underlying
+        signal -- the primary alert already fired for it regardless)."""
+        try:
+            path = self.pending_path.parent / "pending_network_gap.json"
+            with self._lock:
+                if not path.exists():
+                    path.write_text(json.dumps({
+                        "p_confirmed_offline": confirmed_offline,
+                        "p_gap_seconds": gap_seconds}))
+        except Exception:
+            pass  # best-effort persistence -- worst case, back to one attempt
+
+    def _flush_network_gap(self):
+        path = self.pending_path.parent / "pending_network_gap.json"
+        try:
+            if not path.exists():
+                return
+            params = json.loads(path.read_text())
+        except Exception:
+            return  # unreadable/corrupt -- leave it; not worth crashing over
+        try:
+            self._rpc("eg_report_network_gap", params)
+            with self._lock:
+                path.unlink(missing_ok=True)
+        except Exception:
+            pass  # still not through -- try again on the next heartbeat
 
     def _heartbeat_failed(self, e: Exception, context: str):
         # Logged only on the FIRST failure and again on recovery -- a sustained
