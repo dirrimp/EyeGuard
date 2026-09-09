@@ -83,6 +83,9 @@ class SupabaseUploader:
         self._drm_active = False  # True while menubar.py's own black-frame +
         # known-streaming-service check is currently matching -- see
         # note_drm_playing()'s own docstring.
+        self._network_gap_flush_failed = False  # tracks whether the last
+        # _flush_network_gap() attempt's failure was already logged -- see
+        # that method's own docstring.
         self._outage_started_at = 0.0  # time.time() when the CURRENT heartbeat
         # outage began (0.0 = not currently failing)
         self._outage_confirmed_offline = True  # rolling per-outage flag; see
@@ -223,8 +226,23 @@ class SupabaseUploader:
             self._rpc("eg_report_network_gap", params)
             with self._lock:
                 path.unlink(missing_ok=True)
-        except Exception:
-            pass  # still not through -- try again on the next heartbeat
+        except Exception as e:
+            # Log on the FIRST failure only (self._network_gap_flush_failed
+            # tracks whether the last attempt's failure was already logged)
+            # -- same "log the transition, not every retry" pattern as
+            # _heartbeat_failed() -- so a persistently-broken server-side
+            # function (confirmed live 2026-09-09: a SQL type-cast bug made
+            # this RPC 404 on every single call since it was written, always
+            # silently swallowed here with a bare `pass`, undiagnosable
+            # after the fact) leaves an actual trail instead of vanishing.
+            if not self._network_gap_flush_failed:
+                self._network_gap_flush_failed = True
+                self._log_diag(f"network-gap follow-up FAILING: "
+                                f"{type(e).__name__}: {e} -- will keep "
+                                f"retrying on future heartbeats")
+                return
+        else:
+            self._network_gap_flush_failed = False
 
     def _heartbeat_failed(self, e: Exception, context: str):
         # Logged only on the FIRST failure and again on recovery -- a sustained
