@@ -562,7 +562,20 @@ class SessionWatcher:
 
         wrong_user = False
         active = _active_console_user()
-        if active is not None and active != self.expected_user:
+        # 'root' means the console is at the login window with nobody
+        # actually logged in yet -- confirmed live 2026-09-09: a routine
+        # macOS software-update auto-restart (SoftwareUpdateNotification
+        # Manager's RestartCountdownOperation, per `pmset -g log`) briefly
+        # left /dev/console root-owned right before the reboot, and again
+        # for over two hours after (the Mac sat at the login window
+        # unattended overnight before anyone logged back in), producing a
+        # real 'attempt to bypass monitoring' alert for an ordinary OS
+        # update. This is the exact same "not itself suspicious" case
+        # _active_console_user()'s own docstring already carves out for a
+        # lookup failure (None) -- root-owned-but-nobody-logged-in is that
+        # same state, just reachable through stat() succeeding instead of
+        # failing, which the original check didn't distinguish.
+        if active is not None and active != "root" and active != self.expected_user:
             print(f"[session_watcher] {datetime.now().isoformat()} active console user is '{active}', "
                   f"expected '{self.expected_user}'", flush=True)
             wrong_user = True
