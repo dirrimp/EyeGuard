@@ -56,22 +56,22 @@ about; none has a userland fix.
   trace once back in normal mode. A boot-history tamper flag (check on next
   normal startup whether the prior boot was Safe, fire a tamper report if so)
   would close the "zero trace for short windows" part; not built.
-- **In-memory patching of the agent — mostly closed.** The bundled Python
-  interpreter *is* hardened-runtime signed (verified live via `csops` on the
+- **In-memory patching of the agent — closed.** The bundled Python
+  interpreter is hardened-runtime signed (verified live via `csops` on the
   running process: `CS_RUNTIME | CS_HARD | CS_KILL` set, `CS_GET_TASK_ALLOW`
-  not set), so `lldb -p` on the live agent is denied and
-  `DYLD_INSERT_LIBRARIES` is ignored — the "neuter it in place" attack the old
-  HARDENING_3.0 doc flagged is gone. `session_watcher` additionally checks for
-  an injected dylib / attached debugger as defence in depth.
-  **Remaining gap:** the interpreter binary at
-  `/Applications/EyeGuard.app/Contents/Resources/python/bin/python3.12` is
-  owned `jonahdirrim:staff` and user-writable, and is *not* covered by the
-  file-integrity manifest (which only hashes `eyeguard/*.py` + `run_agent.py`
-  in the root-owned tree). So it could be swapped for an unhardened build,
-  which would take effect on the agent's next restart. Closing that = move the
-  `.app` into the root-owned tree (or ship a root-owned copy of the
-  interpreter), or add the interpreter's hash to the manifest, or full MDM.
-  See Open items.
+  clear), so `lldb -p` on the live agent is denied and
+  `DYLD_INSERT_LIBRARIES` is ignored. The interpreter binary lives in a
+  user-writable path (`/Applications/EyeGuard.app/…`) outside the root-owned
+  tree and the file-integrity manifest, so it could in principle be swapped
+  for an unhardened build — now covered two ways: **prevention** —
+  `install_app.sh` and `deploy_watcher` lock the `.app` bundle to `root:wheel`,
+  non-user-writable, so a Standard user can't replace it; **evidence** —
+  `session_watcher` checks the live agent's `csops` flags every cycle and
+  fires the branch (e) anomaly alert (`p_agent_unhardened`,
+  `supabase/agent_hardened_runtime_check.sql`) if `CS_RUNTIME` is ever
+  missing or `CS_GET_TASK_ALLOW` is set, catching a swap done by someone with
+  admin. `session_watcher` also still checks for an injected dylib / attached
+  debugger as further defence in depth.
 - **A second device / off-screen content / non-visual content.** EyeGuard
   watches *this* Mac's screen and *this* phone's DNS. A different device, DRM
   video pixels macOS blanks, AirPlay to another screen, audio, and plain text
@@ -104,16 +104,21 @@ about; none has a userland fix.
   `com.apple.security.cs.disable-library-validation` (so onnxruntime / numpy /
   pyobjc still load) and no `get-task-allow`. Verified live on the running
   process. This was the old HARDENING_3.0.md #1 item.
+- **Interpreter-swap protection** — bundle locked `root:wheel` /
+  non-user-writable (`install_app.sh` + `deploy_watcher`, so a Standard user
+  can't swap it), plus a per-cycle `csops` check in `session_watcher`
+  (`p_agent_unhardened`) that alerts if the running agent ever loses
+  `CS_RUNTIME` / gains `CS_GET_TASK_ALLOW`.
+  **One-time on the already-deployed Mac (Dad, sudo):**
+  `sudo chown -R root:wheel /Applications/EyeGuard.app && sudo chmod -R go-w /Applications/EyeGuard.app`
+  — the next `deploy_watcher` deploy also does this automatically.
 
 ## Open items
 
-1. **Protect the hardened interpreter from being swapped.** It's signed, but
-   the binary is user-owned and manifest-uncovered (see the in-memory-patching
-   residual above). Add its hash to the file-integrity manifest, or relocate
-   the `.app` under the root-owned tree. Also: the `.app` *bundle* itself is
-   unsigned (only the interpreter inside it is) — cosmetic for launch, since
-   the LaunchAgent runs the interpreter by path, but worth signing for
-   completeness.
+1. **Sign the `.app` bundle itself** — currently only the interpreter inside it
+   is signed. Cosmetic for launch (the LaunchAgent runs the interpreter by
+   path, and the swap protections above cover the real risk), but worth doing
+   for completeness / Gatekeeper.
 2. **MDM-managed browser** (optional, paid) — an enforced extension allow-list
    + managed content filter closes the window-title-spoofer and
    adversarial-overlay-extension attacks with prevention rather than evidence.
