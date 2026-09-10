@@ -97,9 +97,11 @@ class ClipArbiter:
     by its single best-matching prompt; those three are softmaxed against each
     other, so a flag only wins when it beats the best SAFE concept for that image.
 
-    All inference is local; weights (~600MB) are fetched once and cached.
-    If transformers/weights are missing, `available` stays False and the pipeline
-    fails open (frames recorded as "review", not flagged).
+    All inference is local: clip_vision.onnx runs on onnxruntime, prompt
+    embeddings are precomputed (clip_assets/text_features.npz), image
+    preprocessing is vendored (clip_preprocess.py). If the model or asset is
+    missing / stale, `available` stays False and the pipeline fails open
+    (frames recorded as "review", not flagged).
     """
 
     DEFAULT_MODEL_ID = "openai/clip-vit-base-patch32"
@@ -129,9 +131,8 @@ class ClipArbiter:
         # Min grayscale std for a crop to be considered "has content" worth
         # scoring. Below this = blank/uniform -> never flags.
         self.min_content_std = min_content_std
-        self._model = None
-        self._processor = None
         self._text_features = None
+        self._preprocess_images = None
         self._n_red = len(explicit_prompts)
         self._n_yellow = len(suggestive_prompts)
         self.available = False
@@ -139,9 +140,11 @@ class ClipArbiter:
 
     def load(self):
         try:
+            import hashlib
             import json
             import onnxruntime as ort
-            from transformers import CLIPProcessor
+            from .clip_preprocess import preprocess_images
+            self._preprocess_images = preprocess_images
             model_dir = Path(__file__).resolve().parent.parent / "models"
             so = ort.SessionOptions()
             so.intra_op_num_threads = 2          # modest CPU/RAM
@@ -157,30 +160,36 @@ class ClipArbiter:
             providers = ["CPUExecutionProvider"]
             self._vis = ort.InferenceSession(str(model_dir / "clip_vision.onnx"),
                                              sess_options=so, providers=providers)
-            self._txt = ort.InferenceSession(str(model_dir / "clip_text.onnx"),
-                                             sess_options=so, providers=providers)
             self._logit_scale = float(json.loads(
                 (model_dir / "clip_meta.json").read_text())["logit_scale"])
-            # Same transformers preprocessing as before (numpy, no torch) so the
-            # embeddings match the original exactly and thresholds stay valid.
-            self._processor = CLIPProcessor.from_pretrained(self.model_id)
-            # Encode the prompts once. Order: [explicit | suggestive | safe].
-            self._ordered_prompts = (self.explicit_prompts
-                                     + self.suggestive_prompts
-                                     + self.safe_prompts)
-            tok = self._processor(text=self._ordered_prompts, return_tensors="np",
-                                  padding="max_length", max_length=77)
-            tf = self._txt.run(None, {
-                "input_ids": tok["input_ids"].astype("int64"),
-                "attention_mask": tok["attention_mask"].astype("int64")})[0]
-            self._text_features = (tf / np.linalg.norm(tf, axis=-1, keepdims=True)
-                                   ).astype(np.float32)
-            # The text encoder is used exactly once -- right here, to encode the
-            # fixed prompt list. arbitrate() only ever touches self._vis and the
-            # cached self._text_features. Drop the session now so its weights
-            # (~240MB, clip_text.onnx) don't sit resident for the process
-            # lifetime (2026-09-10).
-            self._txt = None
+            # Prompt embeddings are precomputed offline (tools/build_text_
+            # features.py) and shipped as a committed asset -- the CLIP text
+            # encoder (clip_text.onnx, ~240MB) and a BPE tokenizer
+            # (transformers) are only ever needed for this one-time encode, so
+            # neither is loaded in the resident process anymore (2026-09-10).
+            # A prompts/model-id hash guards against the asset going stale:
+            # edit the prompts in config.yaml without regenerating and the
+            # arbiter goes unavailable with a loud error rather than scoring
+            # against the wrong concepts.
+            blob = json.dumps({"e": list(self.explicit_prompts),
+                               "s": list(self.suggestive_prompts),
+                               "f": list(self.safe_prompts),
+                               "m": self.model_id},
+                              sort_keys=True, ensure_ascii=False)
+            want = hashlib.sha256(blob.encode("utf-8")).hexdigest()
+            asset = (Path(__file__).resolve().parent
+                     / "clip_assets" / "text_features.npz")
+            data = np.load(asset)
+            if str(data["hash"]) != want:
+                raise RuntimeError(
+                    "clip_assets/text_features.npz is stale for the current "
+                    "arbiter prompts -- regenerate with "
+                    "tools/build_text_features.py and commit it")
+            if (int(data["n_explicit"]) != self._n_red
+                    or int(data["n_suggestive"]) != self._n_yellow):
+                raise RuntimeError("text_features.npz tier counts disagree with "
+                                   "the configured prompt lists")
+            self._text_features = data["features"].astype(np.float32)
             self.available = True
         except Exception as e:
             self.available = False
@@ -224,8 +233,7 @@ class ClipArbiter:
             if not content_mask.any():
                 return Verdict.SAFE, f"blank(std={stds.max():.0f})"
 
-            pix = self._processor(images=crops, return_tensors="np")[
-                "pixel_values"].astype(np.float32)
+            pix = self._preprocess_images(crops)
             img_f = self._vis.run(None, {"pixel_values": pix})[0]
             img_f = img_f / np.linalg.norm(img_f, axis=-1, keepdims=True)
             # Cosine sims (both already L2-normalized) in [-1, 1].
