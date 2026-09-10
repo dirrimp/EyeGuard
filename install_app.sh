@@ -16,7 +16,13 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 echo "==> Copying EyeGuard.app to /Applications (admin password required)"
 sudo rm -rf "$DST_APP"
 sudo cp -R "$SRC_APP" "$DST_APP"
-sudo chown -R "$(id -un)":staff "$DST_APP" 2>/dev/null || true
+# root-owned + non-user-writable: the interpreter inside is hardened-runtime
+# signed, and it lives outside the root-owned code tree / file-integrity
+# manifest, so a user-writable bundle would let a Standard user swap it for an
+# unhardened build. deploy_watcher re-asserts this on every deploy; session_
+# watcher flags it per-cycle if it regresses.
+sudo chown -R root:wheel "$DST_APP"
+sudo chmod -R go-w "$DST_APP"
 
 echo "==> Pointing the login agent at /Applications/EyeGuard.app"
 mkdir -p "$RUNTIME/logs"

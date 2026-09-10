@@ -125,6 +125,26 @@ class DeployWatcher:
                         sha], check=True, timeout=60)
         subprocess.run(["chown", "-R", "root:wheel", str(self.code_dir)],
                        check=True, timeout=60)
+        # Re-lock the agent's .app bundle to root:wheel, non-user-writable.
+        # install_app.sh originally chowned it to the user; the interpreter
+        # inside it is hardened-runtime signed but lives outside the
+        # root-owned code tree and the file-integrity manifest, so a
+        # user-writable bundle means it could be swapped for an unhardened
+        # build. This makes a Standard user unable to; session_watcher's
+        # per-cycle csops check is the evidence half if it's swapped anyway
+        # (e.g. by someone with admin). Best-effort -- a chown hiccup must
+        # never abort a deploy.
+        try:
+            import sys
+            p = Path(sys.executable).resolve()
+            app = next((a for a in p.parents if a.suffix == ".app"),
+                       Path("/Applications/EyeGuard.app"))
+            if app.exists():
+                subprocess.run(["chown", "-R", "root:wheel", str(app)],
+                               timeout=60)
+                subprocess.run(["chmod", "-R", "go-w", str(app)], timeout=60)
+        except Exception:
+            pass
         try:
             uid = subprocess.run(["id", "-u", self.monitored_user],
                                  capture_output=True, text=True,

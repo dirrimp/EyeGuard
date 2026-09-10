@@ -146,6 +146,39 @@ _libc.sysctl.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_uint,
                           ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t),
                           ctypes.c_void_p, ctypes.c_size_t]
 _libc.sysctl.restype = ctypes.c_int
+# csops(2): int csops(pid_t, unsigned int ops, void *useraddr, size_t)
+_libc.csops.argtypes = [ctypes.c_int, ctypes.c_uint, ctypes.c_void_p,
+                        ctypes.c_size_t]
+_libc.csops.restype = ctypes.c_int
+_CS_OPS_STATUS = 0
+_CS_GET_TASK_ALLOW = 0x00000004   # debugger attach permitted -- must be CLEAR
+_CS_RUNTIME = 0x00010000          # hardened runtime -- must be SET
+
+
+def _agent_unhardened(pid: int) -> bool | None:
+    """True if `pid` is NOT running under the hardened runtime, or has
+    debugger-attach permitted -- i.e. lldb / DYLD_INSERT_LIBRARIES could
+    neuter it in place. None on any lookup failure (treated as
+    "unknown this cycle", not a signal).
+
+    The agent's interpreter is shipped hardened-runtime signed, but it lives
+    in a user-writable path (`/Applications/EyeGuard.app/...`) outside the
+    root-owned code tree and the file-integrity manifest, so it could be
+    swapped for an unhardened build that takes effect on the next restart.
+    install_app.sh + deploy_watcher lock the bundle to root:wheel
+    (prevention); this is the per-cycle evidence half. Checked against the
+    LIVE process via csops(), not the on-disk file, so a swapped-then-running
+    binary is what gets caught."""
+    try:
+        flags = ctypes.c_uint32(0)
+        r = _libc.csops(pid, _CS_OPS_STATUS, ctypes.byref(flags),
+                        ctypes.sizeof(flags))
+        if r != 0:
+            return None
+        f = flags.value
+        return not (f & _CS_RUNTIME) or bool(f & _CS_GET_TASK_ALLOW)
+    except Exception:
+        return None
 
 
 def _is_debugger_attached(pid: int) -> bool | None:
@@ -535,14 +568,15 @@ class SessionWatcher:
             with _opener.open(req, timeout=timeout) as r:
                 r.read()
 
-    def _check_once(self) -> tuple[bool, bool, bool, bool]:
+    def _check_once(self) -> tuple[bool, bool, bool, bool, bool]:
         """Returns (new_account, wrong_user, untrusted_library,
-        debugger_attached). Baselines silently on first run -- no accounts
-        existing yet, or the baseline file missing, both just mean "start
-        fresh from here," matching the established baseline-then-flag-new
-        pattern used everywhere else in this project. The library and
-        debugger checks need no baseline at all -- see _untrusted_library()
-        and _is_debugger_attached()."""
+        debugger_attached, agent_unhardened). Baselines silently on first run
+        -- no accounts existing yet, or the baseline file missing, both just
+        mean "start fresh from here," matching the established
+        baseline-then-flag-new pattern used everywhere else in this project.
+        The library / debugger / hardened-runtime checks need no baseline at
+        all -- see _untrusted_library(), _is_debugger_attached(),
+        _agent_unhardened()."""
         new_account = False
         current = _local_user_accounts()
         if current is not None:
@@ -582,6 +616,7 @@ class SessionWatcher:
 
         untrusted_library = False
         debugger_attached = False
+        agent_unhardened = False
         pid = _monitor_agent_pid()
         if pid is not None:
             untrusted_path = _untrusted_library(pid)
@@ -596,7 +631,15 @@ class SessionWatcher:
                 print(f"[session_watcher] {datetime.now().isoformat()} debugger attached to monitor "
                       f"agent (pid {pid})", flush=True)
 
-        return new_account, wrong_user, untrusted_library, debugger_attached
+            # None (unreadable) is not a signal -- only an explicit True.
+            agent_unhardened = _agent_unhardened(pid) is True
+            if agent_unhardened:
+                print(f"[session_watcher] {datetime.now().isoformat()} monitor agent is NOT running "
+                      f"under hardened runtime (pid {pid}) -- interpreter may have been swapped",
+                      flush=True)
+
+        return (new_account, wrong_user, untrusted_library, debugger_attached,
+                agent_unhardened)
 
     def _check_and_heartbeat(self, confirmed_awake: bool = False):
         """One check-and-report cycle -- shared by the scheduled loop below
@@ -619,14 +662,15 @@ class SessionWatcher:
         DarkWake-blip-immune watcher_confirmed_awake_at -- see that RPC's
         SQL definition (fix_darkwake_heartbeat_drift.sql) for how it's used."""
         try:
-            (new_account, wrong_user, untrusted_library,
-             debugger_attached) = self._check_once()
+            (new_account, wrong_user, untrusted_library, debugger_attached,
+             agent_unhardened) = self._check_once()
             self._rpc("eg_watcher_heartbeat",
                       {"p_new_account": new_account,
                        "p_wrong_user": wrong_user,
                        "p_untrusted_library": untrusted_library,
                        "p_debugger_attached": debugger_attached,
-                       "p_confirmed_awake": confirmed_awake})
+                       "p_confirmed_awake": confirmed_awake,
+                       "p_agent_unhardened": agent_unhardened})
         except urllib.error.URLError as e:
             print(f"[session_watcher] {datetime.now().isoformat()} heartbeat network error: {e} "
                   f"-- will retry next cycle", flush=True)

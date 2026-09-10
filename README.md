@@ -246,7 +246,8 @@ device lockdown) are each set up separately — see `deploy/` and `router/`.
 | Always-on (menu-bar agent + root session/deploy daemons, self-relaunching) | ✅ running |
 | iPhone monitoring (router wire capture, phone-dark, Find My cross-check) | ✅ running |
 | Partner layer (encrypted sync, browsing trail, dashboard, email alerts) | ✅ running |
-| Tamper-evidence (gone-dark, blind, self-test, file-integrity manifest, session/account/dylib/debugger, router-config, DoH/Tor) | ✅ running |
+| Tamper-evidence (gone-dark, blind, self-test, file-integrity manifest, session/account/dylib/debugger/unhardened-agent, router-config, DoH/Tor) | ✅ running |
 | Admin-trust pivot (no secret on device, partner owns all backends, PR-gated deploys) | ✅ complete |
 | Config lock — partner-held pause password + append-only + lockout | ✅ in place |
-| Hardened-runtime code signing (raises the bar on in-memory patching) | ⬜ optional next step (`deploy/harden_codesign.sh`) |
+| Hardened-runtime code signing (denies `lldb` / `DYLD_INSERT_LIBRARIES` against the agent) | ✅ signed & enforcing; interpreter-swap covered by a root-owned bundle + a per-cycle `csops` check (`deploy/STATUS.md`) |
+| Sign the `.app` bundle itself / MDM-managed browser / full MDM | ⬜ optional — see `deploy/STATUS.md` |
