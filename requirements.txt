@@ -8,11 +8,14 @@ PyYAML>=6.0        # config
 nudenet>=3.4
 
 # Stage 2 arbiter: CLIP zero-shot scorer, run on onnxruntime (the SAME runtime
-# NudeNet uses) — NO PyTorch. The CLIP encoders are pre-exported to ONNX in
-# models/ (see tools/export_clip_onnx.py). transformers is kept ONLY for the
-# CLIP image processor + tokenizer (works without torch); pinned <5 for the
-# tested tokenizer/processor behavior. NO torch / torchvision needed at runtime.
-transformers>=4.44,<5
+# NudeNet uses) — NO PyTorch. The CLIP vision encoder is pre-exported to ONNX in
+# models/ (tools/export_clip_onnx.py). Image preprocessing is vendored in
+# eyeguard/clip_preprocess.py (numpy, validated byte-equivalent to
+# CLIPImageProcessor) and the prompt embeddings are precomputed offline into
+# eyeguard/clip_assets/text_features.npz (tools/build_text_features.py) — so
+# `transformers` is DEV-ONLY now (just those two tools), never imported at
+# runtime. NO torch / torchvision / transformers in the resident process.
+#   dev-only, to regenerate the model artifacts:  transformers>=4.44,<5  torch
 
 # Client-side encryption of uploaded review frames (eyeguard/frame_crypto.py)
 # -- so a managed-cloud Supabase breach or anon-key leak can't expose actual
