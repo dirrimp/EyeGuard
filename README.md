@@ -199,9 +199,9 @@ Every item here produces an email to the partner:
 | `supabase/*.sql` | schema, RLS lock, heartbeat + alert functions, the anon-client pivot, and every incremental alert-logic migration — run in the SQL Editor |
 | `docs/index.html` | the partner dashboard (GitHub Pages) |
 | `deploy/` | LaunchDaemon plists, `update.sh`, manifest publishers, decrypt tool, and the design docs (`CONTROL_PLANES`, `WORKFLOW`, `LOCKDOWN`, `PHONE`, `HARDENING_3.0`, …) |
-| `tools/` | dev-only: `export_clip_onnx.py`, `build_text_features.py` (regenerate the model artifacts; need `transformers`/`torch`) |
+| `tools/` | dev-only: `export_clip_onnx.py` (exports the CLIP vision encoder to ONNX), `build_text_features.py` (precomputes the prompt embeddings into `eyeguard/clip_assets/`) — both need `transformers`/`torch` and are run only when the model or prompt list changes |
 | `config.yaml` | every threshold, prompt, context rule, retention window, and cloud setting |
-| `models/` | the ONNX CLIP vision encoder + NudeNet (not committed; fetched/built by `setup.sh`) |
+| `models/` | the ONNX CLIP vision encoder (+ `clip_meta.json`); NudeNet's weights are pulled by its own package. Not committed — built with `tools/export_clip_onnx.py`, or shipped inside the packaged `.app` |
 | `*.sh` | setup / build / install / pause scripts |
 
 ## Setup
@@ -209,7 +209,9 @@ Every item here produces an email to the partner:
 Requires Python 3.12 (ML wheel availability).
 
 ```bash
-./setup.sh            # .venv, deps, fetch/build models
+./setup.sh            # create .venv and install runtime deps
+                      # (models: build with tools/export_clip_onnx.py,
+                      #  or use the packaged .app which bundles them)
 ./install_agent.sh    # run now + at every login, as a menu-bar app
 ```
 
