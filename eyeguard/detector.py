@@ -145,6 +145,15 @@ class ClipArbiter:
             model_dir = Path(__file__).resolve().parent.parent / "models"
             so = ort.SessionOptions()
             so.intra_op_num_threads = 2          # modest CPU/RAM
+            # Captures are periodic (~15-20s apart), not a stream -- there is no
+            # benefit to ORT holding a pre-grown CPU arena or a whole-graph
+            # activation-memory plan resident between inferences. Both off =
+            # allocate per run, free after; numerically identical output, a
+            # few ms slower per call, materially smaller steady-state
+            # MALLOC_LARGE footprint (2026-09-10 profiling: MALLOC_LARGE was
+            # ~1.7G logical of a 1.71G phys_footprint).
+            so.enable_cpu_mem_arena = False
+            so.enable_mem_pattern = False
             providers = ["CPUExecutionProvider"]
             self._vis = ort.InferenceSession(str(model_dir / "clip_vision.onnx"),
                                              sess_options=so, providers=providers)
@@ -166,6 +175,12 @@ class ClipArbiter:
                 "attention_mask": tok["attention_mask"].astype("int64")})[0]
             self._text_features = (tf / np.linalg.norm(tf, axis=-1, keepdims=True)
                                    ).astype(np.float32)
+            # The text encoder is used exactly once -- right here, to encode the
+            # fixed prompt list. arbitrate() only ever touches self._vis and the
+            # cached self._text_features. Drop the session now so its weights
+            # (~240MB, clip_text.onnx) don't sit resident for the process
+            # lifetime (2026-09-10).
+            self._txt = None
             self.available = True
         except Exception as e:
             self.available = False
