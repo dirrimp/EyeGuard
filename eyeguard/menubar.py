@@ -830,11 +830,13 @@ class EyeGuardApp(rumps.App):
         return a constant 'safe' — which would show up as identical output for
         different inputs.
 
-        Honest limit: this runs INSIDE the agent process, so a determined
-        attacker who can debug the process (the agent isn't hardened-runtime
-        signed — see deploy/STATUS.md "Open items") can feed the self-test
-        varied, healthy-looking output while neutering real detection. Only
-        hardened signing closes that; this catches everything short of it."""
+        Honest limit: this runs INSIDE the agent process. Hardened-runtime
+        signing now denies lldb / DYLD_INSERT_LIBRARIES against the live agent
+        (see deploy/STATUS.md), so the straightforward neuter-in-place attack
+        is closed; anyone who still gets code execution as the agent (e.g. by
+        swapping the user-writable interpreter binary for an unhardened one)
+        could feed this self-test healthy-looking output while neutering real
+        detection. This catches everything short of that."""
         try:
             import numpy as np
             from PIL import Image

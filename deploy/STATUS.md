@@ -56,13 +56,22 @@ about; none has a userland fix.
   trace once back in normal mode. A boot-history tamper flag (check on next
   normal startup whether the prior boot was Safe, fire a tamper report if so)
   would close the "zero trace for short windows" part; not built.
-- **In-memory patching of the agent.** The bundled Python interpreter is
-  ad-hoc signed, not hardened-runtime signed, so a technical user with their
-  own login can `lldb -p` the running agent (or `DYLD_INSERT_LIBRARIES`) and
-  patch `detector.analyze` to return SAFE — it keeps heartbeating, keeps
-  passing the self-test, just stops flagging. `session_watcher` catches an
-  injected dylib or an attached debugger *while they're present*, which raises
-  the bar, but the real fix is hardened-runtime signing — see Open items.
+- **In-memory patching of the agent — mostly closed.** The bundled Python
+  interpreter *is* hardened-runtime signed (verified live via `csops` on the
+  running process: `CS_RUNTIME | CS_HARD | CS_KILL` set, `CS_GET_TASK_ALLOW`
+  not set), so `lldb -p` on the live agent is denied and
+  `DYLD_INSERT_LIBRARIES` is ignored — the "neuter it in place" attack the old
+  HARDENING_3.0 doc flagged is gone. `session_watcher` additionally checks for
+  an injected dylib / attached debugger as defence in depth.
+  **Remaining gap:** the interpreter binary at
+  `/Applications/EyeGuard.app/Contents/Resources/python/bin/python3.12` is
+  owned `jonahdirrim:staff` and user-writable, and is *not* covered by the
+  file-integrity manifest (which only hashes `eyeguard/*.py` + `run_agent.py`
+  in the root-owned tree). So it could be swapped for an unhardened build,
+  which would take effect on the agent's next restart. Closing that = move the
+  `.app` into the root-owned tree (or ship a root-owned copy of the
+  interpreter), or add the interpreter's hash to the manifest, or full MDM.
+  See Open items.
 - **A second device / off-screen content / non-visual content.** EyeGuard
   watches *this* Mac's screen and *this* phone's DNS. A different device, DRM
   video pixels macOS blanks, AirPlay to another screen, audio, and plain text
@@ -88,17 +97,23 @@ about; none has a userland fix.
   DoT/DoH lockdown + wire capture, and pixel-content analysis (not activity
   proxies), respectively.
 
+## Done since the roadmap docs
+
+- **Hardened-runtime code-signing of the agent** (`deploy/harden_codesign.sh`).
+  The interpreter is signed `--options runtime` with
+  `com.apple.security.cs.disable-library-validation` (so onnxruntime / numpy /
+  pyobjc still load) and no `get-task-allow`. Verified live on the running
+  process. This was the old HARDENING_3.0.md #1 item.
+
 ## Open items
 
-1. **Hardened-runtime code-signing of the agent** — the single most valuable
-   remaining hardening. Free (no Apple Developer Program; notarization isn't
-   needed for a locally-installed app). Requires bundling the agent into one
-   Mach-O and signing with `--options runtime` + a
-   `disable-library-validation` entitlement (so Python can still load
-   onnxruntime/numpy/pyobjc) but **not** `get-task-allow` — its absence is
-   what denies `lldb` and `DYLD_INSERT_LIBRARIES`. Turns the injected-dylib /
-   debugger checks and the detector self-test from "raise the bar" into real
-   guarantees. Script scaffold: `deploy/harden_codesign.sh`.
+1. **Protect the hardened interpreter from being swapped.** It's signed, but
+   the binary is user-owned and manifest-uncovered (see the in-memory-patching
+   residual above). Add its hash to the file-integrity manifest, or relocate
+   the `.app` under the root-owned tree. Also: the `.app` *bundle* itself is
+   unsigned (only the interpreter inside it is) — cosmetic for launch, since
+   the LaunchAgent runs the interpreter by path, but worth signing for
+   completeness.
 2. **MDM-managed browser** (optional, paid) — an enforced extension allow-list
    + managed content filter closes the window-title-spoofer and
    adversarial-overlay-extension attacks with prevention rather than evidence.

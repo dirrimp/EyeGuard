@@ -249,4 +249,5 @@ device lockdown) are each set up separately — see `deploy/` and `router/`.
 | Tamper-evidence (gone-dark, blind, self-test, file-integrity manifest, session/account/dylib/debugger, router-config, DoH/Tor) | ✅ running |
 | Admin-trust pivot (no secret on device, partner owns all backends, PR-gated deploys) | ✅ complete |
 | Config lock — partner-held pause password + append-only + lockout | ✅ in place |
-| Hardened-runtime code signing (raises the bar on in-memory patching) | ⬜ optional next step (`deploy/harden_codesign.sh`) |
+| Hardened-runtime code signing (denies `lldb` / `DYLD_INSERT_LIBRARIES` against the agent) | ✅ signed & enforcing — remaining gap: the interpreter binary is user-writable and manifest-uncovered (see `deploy/STATUS.md`) |
+| MDM-managed browser / full MDM device management | ⬜ optional (paid) — see `deploy/STATUS.md` |
