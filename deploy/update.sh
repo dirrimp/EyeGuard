@@ -27,8 +27,8 @@ echo
 read -r -p "Deploy these changes? [y/N] " ans
 [ "$ans" = "y" ] || [ "$ans" = "Y" ] || { echo "Aborted — nothing deployed."; exit 0; }
 
-# Hard reset the CODE tree to exactly what's on main. Data (flags, pending
-# queue) lives outside this tree (see LOCKDOWN.md layout) so a reset here
+# Hard reset the CODE tree to exactly what's on main. Data (flags.jsonl, the
+# pending queue, EyeGuard-data/) lives outside this tree so a reset here
 # never touches monitoring history. Admin-trust-model pivot (2026-08-24):
 # there is no more secret key on disk at all -- config.yaml's api_key is the
 # same public key that's already safe to commit, so nothing here needs the

@@ -1,24 +1,27 @@
 # Developing EyeGuard After the Lockdown
 
-Once the Mac is locked down and the repo belongs to Dad (`CONTROL_PLANES.md`),
+The Mac is locked down and the repo belongs to Dad (see `deploy/STATUS.md`), so
 `/Library/Application Support/EyeGuard` is root-owned — you can't edit it
 directly, on purpose. This is how you keep improving EyeGuard anyway, without
 reopening the hole the lockdown just closed.
 
-**The shape of it:** you propose, Dad approves, only then does it run.
+**The shape of it:** you propose, Dad reviews & merges, then it ships.
 
 ```
 you edit on a branch  →  PR to main  →  Dad reviews & approves & merges
                                               │
                                               ▼
-                              Dad runs deploy/update.sh (sudo)
+                          deploy_watcher (root daemon) pulls within ~5 min
+                          — or Dad runs deploy/update.sh (sudo) manually
                                               │
                                               ▼
-                         root-owned install updated + restarted
+                         root-owned install updated + restarted,
+                         Dad emailed what shipped
 ```
 
-No step lets code reach the running agent without Dad's approval *and* Dad's
-own hands on the keyboard for the deploy.
+No code reaches the running agent without Dad's review and merge — that's
+the gate. Deployment after merge is automatic (`deploy_watcher`); the
+manual `update.sh` path is a fallback.
 
 ## One-time setup (Dad, in his GitHub repo)
 
@@ -57,27 +60,37 @@ changes. You can keep pushing to the same branch until it's approved.
 
 ## Getting an approved change onto the Mac
 
-Merging to `main` does **not** touch the running agent by itself — the
-root-owned install only changes when Dad explicitly runs:
+Once a PR is merged to `main`, **`deploy_watcher` (a root LaunchDaemon) ships
+it automatically** — it polls GitHub, and within ~5 minutes it does exactly
+what `deploy/update.sh` does by hand: hard-reset the deployed tree to
+`origin/main`, `chown -R root:wheel`, and restart the session agent, session
+watcher, and deploy watcher. It then emails Dad what shipped (visibility, not
+a gate). The merge *is* the deploy trigger; there is no separate deploy
+approval, because getting a commit onto `main` already required Dad's review.
+
+`deploy/update.sh` still exists for a manual deploy (Dad, `sudo`) if the
+watcher is down or you need it immediately:
 
 ```bash
 cd "/Library/Application Support/EyeGuard"
 sudo ./deploy/update.sh
 ```
 
-It shows exactly what's about to change (`git log` of the incoming commits),
-asks for confirmation, then hard-resets the deployed code to `main` and
-restarts the vault daemon + session agent. Takes 30 seconds.
+It prints the incoming commits, asks for confirmation, then does the same
+reset + restart.
 
 ## Why this is safe
 
 - You can never push to `main` — GitHub blocks it, not just etiquette.
-- You can never run `update.sh` — it requires `sudo`, which needs Dad's
-  password.
 - A PR you open is just a *proposal* sitting on GitHub; it has zero effect on
-  the Mac until Dad merges it **and** separately chooses to deploy it.
-- Monitoring data (`flags.jsonl`, the secret key, the pending queue) lives
-  outside the code tree `update.sh` resets, so a deploy never touches history.
+  the Mac until Dad **reviews and merges** it. That review is the only gate,
+  and it's mandatory (branch protection + `CODEOWNERS`).
+- The deployed tree is root-owned; you can't edit it directly, and
+  `update.sh` needs `sudo` (Dad's password).
+- Monitoring data (`flags.jsonl`, the pending queue, `EyeGuard-data/`) lives
+  outside the code tree a deploy resets, so shipping code never touches
+  history. There is no secret key on the Mac to protect — the agent uses the
+  public anon key only (admin-trust pivot, 2026-08-24).
 
 If you ever want to move fast on something, the honest move is to just talk to
 Dad — the workflow is designed to require his attention, not to be worked

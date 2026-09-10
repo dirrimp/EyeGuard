@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Run the EyeGuard Phase 1 detection loop.
+# Run the EyeGuard capture-and-detect loop in the foreground (dev / one-shot).
+# For the always-on menu-bar agent use ./install_agent.sh instead.
 set -euo pipefail
 cd "$(dirname "$0")"
 

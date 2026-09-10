@@ -1,4 +1,5 @@
-# EyeGuard configuration (Phase 1)
+# EyeGuard configuration — every threshold, prompt, context rule, retention
+# window, and cloud/router setting. See README.md for the architecture.
 
 # The session agent's LaunchAgent is installed system-wide (root-owned, so the
 # monitored user can't remove it) -- but that also means macOS starts a copy of
@@ -45,8 +46,9 @@ detection:
     - ANUS_EXPOSED
 
 arbiter:
-  # Second-pass CLIP zero-shot scorer. Lightweight (~0.5GB, ~90ms/frame) — fits
-  # 8GB comfortably. Scores each frame (and tiles) against two tiers of concepts:
+  # Second-pass CLIP zero-shot scorer, on onnxruntime (no PyTorch/transformers
+  # at runtime; ~560MB resident, ~90ms/frame). Scores each frame (and tiles)
+  # against two tiers of concepts:
   #   explicit_prompts  -> RED   (FLAGGED): nude / explicit / exposed
   #   suggestive_prompts-> YELLOW (ALERT):  shirtless / swimsuit / athletic / etc.
   enabled: true
