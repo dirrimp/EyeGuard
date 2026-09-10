@@ -1,4 +1,8 @@
-"""EyeGuard Phase 1 entry point: the capture-and-detect loop."""
+"""EyeGuard entry point: the capture-and-detect loop (foreground / one-shot).
+
+The always-on agent runs through eyeguard.menubar via run_agent.py; this
+module is the plain loop used by run.sh and diagnose.py.
+"""
 
 from __future__ import annotations
 
@@ -51,7 +55,7 @@ def build_detector(cfg: dict, verbose: bool = True) -> Detector:
             min_content_std=a.get("min_content_std", 12.0),
         )
         if verbose:
-            print("[arbiter] loading CLIP (first run downloads ~600MB)...")
+            print("[arbiter] loading CLIP (onnxruntime, ~560MB resident)...")
         arbiter.load()
         if verbose:
             if arbiter.available:
@@ -133,7 +137,8 @@ def run(cfg: dict, interval: float | None, once: bool):
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="eyeguard", description="EyeGuard Phase 1")
+    p = argparse.ArgumentParser(prog="eyeguard",
+                                description="EyeGuard capture-and-detect loop")
     p.add_argument("--config", default=str(Path(__file__).resolve().parent.parent
                                             / "config.yaml"))
     p.add_argument("--interval", type=float, default=None,

@@ -20,12 +20,18 @@ echo "==> Installing core dependencies (this downloads onnxruntime/opencv; takes
 pip install -r requirements.txt
 
 echo
-echo "==> Done. Core pipeline installed."
+echo "==> Done. Runtime deps installed (onnxruntime — no PyTorch, no transformers)."
 echo
-echo "Stage 2 arbiter (optional):"
-echo "  Off by default. To enable nuanced arbitration of borderline frames, set"
-echo "  'arbiter.enabled: true' in config.yaml. First run auto-downloads moondream2"
-echo "  (~4GB, cached) and uses ~4GB RAM while loaded — fine on 8GB intermittently."
-echo "  Until enabled, borderline frames are logged as 'review' (pipeline still runs)."
+echo "Models:"
+echo "  Stage 1 NudeNet pulls its own weights via the nudenet package on first run."
+echo "  Stage 2 CLIP needs models/clip_vision.onnx + clip_meta.json — build with"
+echo "  'python tools/export_clip_onnx.py' (needs transformers/torch), or use the"
+echo "  packaged EyeGuard.app which bundles them. Prompt embeddings are committed"
+echo "  (eyeguard/clip_assets/); rerun tools/build_text_features.py only if you"
+echo "  edit the prompt lists in config.yaml."
+echo
+echo "  The CLIP arbiter is ON by default, resident ~560MB. If the model files are"
+echo "  missing it logs 'arbiter unavailable' and borderline frames fall through as"
+echo "  'review' — the rest of the pipeline still runs."
 echo
 echo "Next: grant Screen Recording permission to your terminal, then run ./run.sh --once"

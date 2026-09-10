@@ -831,10 +831,10 @@ class EyeGuardApp(rumps.App):
         different inputs.
 
         Honest limit: this runs INSIDE the agent process, so a determined
-        attacker who can debug the process (see deploy/HARDENING_3.0.md — the
-        agent isn't hardened-runtime signed) can feed the self-test varied,
-        healthy-looking output while neutering real detection. Only hardened
-        signing closes that; this catches everything short of it."""
+        attacker who can debug the process (the agent isn't hardened-runtime
+        signed — see deploy/STATUS.md "Open items") can feed the self-test
+        varied, healthy-looking output while neutering real detection. Only
+        hardened signing closes that; this catches everything short of it."""
         try:
             import numpy as np
             from PIL import Image

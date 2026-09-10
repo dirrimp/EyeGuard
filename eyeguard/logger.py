@@ -1,8 +1,10 @@
 """Local flag logging.
 
-Phase 1 writes flag events to a local JSONL file. No network, no partner
-notification yet (that's Phase 2). Optionally saves the flagged frame to disk
-for sensitivity tuning — off by default for privacy.
+Writes every flag / activity event to a local JSONL file (the authoritative
+local record). eyeguard/uploader.py separately syncs these rows to Supabase
+for the partner dashboard and, for RED frames, an encrypted review image.
+Optionally also saves the flagged frame to disk for sensitivity tuning — off
+by default for privacy.
 """
 
 from __future__ import annotations
