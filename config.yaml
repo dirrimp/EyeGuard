@@ -689,6 +689,31 @@ file_integrity:
                         # release_manifests, or checks log an "unknown
                         # version" warning instead of a tamper flag
 
+# Bounds the agent's own memory footprint (2026-09-12). Confirmed live:
+# phys_footprint reached ~1.8GB after ~3 days of continuous uptime, up from
+# the ~580-620MB fresh-start baseline (2026-09-10's onnxruntime RAM work --
+# see deploy/STATUS.md). Leading hypothesis, not proven (the process that hit
+# 1.8GB was gone -- killed by a routine reboot -- before it could be
+# profiled): that same work turned OFF onnxruntime's CPU memory arena to cut
+# the resting footprint, which trades a fresh malloc/free of several MB on
+# EVERY CLIP inference for not holding a pre-grown arena -- fine for the
+# short harness that change was verified against, unverified over multi-day
+# uptime, where allocator fragmentation from that pattern could plausibly
+# never get returned to the OS. Rather than guess a fix for an unconfirmed
+# cause, this bounds the worst case regardless of root cause: if the agent's
+# own phys_footprint (read via the `footprint` tool -- the same metric
+# Activity Monitor shows, NOT `ps`'s unreliable RSS) ever exceeds
+# max_footprint_mb, it logs why and exits cleanly. The LaunchAgent's
+# KeepAlive relaunches it within seconds -- well under the 3-minute
+# gone-dark threshold, so this is invisible to the partner unless it starts
+# happening often (which would itself mean check_seconds/max_footprint_mb
+# need revisiting, or the real leak needs to be found).
+memory_guard:
+  enabled: true
+  check_seconds: 1800     # every 30 min -- cheap, no need to poll tighter
+  max_footprint_mb: 1200  # ~2x the fresh-start baseline; restart before an
+                          # actual problem (thrashing, OOM) not right at it
+
 # Session/account watcher (root LaunchDaemon, eyeguard/session_watcher.py).
 # The main app is a per-user process -- it can only ever see its own user's
 # session. If the monitored user (who has full admin) creates a second
