@@ -14,6 +14,7 @@ The menu bar icon reflects current state:
 from __future__ import annotations
 
 import hashlib
+import os
 import threading
 import time
 import traceback
@@ -110,6 +111,10 @@ class EyeGuardApp(rumps.App):
         self._ocr_min = int(self._text.get("ocr_min_terms", 2))
         self._text_terms = [t for t in self._text.get("terms", [])]
         self._last_signal_loc = None
+        self._mem_guard = self.cfg.get("memory_guard", {})
+        self._mem_guard_on = bool(self._mem_guard.get("enabled"))
+        self._mem_guard_secs = int(self._mem_guard.get("check_seconds", 1800))
+        self._mem_guard_max_mb = int(self._mem_guard.get("max_footprint_mb", 1200))
 
         # Shared state, written by the detection thread, read by the UI timer.
         self._lock = threading.Lock()
@@ -230,6 +235,39 @@ class EyeGuardApp(rumps.App):
         self._log_lines = None
         self._log_hash = None
         self._frames_seen = {}
+
+    def _check_memory_guard(self):
+        """Bound the agent's own resident memory, regardless of root cause --
+        see config.yaml's memory_guard block for the full reasoning. Reads
+        phys_footprint via the `footprint` command-line tool -- the SAME
+        metric Activity Monitor's Memory column shows, deliberately NOT `ps`'s
+        RSS column, which reads much lower and had already caused one real
+        mix-up this project (a live process showing ps-RSS=78MB actually had
+        phys_footprint=1.7GB). If footprint ever exceeds max_footprint_mb,
+        logs why and exits cleanly -- the LaunchAgent's KeepAlive relaunches
+        within seconds, comfortably under the 3-minute gone-dark threshold, so
+        this is invisible to the partner unless it starts happening often."""
+        import re
+        import subprocess
+        try:
+            out = subprocess.run(["footprint", str(os.getpid())],
+                                 capture_output=True, text=True,
+                                 timeout=15).stdout
+            m = re.search(r"phys_footprint:\s*(\d+)\s*MB", out)
+            if not m:
+                return  # couldn't parse -- not itself suspicious, just skip
+            mb = int(m.group(1))
+        except Exception:
+            return  # best-effort -- a failed check is not evidence either way
+
+        if mb >= self._mem_guard_max_mb:
+            self._log_diag(f"memory guard: phys_footprint={mb}MB >= "
+                           f"{self._mem_guard_max_mb}MB -- restarting "
+                           f"(KeepAlive will relaunch)")
+            print(f"[memory-guard] phys_footprint={mb}MB >= "
+                  f"{self._mem_guard_max_mb}MB -- exiting for KeepAlive to "
+                  f"relaunch", flush=True)
+            os._exit(0)  # skip atexit/cleanup -- KeepAlive relaunch is the point
 
     def _check_log_tamper(self, log_path, uploader):
         """Detect deletion, truncation, or in-place edits of flags.jsonl.
@@ -559,6 +597,7 @@ class EyeGuardApp(rumps.App):
         last_ext_scan = 0.0
         last_vm_scan = 0.0
         last_ocr = 0.0
+        last_mem_check = time.time()
         while not self._stop.is_set():
             try:
                 for frame in capturer.capture(skip_unchanged=True):
@@ -660,6 +699,18 @@ class EyeGuardApp(rumps.App):
                                 logger.flagged_frames_dir, uploader)
                         except Exception:
                             pass
+
+                    # Memory guard: bound the agent's own footprint regardless
+                    # of root cause -- see config.yaml's memory_guard block for
+                    # why this exists (confirmed live 2026-09-12: phys_footprint
+                    # reached ~1.8GB after ~3 days uptime).
+                    if (self._mem_guard_on
+                            and time.time() - last_mem_check >= self._mem_guard_secs):
+                        last_mem_check = time.time()
+                        try:
+                            self._check_memory_guard()
+                        except Exception:
+                            pass  # a failed check must never crash the loop
 
                     # Browser-extension monitoring: baseline at first scan, then
                     # flag any NEW extension — questionable (evasion) ones red,
