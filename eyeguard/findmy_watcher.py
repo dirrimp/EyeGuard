@@ -187,19 +187,26 @@ class FindMyWatcher:
         with _opener.open(req, timeout=15) as r:
             r.read()
 
-    def _alert_session_expired(self):
-        """Called the moment login fails or a fresh 2FA challenge is needed
-        -- Jonah asked for this to be immediate, not a delayed staleness
-        check (see supabase/findmy_session_expired_alert.sql). Debounced
-        server-side, so calling this every check_seconds while the session
-        stays dead only sends one email, not one per cycle. Best-effort:
-        must never raise back into the caller (which is already mid-error-
-        handling for the login failure itself)."""
+    def _alert_session_expired(self, reason: str):
+        """Called the moment login fails, a fresh 2FA challenge is needed, or
+        (added 2026-09-14) Apple is blocking on an unaccepted ToS update --
+        Jonah asked for this to be immediate, not a delayed staleness check
+        (see supabase/findmy_session_expired_alert.sql). `reason` selects the
+        email's instructions server-side -- 'accept_terms' needs a different,
+        much simpler fix (just accept the prompt at icloud.com) than
+        'session_expired' (needs --setup re-run with a 2FA code), and sending
+        the wrong instructions for the actual cause would send Jonah looking
+        for a --setup prompt that was never the problem. One shared debounce
+        flag still covers both (see that RPC's own definition for why that's
+        fine, not a regression) -- calling this every check_seconds while
+        either stays broken only sends one email, not one per cycle.
+        Best-effort: must never raise back into the caller (which is already
+        mid-error-handling for the failure itself)."""
         try:
-            self._rpc("eg_report_findmy_session_expired", {})
+            self._rpc("eg_report_findmy_session_expired", {"p_reason": reason})
         except Exception as e:
             print(f"[findmy_watcher] {datetime.now().isoformat()} failed to "
-                  f"report session-expired: {e!r}", flush=True)
+                  f"report session-expired ({reason}): {e!r}", flush=True)
 
     def _find_my_last_seen(self) -> datetime | None:
         """Returns the phone's Find My last-seen timestamp, or None if the
@@ -217,7 +224,8 @@ class FindMyWatcher:
         apple_id, password = creds
 
         from pyicloud import PyiCloudService
-        from pyicloud.exceptions import PyiCloudFailedLoginException
+        from pyicloud.exceptions import (PyiCloudFailedLoginException,
+                                          PyiCloudAcceptTermsException)
 
         # See net.py's hardened_dns() docstring (2026-09-04): pyicloud
         # manages its own requests.Session(), so this is the only way to
@@ -235,7 +243,23 @@ class FindMyWatcher:
                 print(f"[findmy_watcher] {datetime.now().isoformat()} login "
                       f"failed: {e} -- may need 'findmy_watcher.py --setup' "
                       f"re-run (session expired or password changed)", flush=True)
-                self._alert_session_expired()
+                self._alert_session_expired("session_expired")
+                return None
+            except PyiCloudAcceptTermsException as e:
+                # Added 2026-09-14. Confirmed live: NOT a subclass of
+                # PyiCloudFailedLoginException, so before this it fell
+                # through to check_once()'s generic except -- logged locally
+                # every cycle, no alert ever sent, for as long as the prompt
+                # sat unaccepted (observed: ~13 hours across an Apple ToS
+                # update on 2026-09-13). Unlike an expired session, this
+                # needs NO --setup re-run and NO 2FA -- just accepting the
+                # prompt at icloud.com -- so it gets its own reason string
+                # for eg_report_findmy_session_expired() to give the right
+                # instructions instead of the misleading "run --setup".
+                print(f"[findmy_watcher] {datetime.now().isoformat()} {e} "
+                      f"-- accept the updated terms at icloud.com, no "
+                      f"--setup or 2FA needed", flush=True)
+                self._alert_session_expired("accept_terms")
                 return None
 
             if api.requires_2fa:
@@ -246,7 +270,7 @@ class FindMyWatcher:
                 print(f"[findmy_watcher] {datetime.now().isoformat()} "
                       f"session needs a fresh 2FA challenge -- run "
                       f"'findmy_watcher.py --setup' again", flush=True)
-                self._alert_session_expired()
+                self._alert_session_expired("session_expired")
                 return None
 
             # Confirmed live (2026-09-02): this Apple ID has visibility into
