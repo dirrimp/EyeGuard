@@ -75,9 +75,57 @@ def _sb_headers():
             "-H", "Content-Type: application/json"]
 
 
+# Matches eyeguard-phone.py's _SB_RETRY_BACKOFF and the Mac's
+# uploader._FAST_RETRY_BACKOFF -- ~32s across 4 attempts.
+_SB_RETRY_BACKOFF = (3, 9, 20)
+_SB_FAILING = [False]
+
+
+def _curl_code(args, timeout=15):
+    """Like _curl(), but also returns the HTTP status. -> (body, code|None).
+    code is None if curl couldn't run, 0 if it got no response at all."""
+    try:
+        p = subprocess.run(["curl", "-s", "--max-time", str(timeout),
+                            "-w", "\n%{http_code}"] + args,
+                           capture_output=True, text=True)
+    except Exception:
+        return "", None
+    body, _, code = p.stdout.rpartition("\n")
+    code = code.strip()
+    return body, (int(code) if code.isdigit() else None)
+
+
 def _rpc(name: str, params: dict):
-    _curl([f"{SB}/rest/v1/rpc/{name}"] + _sb_headers()
-          + ["-X", "POST", "-d", json.dumps(params)])
+    """Report to Supabase, retrying transient failures. -> bool sent.
+
+    Added 2026-09-14. This watcher checks in every 300s against
+    eg_check_phone()'s 10-minute threshold, so it tolerates ONE missed
+    check-in and alerts on the second. With no retry and no status check at
+    all -- _curl()'s output was discarded -- two unlucky writes during the
+    Supabase degradation of 2026-09-10..14 emailed "router integrity watcher
+    stopped reporting" while this process was running normally.
+
+    4xx is never retried: that's a permanent fault (missing RPC signature,
+    bad key) that must stay visible rather than be buried under retries.
+    """
+    code = None
+    for delay in (0,) + _SB_RETRY_BACKOFF:
+        if delay:
+            time.sleep(delay)
+        _, code = _curl_code([f"{SB}/rest/v1/rpc/{name}"] + _sb_headers()
+                             + ["-X", "POST", "-d", json.dumps(params)])
+        if code is not None and 200 <= code < 300:
+            if _SB_FAILING[0]:
+                print("[router-watcher] supabase writes recovered", flush=True)
+                _SB_FAILING[0] = False
+            return True
+        if code is not None and 400 <= code < 500:
+            break
+    if not _SB_FAILING[0]:
+        print(f"[router-watcher] supabase write FAILING ({name}, last "
+              f"http={code}) -- next line is on recovery", flush=True)
+        _SB_FAILING[0] = True
+    return False
 
 
 def _fetch_manifest() -> dict | None:

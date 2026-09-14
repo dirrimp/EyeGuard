@@ -664,13 +664,14 @@ class SessionWatcher:
         try:
             (new_account, wrong_user, untrusted_library, debugger_attached,
              agent_unhardened) = self._check_once()
-            self._rpc("eg_watcher_heartbeat",
-                      {"p_new_account": new_account,
-                       "p_wrong_user": wrong_user,
-                       "p_untrusted_library": untrusted_library,
-                       "p_debugger_attached": debugger_attached,
-                       "p_confirmed_awake": confirmed_awake,
-                       "p_agent_unhardened": agent_unhardened})
+            self._rpc_with_fast_retry(
+                "eg_watcher_heartbeat",
+                {"p_new_account": new_account,
+                 "p_wrong_user": wrong_user,
+                 "p_untrusted_library": untrusted_library,
+                 "p_debugger_attached": debugger_attached,
+                 "p_confirmed_awake": confirmed_awake,
+                 "p_agent_unhardened": agent_unhardened})
         except urllib.error.URLError as e:
             print(f"[session_watcher] {datetime.now().isoformat()} heartbeat network error: {e} "
                   f"-- will retry next cycle", flush=True)
@@ -679,6 +680,43 @@ class SessionWatcher:
             # every other background watcher in this project.
             print(f"[session_watcher] {datetime.now().isoformat()} check raised {e!r} -- continuing",
                   flush=True)
+
+    # See uploader.py's _FAST_RETRY_BACKOFF -- same schedule, same reasoning.
+    # ~32s across 4 attempts, comfortably inside this class's 120s
+    # check_seconds so a cycle can never overrun into the next tick.
+    _FAST_RETRY_BACKOFF = (3, 9, 20)
+
+    def _rpc_with_fast_retry(self, fn: str, args: dict):
+        """_rpc(), retrying transient server/network faults within this tick.
+
+        Added 2026-09-14, alongside the matching fix in uploader.py. This
+        watcher was the MORE exposed of the two: one attempt per 120s tick
+        against eg_check_gone_dark()'s 3-minute threshold means just TWO
+        consecutive failures were enough to email "session watcher went dark"
+        -- and during the Supabase degradation of 2026-09-10..14 that is
+        exactly what happened, while this process was running fine the whole
+        time and the Mac was awake and on home wifi.
+
+        Only 5xx / timeouts / connection errors are retried. A 4xx -- above
+        all a 404, meaning this RPC's argument signature doesn't exist
+        server-side -- must still fail on the first attempt and get logged,
+        since that is a deploy ordering bug this project has shipped twice and
+        retries would only hide it (see uploader._is_transient's note).
+        """
+        last = None
+        for delay in (0,) + self._FAST_RETRY_BACKOFF:
+            if delay:
+                time.sleep(delay)
+            try:
+                self._rpc(fn, args)
+                return
+            except urllib.error.HTTPError as e:
+                last = e
+                if e.code < 500:
+                    raise
+            except (urllib.error.URLError, TimeoutError, OSError) as e:
+                last = e
+        raise last
 
     def heartbeat_now(self):
         """Called from SleepWatcher's IOKit callback thread on a real
