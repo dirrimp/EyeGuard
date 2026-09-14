@@ -58,6 +58,18 @@ GREEN_THROTTLE = int(CONF.get("green_repeat_seconds", 900))
 SLEEP_RELAY_TOKEN = CONF.get("sleep_relay_token", "")
 SLEEP_RELAY_PORT = int(CONF.get("sleep_relay_port", 51900))
 HEARTBEAT_SECONDS = int(CONF.get("heartbeat_seconds", 20))
+# How often the LOCAL 20s poll above actually REPORTS to Supabase (2026-09-14).
+# These were the same number until an audit found phone_status had taken
+# 152,773 single-row UPDATEs -- 180/hour, the single largest source of traffic
+# against the project, more than every other client combined. The 20s cadence
+# is tuned for the LOCAL dark-detection math (it beats against the 25s
+# WireGuard Persistent Keepalive -- see phone.config.example's _dark_buffer
+# note), but the SERVER never needed that granularity: eg_check_phone() only
+# ever asks "is monitor_beat older than 5 minutes". Decoupling the two keeps
+# every bit of local detection fidelity while cutting reports ~3x. State
+# CHANGES (alive<->dark) still report instantly, so alerting is actually more
+# responsive than a fixed 20s tick, not less.
+REPORT_SECONDS = int(CONF.get("report_seconds", 60))
 ROUTER_CHECK_SECONDS = int(CONF.get("router_check_seconds", 300))
 ROUTER_BASELINE_PATH = Path(CONF.get("router_baseline_file",
                                      "/etc/eyeguard/router_baseline.json"))
@@ -72,6 +84,10 @@ QUERY_RE = re.compile(r"\d+\+\s+\S+\?\s+(\S+)\.\s+\(\d+\)")
 _LOCK = threading.Lock()
 _STATE = {"last_activity": time.time(), "last_rx": -1, "dark_alerted": False,
           "green_seen": {}}
+# Last heartbeat actually SENT to Supabase -- see REPORT_SECONDS. active=None
+# forces a report on the very first loop iteration, so a fresh start (or a
+# service restart) always checks in immediately rather than waiting.
+_LAST_REPORT = {"active": None, "at": 0.0}
 
 
 def now_iso():
@@ -568,7 +584,16 @@ def heartbeat_loop():
                 "app": "iPhone", "url": None, "window_title": "phone went dark",
                 "grade": "Likely", "risk": "high", "is_nudity": False})
 
-        sb_phone_heartbeat(active)
+        # Report on the SLOWER REPORT_SECONDS cadence, or immediately whenever
+        # the alive/dark state flips -- the local poll above still runs every
+        # HEARTBEAT_SECONDS and all dark-detection math is unchanged. See
+        # REPORT_SECONDS' own comment for why these were split apart.
+        now_t = time.time()
+        if (active != _LAST_REPORT["active"]
+                or now_t - _LAST_REPORT["at"] >= REPORT_SECONDS):
+            sb_phone_heartbeat(active)
+            _LAST_REPORT["active"] = active
+            _LAST_REPORT["at"] = now_t
         time.sleep(HEARTBEAT_SECONDS)
 
 
