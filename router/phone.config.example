@@ -18,6 +18,8 @@
   "dark_buffer_seconds": 150,
   "green_repeat_seconds": 900,
   "heartbeat_seconds": 20,
+  "_report_seconds": "How often the local heartbeat_seconds poll actually REPORTS to Supabase. Split from heartbeat_seconds on 2026-09-14 after an audit found phone_status had absorbed 152,773 single-row UPDATEs (180/hour -- more traffic than every other client in this project combined). heartbeat_seconds stays 20 because the LOCAL dark-detection math depends on it beating against the 25s WireGuard Persistent Keepalive (see _dark_buffer above); the SERVER never needed that granularity -- eg_check_phone() only ever asks whether monitor_beat is older than 5 minutes. 60s keeps monitor_beat comfortably fresh against that 5-minute threshold while cutting reports ~3x, and any alive<->dark state change still reports INSTANTLY rather than waiting for the next tick, so alerting is MORE responsive than before, not less.",
+  "report_seconds": 60,
 
   "_router_check": "Router config tamper-evidence: periodically checks that AdGuard protection, Block-DoT, WAN default-deny, SSH key-only auth, GoodCloud staying disabled, the admin GUI staying HTTPS-only, and the WireGuard peer set all still match the hardened state -- flags a RED tamper alert on any drift. The scalar checks compare directly against the fixed expected value every cycle (admin-trust pivot, 2026-08-24) -- NOT gated on the local baseline file also agreeing, since that file is exactly as editable as the config it's meant to catch drift in once SSH is in play. wg_peers still diffs against the local baseline -- a known, accepted residual (the peer set legitimately changes over time, unlike the fixed invariants).",
   "router_check_seconds": 300,
