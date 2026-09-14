@@ -301,10 +301,7 @@ class SupabaseUploader:
             # its own docstring) as defense in depth.
             if self.heartbeat:
                 try:
-                    if self._suspended:
-                        self._send_suspend_beacon()
-                    else:
-                        self.send_heartbeat()
+                    self._heartbeat_with_fast_retry()
                     self._heartbeat_ok()
                 except Exception as e:
                     self._heartbeat_failed(e, "worker loop")
@@ -314,6 +311,77 @@ class SupabaseUploader:
                 pass  # never let the uploader crash the app
             self._wake.wait(self.retry_seconds)
             self._wake.clear()
+
+    # Backoff schedule for _heartbeat_with_fast_retry(), in seconds to wait
+    # BEFORE each attempt after the first. Totals ~32s of wall clock across 4
+    # attempts -- deliberately shorter than retry_seconds (60s) so a cycle can
+    # never overrun into the next one.
+    _FAST_RETRY_BACKOFF = (3, 9, 20)
+
+    @staticmethod
+    def _is_transient(e: Exception) -> bool:
+        """Is this error worth retrying within the same cycle?
+
+        Retry the server/network faults that resolve on their own -- 5xx from
+        the gateway (502/503/504 are PostgREST/Warp or the edge, not us), plus
+        timeouts and connection errors.
+
+        Do NOT retry 4xx. A 404 means the RPC signature doesn't exist
+        server-side, which is a DEPLOY bug, not a blip -- and this project has
+        been bitten by exactly that twice (eg_report_network_gap silently
+        retrying a 404 for three days; the eg_watcher_heartbeat 404 window when
+        code shipped ahead of its SQL). Burying those under retries is how they
+        stayed invisible. They must fail fast and get logged on the first
+        attempt, same as before this existed.
+        """
+        if isinstance(e, urllib.error.HTTPError):
+            return e.code >= 500
+        # URLError covers DNS/refused/unreachable; TimeoutError covers a read
+        # that hung. socket.timeout is an alias of TimeoutError on 3.10+.
+        return isinstance(e, (urllib.error.URLError, TimeoutError, OSError))
+
+    def _heartbeat_with_fast_retry(self):
+        """Send one heartbeat, retrying transient failures within this cycle.
+
+        Added 2026-09-14. Before this, the worker made exactly ONE attempt per
+        retry_seconds (60s) cycle, so a single transient 504 meant nothing
+        reached the server for a full minute -- and eg_check_gone_dark() emails
+        at a 3-minute gap. Three unlucky blips in a row, spaced a minute apart
+        purely by our own polling interval, was enough to alert.
+
+        That is what actually happened during the Supabase platform degradation
+        of 2026-09-10..14 (their status page: "Partially Degraded Service",
+        incident "Unresponsive Projects"). The local log proves the stalls
+        themselves were brief -- every recovery timestamp landed on a retry
+        boundary (60s, 37s, ~130s), meaning we have no evidence any outage
+        outlived a few seconds; we simply never asked again until the next
+        minute. The blips were Supabase's, but turning them into alert emails
+        was ours.
+
+        Four attempts across ~32s turns "3 failures a minute apart" into "12
+        failures across half a minute," which a transient gateway blip will not
+        produce. A genuinely dead Mac, unreachable network, or stopped monitor
+        still alerts on exactly the same 3-minute schedule as before -- every
+        attempt fails, and the cycle reports failure just as it always did.
+        """
+        last = None
+        for i, delay in enumerate((0,) + self._FAST_RETRY_BACKOFF):
+            if delay:
+                # Interruptible: shutdown and an explicit wake() must not have
+                # to sit through the backoff.
+                if self._stop.wait(delay):
+                    break
+            try:
+                if self._suspended:
+                    self._send_suspend_beacon()
+                else:
+                    self.send_heartbeat()
+                return
+            except Exception as e:
+                last = e
+                if not self._is_transient(e):
+                    raise
+        raise last
 
     def suspend(self):
         """Mac going to sleep / shutting down normally: beacon a clean state so

@@ -141,14 +141,103 @@ def _sb_headers():
             "-H", "Content-Type: application/json"]
 
 
+# Retry schedule for Supabase writes -- see _sb_write(). Matches the Mac's
+# uploader._FAST_RETRY_BACKOFF exactly; ~32s across 4 attempts.
+_SB_RETRY_BACKOFF = (3, 9, 20)
+_SB_FAIL_STATE = {"failing": False}
+
+
+def _curl_code(args, timeout=15):
+    """Like _curl(), but also returns the HTTP status. -> (body, code|None).
+
+    code is None when curl itself couldn't be run, and 0 when curl ran but
+    never got a response (timeout, connection refused, DNS) -- both are
+    transient as far as _sb_write() is concerned.
+    """
+    try:
+        p = subprocess.run(["curl", "-s", "--max-time", str(timeout),
+                            "-w", "\n%{http_code}"] + args,
+                           capture_output=True, text=True)
+    except Exception:
+        return "", None
+    body, _, code = p.stdout.rpartition("\n")
+    code = code.strip()
+    return body, (int(code) if code.isdigit() else None)
+
+
+def _sb_write(args, what):
+    """Perform a Supabase write, retrying transient failures. -> bool sent.
+
+    Added 2026-09-14, the router half of the same fix applied to the Mac's
+    uploader.py and session_watcher.py. Two problems here, not one:
+
+    1. NO RETRY. A single failed write was simply lost. During the Supabase
+       platform degradation of 2026-09-10..14 ("Partially Degraded Service";
+       incident "Unresponsive Projects") that was enough to blow past
+       eg_check_phone()'s thresholds and email "router watcher offline" while
+       this router was up and reporting normally the whole time.
+    2. NO ERROR VISIBILITY AT ALL. The old sb_post/sb_rpc called _curl() and
+       discarded its output, so a write failing got NOTHING -- no retry, no
+       return value, no log line. The router could not distinguish "reported"
+       from "silently dropped on the floor," which is why the phone-side
+       outages in this project have always been so much harder to diagnose
+       than the Mac's.
+
+    That second point matters beyond heartbeats: sb_post() to /rest/v1/flags
+    is how a RED phone signal reaches the server. A dropped flag insert was a
+    MISSED ALERT that left no trace anywhere. Those are now retried and, if
+    they still fail, logged.
+
+    4xx is not retried -- that's a permanent schema/permission fault (a 404
+    RPC signature, a 401 key) that retries would only hide, same rule as the
+    Mac clients use.
+    """
+    # Hard wall-clock bound. heartbeat_loop() runs the LOCAL alive/dark
+    # detection in the same thread that calls this, so an unbounded retry
+    # sequence (4 attempts x a 15s curl timeout, plus 32s of backoff) could
+    # freeze local detection for ~90s -- trading the reporting problem for a
+    # detection one. Give up cleanly at 45s and let the next
+    # HEARTBEAT_SECONDS tick try again.
+    deadline = time.time() + 45
+    code = None
+    for delay in (0,) + _SB_RETRY_BACKOFF:
+        if delay:
+            if time.time() + delay >= deadline:
+                break
+            time.sleep(delay)
+        remaining = deadline - time.time()
+        if remaining <= 1:
+            break
+        _, code = _curl_code(args, timeout=min(15, int(remaining)))
+        if code is not None and 200 <= code < 300:
+            with _LOCK:
+                if _SB_FAIL_STATE["failing"]:
+                    print(f"[eyeguard-phone] {now_iso()} supabase writes "
+                          f"recovered", flush=True)
+                    _SB_FAIL_STATE["failing"] = False
+            return True
+        if code is not None and 400 <= code < 500:
+            break  # permanent -- report it immediately, don't paper over it
+    # Log the TRANSITION only, not every cycle -- a long outage would
+    # otherwise fill the router's small log partition.
+    with _LOCK:
+        if not _SB_FAIL_STATE["failing"]:
+            print(f"[eyeguard-phone] {now_iso()} supabase write FAILING "
+                  f"({what}, last http={code}) -- next line is on recovery",
+                  flush=True)
+            _SB_FAIL_STATE["failing"] = True
+    return False
+
+
 def sb_post(path, row, prefer="return=minimal"):
-    _curl([f"{SB}{path}"] + _sb_headers()
-          + ["-H", f"Prefer: {prefer}", "-X", "POST", "-d", json.dumps(row)])
+    return _sb_write([f"{SB}{path}"] + _sb_headers()
+                     + ["-H", f"Prefer: {prefer}", "-X", "POST",
+                        "-d", json.dumps(row)], path)
 
 
 def sb_rpc(name, params):
-    _curl([f"{SB}/rest/v1/rpc/{name}"] + _sb_headers()
-          + ["-X", "POST", "-d", json.dumps(params)])
+    return _sb_write([f"{SB}/rest/v1/rpc/{name}"] + _sb_headers()
+                     + ["-X", "POST", "-d", json.dumps(params)], name)
 
 
 def sb_phone_heartbeat(active):
@@ -156,7 +245,7 @@ def sb_phone_heartbeat(active):
     # monitor_beat/last_seen with the SERVER's clock, the same reasoning as
     # the Mac's eg_heartbeat(): no timestamp parameter exists for this
     # script to submit, so it cannot forge one even if it tried.
-    sb_rpc("eg_phone_heartbeat", {"p_active": active})
+    return sb_rpc("eg_phone_heartbeat", {"p_active": active})
 
 
 def home_ping_alive():
@@ -591,9 +680,15 @@ def heartbeat_loop():
         now_t = time.time()
         if (active != _LAST_REPORT["active"]
                 or now_t - _LAST_REPORT["at"] >= REPORT_SECONDS):
-            sb_phone_heartbeat(active)
-            _LAST_REPORT["active"] = active
-            _LAST_REPORT["at"] = now_t
+            # Only advance the throttle on a CONFIRMED send (2026-09-14).
+            # Marking it reported on a failed write would hold the next
+            # attempt back a further REPORT_SECONDS, turning one dropped
+            # heartbeat into a 60s reporting gap -- exactly the amplification
+            # this round of fixes exists to remove. On failure we simply try
+            # again on the next HEARTBEAT_SECONDS tick.
+            if sb_phone_heartbeat(active):
+                _LAST_REPORT["active"] = active
+                _LAST_REPORT["at"] = now_t
         time.sleep(HEARTBEAT_SECONDS)
 
 
