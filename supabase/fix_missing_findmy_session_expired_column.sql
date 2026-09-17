@@ -1,0 +1,35 @@
+-- Re-add a column that never actually landed (2026-09-17).
+--
+-- Discovered live: findmy_watcher.py's Apple credential started failing for
+-- real today ("Invalid email/password combination" -- a genuine login
+-- rejection, unrelated to anything in this project's code) and fired
+-- eg_report_findmy_session_expired() every 10-minute cron cycle -- every
+-- single call came back 400, "column 'findmy_session_expired_alerted' does
+-- not exist" (42703). Confirmed via information_schema.columns: the column
+-- genuinely does not exist on phone_status right now.
+--
+-- Ruled out before writing this: not a duplicate/stale function overload
+-- (pg_proc shows exactly one live version, matching PR #98's source byte
+-- for byte) -- not a broader table reset either (every OTHER column ever
+-- added to phone_status, including ones added immediately before and after
+-- this one chronologically, is present and accounted for). This is an
+-- isolated single-column gap.
+--
+-- findmy_session_expired_alert.sql (2026-09-02) is where this column was
+-- supposed to come from -- it also shipped two function definitions in the
+-- same file, both of which clearly did apply (this project has been calling
+-- eg_report_findmy_session_expired() successfully in terms of routing --
+-- PostgREST found the function fine, it's the function's OWN body failing
+-- once it runs). The most likely explanation: that original migration's
+-- `alter table` line, sitting above the function definitions in the file,
+-- never actually got applied -- probably a partial paste that captured the
+-- functions but not the column declaration above them. Which means this
+-- alert path has likely been silently broken since the day it was
+-- introduced, invisible until now because the condition that triggers it
+-- (a real Apple login failure) essentially never occurred before today.
+--
+-- Fix: the exact missing line from that original migration, unchanged.
+-- Idempotent -- safe regardless of the exact history.
+
+alter table public.phone_status
+  add column if not exists findmy_session_expired_alerted boolean not null default false;
