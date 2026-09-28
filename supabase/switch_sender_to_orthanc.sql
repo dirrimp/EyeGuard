@@ -1,0 +1,58 @@
+-- Move the EyeGuard alert sender to alerts@orthanc.me (2026-09-28).
+--
+-- Jonah relays that Dad is OK bundling every EyeGuard email (red/tamper/
+-- gone-dark/daily digest/weekly summary) onto this one sender, on Dad's own
+-- Resend account -- same reporting-channel-not-controlled-by-the-monitored-
+-- party principle this project has followed since alerts.sql was first
+-- written, just a different domain.
+--
+-- ============================================================================
+-- DEPLOY ORDER -- READ BEFORE RUNNING THIS FILE
+-- ============================================================================
+-- Do NOT run this until the Resend dashboard (Dad's account) shows
+-- orthanc.me as "Verified", after adding the DNS records Resend's own
+-- "Add Domain" flow lists (MX + SPF TXT on the bounce subdomain Resend
+-- assigns, e.g. send.orthanc.me; DKIM TXT on resend._domainkey.orthanc.me;
+-- DNS lives at deSEC -- Jonah's/Agent 01's side, not Dad's, to actually
+-- add). eg_send_email() is called by EVERY alert this project sends --
+-- red/tamper/gone-dark/daily-digest/weekly-summary, not just the new one.
+-- Running this against an unverified domain does not just fail to send one
+-- email -- it silently breaks ALL of them (Resend rejects sending from an
+-- unverified domain), which is exactly the kind of silent coverage loss
+-- this project's integrity rules exist to prevent. This project has hit an
+-- analogous deploy-order hazard twice before (see
+-- supabase/findmy_ToS_gap_and_stale_backstop.sql's own DEPLOY ORDER note) --
+-- same class of mistake, worth calling out with the same weight here.
+--
+-- ============================================================================
+-- WHY THIS ISN'T A DROP-IN "create or replace function" LIKE THE OTHER
+-- FILES IN THIS FOLDER
+-- ============================================================================
+-- eg_send_email() has never been redefined since the original alerts.sql --
+-- checked (grep across every supabase/*.sql file in this repo). alerts.sql's
+-- OWN committed 'to' list is an obvious placeholder
+-- (partner1@example.com/partner2@example.com); the real recipients only
+-- exist in whatever Dad actually ran, live, and were never committed back
+-- to this repo (correctly -- that's Dad/spouse's real email addresses, not
+-- something that belongs in a public repo). I have no way to read the live
+-- function definition (no service-role access, no SQL execution access at
+-- all -- by design, per this project's integrity rules), so I genuinely
+-- cannot see what the current 'to' list is. Shipping a full
+-- "create or replace function" here with a placeholder 'to' list would risk
+-- Dad running it as-is and silently REPLACING the real recipients with
+-- example.com addresses -- a much worse outcome than a slightly less
+-- convenient instruction. So: a surgical edit, not a copy-paste block.
+--
+-- STEPS FOR DAD:
+--   1. Supabase Dashboard -> SQL Editor -> Database -> Functions (or
+--      `select pg_get_functiondef('public.eg_send_email'::regproc);`) to see
+--      the CURRENT live definition, including the real 'to' list.
+--   2. Copy that definition, change ONLY this one line:
+--        'from', 'EyeGuard <alerts@alerts.jjpetwasteservices.com>',
+--      to:
+--        'from', 'EyeGuard <alerts@orthanc.me>',
+--   3. Leave the 'to' line and everything else byte-for-byte identical to
+--      what step 1 showed you.
+--   4. Run the edited `create or replace function public.eg_send_email(...)`
+--      block yourself in the SQL editor.
+-- ============================================================================
