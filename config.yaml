@@ -757,6 +757,15 @@ session_watcher:
 findmy:
   enabled: true
   check_seconds: 600
+  # Hard wall-clock cap on one check-and-report cycle, regardless of WHERE
+  # inside it a call blocks (see eyeguard/findmy_watcher.py's module
+  # docstring, "GAP FOUND 2026-09-28": pyicloud's login flow and DNS
+  # resolution both have hang modes socket.setdefaulttimeout() does NOT
+  # cover). Found live: 4 `run_findmy.py --once` cron invocations stuck
+  # simultaneously, oldest 10 days, before this existed. cron fires a fresh
+  # --once every 10 minutes (deploy/findmy-cron.txt) -- 120s leaves large
+  # margin below that cadence.
+  check_timeout_seconds: 120
   # Substring match against the device name in Find My (Settings -> [name] ->
   # Find My -> the list under "My Devices"), NOT the AmneziaWG peer name --
   # different system, matched by whatever the phone is actually named there.
