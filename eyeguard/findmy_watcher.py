@@ -63,8 +63,12 @@ Two entry points:
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import getpass
 import json
+import os
+import signal
 import socket
 import time
 from datetime import datetime, timezone
@@ -89,7 +93,134 @@ _BASE = Path(__file__).resolve().parent.parent
 # applies to every socket this interpreter opens, including ones inside
 # pyicloud/requests/urllib3 that never set their own -- turns an indefinite
 # hang into a clean, catchable TimeoutError after a bounded wait instead.
+#
+# GAP FOUND (2026-09-28, while diagnosing 4 --once invocations stuck for up
+# to 10 days -- oldest since 2026-09-18, found via `ps -axo pid,etime,command
+# | grep run_findmy`): this fix doesn't actually cover every hang mode it was
+# meant to. Read the installed pyicloud package directly (not guessed):
+# pyicloud/base.py's login flow (`accountLogin`, the trust-token exchange,
+# the initial `self.data` fetch) and several other `self.session.get/post`
+# call sites pass NO `timeout=` kwarg at all. `requests` treats a missing
+# timeout as `timeout=None`, and urllib3's `create_connection()` treats an
+# explicit `None` as "block forever on this socket" -- NOT "fall back to
+# socket.getdefaulttimeout()" the way an *omitted* argument would. So this
+# module's own `socket.setdefaulttimeout(30)` silently does not bound those
+# specific calls; confirmed by reading urllib3's own connection.py, not
+# assumed. Separately, DNS resolution itself (`socket.getaddrinfo`, reached
+# either directly by the system resolver in hardened_dns()'s fallback path,
+# or indirectly by anything that skips this module's patch) is ALSO not
+# bounded by socket.setdefaulttimeout() -- it's a libc call, not a socket
+# read/connect. Either gap alone is enough to explain a multi-day hang with
+# zero CPU use and zero log output, exactly what the 4 stuck processes
+# looked like. Fixed below with `_hard_timeout()`, a SIGALRM-based wall-clock
+# bound around the ENTIRE check -- signal delivery interrupts a blocked
+# syscall wherever it is, so this is the one mechanism that actually covers
+# every hang location above (known and not-yet-found alike), instead of
+# chasing individual call sites inside a third-party library.
 socket.setdefaulttimeout(30)
+
+# Overall wall-clock budget for one check-and-report cycle, regardless of
+# where inside it a call is blocked (see the GAP FOUND note above). Cron
+# fires a fresh --once every 10 minutes by default (deploy/findmy-cron.txt);
+# 120s leaves a large margin below that cadence -- comfortably more than any
+# observed healthy run needs (login + device list + per-device status for a
+# handful of devices), while still bounding a hang to a small fraction of one
+# cron period instead of potentially forever. Configurable via
+# findmy.check_timeout_seconds for the same reason every other timing knob
+# in this project's config files is configurable, not hardcoded.
+_DEFAULT_CHECK_TIMEOUT_SECONDS = 120
+
+
+class WatcherTimeout(Exception):
+    """Raised by _hard_timeout() when the wrapped block overran its budget.
+    Deliberately its own type, not a bare TimeoutError -- check_once() logs
+    this case with an explicit "TIMED OUT" line distinguishable from an
+    ordinary caught exception, per the ops requirement that a timed-out run
+    must be easy to tell apart from a normal failure or a real result when
+    reading the log."""
+
+
+@contextlib.contextmanager
+def _hard_timeout(seconds: int):
+    """Bounds the wrapped block to `seconds` wall-clock seconds, no matter
+    WHERE inside it blocks -- including a DNS lookup or a `requests` call
+    with no timeout of its own (see the module docstring's GAP FOUND note:
+    confirmed neither is covered by socket.setdefaulttimeout()).
+    SIGALRM interrupts a blocked syscall wherever it currently is, which is
+    exactly the property socket-level timeouts don't have here. Main-thread
+    only, by construction of signal.alarm() -- true for every caller in this
+    file (check_once() runs synchronously from --once or from run()'s own
+    loop, never from a worker thread). Restores the previous SIGALRM handler
+    and cancels the pending alarm on every exit path (normal, exception, or
+    the timeout itself), so this can never leave a stray alarm armed against
+    unrelated code that runs later in the same process."""
+    if not hasattr(signal, "SIGALRM"):
+        # Defensive only -- every platform this project runs findmy_watcher.py
+        # on (macOS cron) has SIGALRM. Never let the safety mechanism itself
+        # be a new crash on some hypothetical other platform.
+        yield
+        return
+
+    def _on_alarm(signum, frame):
+        raise WatcherTimeout(f"exceeded {seconds}s hard timeout")
+
+    previous_handler = signal.signal(signal.SIGALRM, _on_alarm)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
+def _lock_path(cfg: dict) -> Path:
+    return _data_dir(cfg) / ".findmy_watcher.lock"
+
+
+def _try_acquire_lock(cfg: dict):
+    """Non-blocking exclusive flock so an overlapping cron tick SKIPS
+    immediately instead of piling up behind a run that's still active (or
+    hung -- see the module docstring). Returns an open file handle to hold
+    for the life of this run, or None if another run already holds it.
+    flock is released automatically by the kernel when the holding process
+    exits for ANY reason -- normal return, exception, SIGKILL, even the
+    hard timeout deciding to os._exit() -- so a lock can never be left
+    stuck by a process that no longer exists, only by one that's genuinely
+    still running (or, before this fix existed, hung).
+    Confirmed live (2026-09-28): 4 --once invocations were stuck
+    simultaneously, oldest 10 days, precisely because nothing before this
+    stopped cron from starting a brand new one every 10 minutes on top of
+    the last."""
+    path = _lock_path(cfg)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(path, "a+")
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        try:
+            fh.close()
+        except Exception:
+            pass
+        return None
+    try:
+        fh.seek(0)
+        fh.truncate()
+        fh.write(f"{os.getpid()} {datetime.now().isoformat()}\n")
+        fh.flush()
+    except Exception:
+        pass  # best-effort bookkeeping only -- never blocks holding the lock
+    return fh
+
+
+def _release_lock(fh) -> None:
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        fh.close()
+    except Exception:
+        pass
 
 
 def _data_dir(cfg: dict) -> Path:
@@ -169,12 +300,14 @@ def setup(cfg: dict):
 
 class FindMyWatcher:
     def __init__(self, cfg: dict, url: str, api_key: str,
-                 device_name_contains: str, check_seconds: int = 600):
+                 device_name_contains: str, check_seconds: int = 600,
+                 check_timeout_seconds: int = _DEFAULT_CHECK_TIMEOUT_SECONDS):
         self.cfg = cfg
         self.base = url.rstrip("/")
         self.api_key = api_key
         self.device_name_contains = device_name_contains.lower()
         self.check_seconds = check_seconds
+        self.check_timeout_seconds = check_timeout_seconds
 
     def _rpc(self, name: str, params: dict):
         import urllib.request
@@ -324,12 +457,38 @@ class FindMyWatcher:
         LaunchAgent-loop mode, kept for now in case cron ever needs
         replacing) and the cron entry point (--once, see main()) -- cron
         itself handles the every-check_seconds scheduling in that mode, so
-        this just does a single cycle and returns."""
+        this just does a single cycle and returns.
+
+        Wrapped in a hard overall timeout (see module docstring's GAP FOUND
+        note and _hard_timeout()'s own docstring) -- bounds the WHOLE cycle
+        regardless of where inside it a call hangs, not just the pieces that
+        already had their own socket-level timeout. On a timeout (or any
+        other exception) this returns WITHOUT calling
+        eg_report_findmy_status() -- last_seen is only computed and only
+        reported inside the same try, so a timed-out/failed cycle can never
+        be read downstream as a confirmed on/off value. Server-side,
+        findmy_reported_at simply stays exactly as stale as it already was:
+        eg_check_phone() branch (e) treats prolonged staleness as its own
+        backstop condition, and eg_on_red()'s fm_watcher_healthy check
+        already refuses to treat a stale findmy_last_seen as corroborating
+        evidence either way (see supabase/findmy_ToS_gap_and_stale_
+        backstop.sql) -- both existed before this fix and are unchanged by
+        it; this fix just makes sure a timeout actually reaches that
+        existing "unknown, not confirmed" path instead of hanging forever
+        and never reaching it at all."""
         try:
-            last_seen = self._find_my_last_seen()
-            if last_seen is not None:
-                self._rpc("eg_report_findmy_status",
-                          {"p_last_seen": last_seen.isoformat()})
+            with _hard_timeout(self.check_timeout_seconds):
+                last_seen = self._find_my_last_seen()
+                if last_seen is not None:
+                    self._rpc("eg_report_findmy_status",
+                              {"p_last_seen": last_seen.isoformat()})
+        except WatcherTimeout as e:
+            print(f"[findmy_watcher] {datetime.now().isoformat()} TIMED "
+                  f"OUT -- {e} -- aborting this cycle, nothing reported "
+                  f"(findmy_reported_at stays exactly as stale as it was; "
+                  f"stale is never read as a confirmed on/off value -- see "
+                  f"eg_check_phone() branch (e) and eg_on_red()'s "
+                  f"fm_watcher_healthy check)", flush=True)
         except Exception as e:
             # A bad check must never kill the caller -- same rule as every
             # other background watcher in this project.
@@ -383,11 +542,28 @@ def main():
         cfg=cfg, url=sb["url"], api_key=sb["api_key"],
         device_name_contains=fm.get("device_name_contains", "iPhone"),
         check_seconds=int(fm.get("check_seconds", 600)),
+        check_timeout_seconds=int(fm.get("check_timeout_seconds",
+                                          _DEFAULT_CHECK_TIMEOUT_SECONDS)),
     )
-    if args.once:
-        watcher.check_once()
-    else:
-        watcher.run()
+    # Non-blocking lock covers BOTH entry points (see _try_acquire_lock()'s
+    # docstring) -- --once is cron's mode and the one that was actually
+    # found piling up, but run() (the legacy LaunchAgent loop, kept for now)
+    # gets the same protection for free rather than leaving it exposed to
+    # the identical class of bug if it's ever used again.
+    lock = _try_acquire_lock(cfg)
+    if lock is None:
+        print(f"[findmy_watcher] {datetime.now().isoformat()} SKIPPED -- "
+              f"a previous run is still active (non-blocking lock held) -- "
+              f"exiting immediately instead of piling up; see "
+              f"{_lock_path(cfg)} for the pid that holds it", flush=True)
+        return
+    try:
+        if args.once:
+            watcher.check_once()
+        else:
+            watcher.run()
+    finally:
+        _release_lock(lock)
 
 
 if __name__ == "__main__":

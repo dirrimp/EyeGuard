@@ -46,6 +46,17 @@ Verify it's actually running (wait for the next :00/:10/:20/... mark, then):
 
     tail -5 "/Users/jonahdirrim/Library/Application Support/EyeGuard-data/findmy_watcher.out.log"
 
+Hardening (2026-09-28): each --once run now (a) holds a non-blocking flock
+for its whole run, so if a previous run is still active (or hung) the next
+cron tick logs "SKIPPED" and exits immediately instead of piling up, and
+(b) is bounded by findmy.check_timeout_seconds (default 120s, config.yaml)
+regardless of where inside it a call blocks. Found live: 4 invocations were
+stuck simultaneously before this, oldest 10 days
+(`ps -axo pid,etime,command | grep run_findmy` to check). Those specific
+stuck processes predate the lock file and aren't holding it -- killing them
+(if desired) is a separate, one-time manual step, not something this fix
+does automatically.
+
 One-time interactive login is UNCHANGED -- still needs to be run directly,
 by Jonah, in a real terminal (needs a 2FA code from his own phone):
 
