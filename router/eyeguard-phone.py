@@ -51,6 +51,13 @@ TERMS = [t.lower() for t in CONF.get("explicit_terms", [])]
 NOISE = [n.lower() for n in CONF.get("noise_domains", [])]
 APP_MAP = {k.lower(): v for k, v in CONF.get("app_map", {}).items()}
 DARK = int(CONF.get("dark_buffer_seconds", 30))
+# Network-transition grace (2026-09-28) -- see heartbeat_loop()'s own comment
+# block for the full false-alarm evidence and reasoning. Extra tolerance
+# granted ONLY while the most recent confirmed-alive signal was a HOME one
+# (ping/DNS on HOME_IFACE) and nothing has confirmed either home or away
+# since -- i.e. only during the specific transition-away-from-home window,
+# never for a phone that was already away and then goes dark.
+TRANSITION_GRACE = int(CONF.get("transition_grace_seconds", 40))
 GREEN_THROTTLE = int(CONF.get("green_repeat_seconds", 900))
 # LAN sleep-signal relay (2026-09-04) -- see sleep_relay_loop()'s own
 # docstring below and eyeguard/session_watcher.py's SleepWatcher for the
@@ -83,7 +90,14 @@ QUERY_RE = re.compile(r"\d+\+\s+\S+\?\s+(\S+)\.\s+\(\d+\)")
 
 _LOCK = threading.Lock()
 _STATE = {"last_activity": time.time(), "last_rx": -1, "dark_alerted": False,
-          "green_seen": {}}
+          "green_seen": {},
+          # Split out of last_activity (2026-09-28) so heartbeat_loop() can
+          # tell WHICH side last confirmed alive, not just when -- see its
+          # own comment block. Both start equal to last_activity at boot
+          # (a tie, not "home more recent"), so a fresh start/restart grants
+          # no transition grace it can't actually justify yet.
+          "last_home_seen": time.time(), "last_wg_seen": time.time(),
+          "transition_grace_logged": False}
 # Last heartbeat actually SENT to Supabase -- see REPORT_SECONDS. active=None
 # forces a report on the very first loop iteration, so a fresh start (or a
 # service restart) always checks in immediately rather than waiting.
@@ -368,9 +382,18 @@ def classify(raw_name):
 
 # ---- capture ---------------------------------------------------------------
 
-def _mark_alive():
+def _mark_alive(source):
+    """source: 'home' or 'wg' -- which capture interface saw this packet.
+    Feeds both the combined last_activity (unchanged dark-detection math)
+    and the per-source timestamp heartbeat_loop()'s transition grace uses to
+    tell a home-departure gap apart from a genuinely-already-away outage."""
+    now = time.time()
     with _LOCK:
-        _STATE["last_activity"] = time.time()
+        _STATE["last_activity"] = now
+        if source == "home":
+            _STATE["last_home_seen"] = now
+        elif source == "wg":
+            _STATE["last_wg_seen"] = now
 
 
 def _handle_query(raw_name):
@@ -393,9 +416,11 @@ def _handle_query(raw_name):
         "is_nudity": False})
 
 
-def capture_loop(iface, host_ip):
+def capture_loop(iface, host_ip, source):
     """Runs forever: streams tcpdump for one interface, respawning it if it
-    ever exits (interface flap, transient error)."""
+    ever exits (interface flap, transient error). `source` ('home'/'wg')
+    identifies which liveness bucket this interface's packets count toward
+    -- see _mark_alive()."""
     filt = f"udp dst port 53 and src host {host_ip}"
     while True:
         try:
@@ -404,7 +429,7 @@ def capture_loop(iface, host_ip):
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 text=True, bufsize=1)
             for line in proc.stdout:
-                _mark_alive()  # any packet at all proves the phone/tunnel is up
+                _mark_alive(source)  # any packet at all proves the phone/tunnel is up
                 m = QUERY_RE.search(line)
                 if m:
                     _handle_query(m.group(1))
@@ -633,6 +658,54 @@ def tor_syn_loop(iface, host_ip):
 
 # ---- liveness / heartbeat ---------------------------------------------------
 
+def _evaluate_liveness(state, now, ping_ok, rx, dark, grace):
+    """Pure decision core of heartbeat_loop() -- mutates `state` (the
+    caller's _STATE dict, already under _LOCK) and returns
+    (fire_dark, dark_secs, active, log_line_or_None). No I/O, no subprocess,
+    no network -- kept separate from heartbeat_loop()'s actual polling and
+    reporting specifically so it's unit-testable
+    (tests/test_phone_dark_transition.py) without mocking tcpdump/ping/awg.
+    See heartbeat_loop()'s own docstring for the full reasoning."""
+    if ping_ok:
+        state["last_activity"] = now
+        state["last_home_seen"] = now
+    if rx is not None and rx > state["last_rx"]:
+        state["last_activity"] = now
+        state["last_wg_seen"] = now
+    if rx is not None:
+        state["last_rx"] = rx
+    dark_secs = now - state["last_activity"]
+    recently_left_home = (
+        state["last_home_seen"] > state["last_wg_seen"]
+        and (now - state["last_home_seen"]) <= (dark + grace))
+    threshold = dark + grace if recently_left_home else dark
+    was_alerted = state["dark_alerted"]
+    fire_dark = dark_secs > threshold and not was_alerted
+    if fire_dark:
+        state["dark_alerted"] = True
+    elif dark_secs <= dark and was_alerted:
+        state["dark_alerted"] = False
+    active = not state["dark_alerted"]
+
+    # Log every suppression (once per occurrence, not every
+    # HEARTBEAT_SECONDS tick while it holds) so the grace is auditable, not
+    # silent tolerance -- same pattern as _log_liveness_failure elsewhere in
+    # this file.
+    log_line = None
+    in_grace_window = recently_left_home and dark < dark_secs <= threshold
+    if in_grace_window and not state["transition_grace_logged"]:
+        log_line = (f"[eyeguard-phone] {now_iso()} phone-dark threshold "
+                     f"extended to {threshold}s (left home "
+                     f"{int(now - state['last_home_seen'])}s ago, no WG "
+                     f"confirmation yet) -- would have fired at the normal "
+                     f"{dark}s")
+        state["transition_grace_logged"] = True
+    elif not in_grace_window:
+        state["transition_grace_logged"] = False
+
+    return fire_dark, dark_secs, active, log_line
+
+
 def heartbeat_loop():
     """phone liveness = ANY of three signals, whichever is fresher:
       (a) DNS packets seen on the home interface -> covers active browsing
@@ -645,25 +718,63 @@ def heartbeat_loop():
           dark.
     OR-combining them means home browsing, home idle, and away-asleep-on-
     tunnel all read alive; only genuine silence on ALL THREE (phone off,
-    off-network entirely, or VPN killed while away) trips phone-dark."""
+    off-network entirely, or VPN killed while away) trips phone-dark.
+
+    NETWORK-TRANSITION GRACE (2026-09-28). Confirmed live: 17 phone-dark
+    flags 2026-09-22 through 2026-09-27 (queried directly from the flags
+    table via the anon key), EVERY one reading "silent for 168s" or "silent
+    for 169s" -- not a spread of durations the way a real, arbitrarily-timed
+    outage would produce, but a near-fixed ~168-169s window repeating across
+    6 separate days at different times of day. Matches Jonah's own lead
+    (leaving home, the phone should have been online the whole time) exactly:
+    when the phone leaves home Wi-Fi, ALL THREE signals above go silent
+    simultaneously for the real duration of the handoff -- no more DNS/ping
+    on the home interface (phone's gone), and no WG traffic yet either,
+    because the on-demand tunnel hasn't associated/handshaked on the new
+    network yet. That handoff (cellular acquisition + iOS's on-demand VPN
+    evaluation + the WireGuard handshake itself) is genuinely invisible to
+    every signal this router can observe. Checked and ruled out a simpler
+    explanation first: the phone's WG peer (10.1.0.2) IS correctly
+    configured with Persistent Keepalive=25 on the router side (`uci show
+    wireguard_server`, confirmed live) -- once the tunnel connects it stays
+    reliably alive, so the false alarm is specifically the ~168-169s BEFORE
+    that first handshake, not a keepalive gap once connected.
+
+    Fix: grant DARK + TRANSITION_GRACE (not DARK) as the firing threshold,
+    but ONLY while the most recent confirmed-alive signal (of either kind)
+    was specifically a HOME one and nothing has reconfirmed home OR away
+    since -- i.e. only for the window immediately following a departure
+    from home. The instant either side reconfirms (home ping/DNS resumes --
+    it wasn't really a departure -- or WG activity/handshake lands -- the
+    transition completed), last_home_seen/last_wg_seen move and this
+    condition no longer holds on the next tick. A phone that was ALREADY
+    away and then goes dark is completely unaffected: its last confirmed
+    signal was a WG one, so this branch never engages and the original
+    DARK=150s threshold applies exactly as before -- unchanged, same
+    urgency as today.
+
+    !!! REDUCES COVERAGE for one narrow case, disclosed in this PR: the
+    router cannot distinguish "phone is mid-transition, will reconnect in
+    ~169s" from "phone was switched off/killed at the exact moment it left
+    home" -- both look identical from here (last signal was home, then
+    silence). So a genuine dark event that begins WHILE AT HOME is delayed
+    by up to TRANSITION_GRACE seconds (default 40s -> 190s total) versus
+    before this fix. An event that begins while already away is not
+    delayed at all. Every suppression is logged (see below), not silent.
+
+    The actual decision math lives in _evaluate_liveness() -- a pure
+    function of (state, now, ping_ok, rx) with no I/O -- so it can be unit
+    tested directly (tests/test_phone_dark_transition.py) without mocking
+    subprocess/tcpdump/ping."""
     while True:
         rx = wg_rx_bytes()
         ping_ok = home_ping_alive()
         with _LOCK:
-            if ping_ok:
-                _STATE["last_activity"] = time.time()
-            if rx is not None and rx > _STATE["last_rx"]:
-                _STATE["last_activity"] = time.time()
-            if rx is not None:
-                _STATE["last_rx"] = rx
-            dark_secs = time.time() - _STATE["last_activity"]
-            was_alerted = _STATE["dark_alerted"]
-            fire_dark = dark_secs > DARK and not was_alerted
-            if fire_dark:
-                _STATE["dark_alerted"] = True
-            elif dark_secs <= DARK and was_alerted:
-                _STATE["dark_alerted"] = False
-            active = not _STATE["dark_alerted"]
+            fire_dark, dark_secs, active, log_line = _evaluate_liveness(
+                _STATE, time.time(), ping_ok, rx, DARK, TRANSITION_GRACE)
+
+        if log_line:
+            print(log_line, flush=True)
 
         if fire_dark:
             sb_post("/rest/v1/flags", {
@@ -958,10 +1069,10 @@ def main():
     threads = []
     if HOME_IP:
         threads.append(threading.Thread(target=capture_loop,
-                                        args=(HOME_IFACE, HOME_IP), daemon=True))
+                                        args=(HOME_IFACE, HOME_IP, "home"), daemon=True))
     if WG_IFACE and WG_IP:
         threads.append(threading.Thread(target=capture_loop,
-                                        args=(WG_IFACE, WG_IP), daemon=True))
+                                        args=(WG_IFACE, WG_IP, "wg"), daemon=True))
     if HOME_IP:
         threads.append(threading.Thread(target=doh_syn_loop,
                                         args=(HOME_IFACE, HOME_IP), daemon=True))
