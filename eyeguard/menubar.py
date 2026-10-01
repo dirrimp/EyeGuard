@@ -111,6 +111,13 @@ class EyeGuardApp(rumps.App):
         self._ocr_min = int(self._text.get("ocr_min_terms", 2))
         self._text_terms = [t for t in self._text.get("terms", [])]
         self._last_signal_loc = None
+        # Explicit URL/search hits are RED (2026-10-01). At most one RED per
+        # signal_red_repeat_seconds so one search session (every result page is
+        # a new URL) is one email, not a burst; hits inside that window are
+        # still logged YELLOW exactly as before, so nothing is dropped.
+        self._last_signal_red = 0.0
+        self._signal_red_repeat = int(
+            self._text.get("signal_red_repeat_seconds", 600))
         self._mem_guard = self.cfg.get("memory_guard", {})
         self._mem_guard_on = bool(self._mem_guard.get("enabled"))
         self._mem_guard_secs = int(self._mem_guard.get("check_seconds", 1800))
@@ -823,11 +830,18 @@ class EyeGuardApp(rumps.App):
                             hits = match_terms(hay, self._text_terms)
                             loc = actx.get("url") or actx.get("window_title")
                             if hits and loc != self._last_signal_loc:
+                                now4 = time.time()
+                                red = (now4 - self._last_signal_red
+                                       >= self._signal_red_repeat)
                                 uploader and uploader.enqueue(
-                                    logger.log_text(hits, "url", actx))
-                                self._record_flag(Verdict.ALERT, actx)
+                                    logger.log_text(hits, "url", actx, red=red))
+                                self._record_flag(
+                                    Verdict.FLAGGED if red else Verdict.ALERT, actx)
+                                if red:
+                                    self._last_signal_red = now4
                                 self._last_signal_loc = loc
-                                print(f"[signal] explicit URL/search {hits[:4]}",
+                                print(f"[signal] explicit URL/search {hits[:4]} "
+                                      f"({'RED' if red else 'yellow, within repeat window'})",
                                       flush=True)
                             elif not hits:
                                 self._last_signal_loc = None
