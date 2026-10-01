@@ -100,7 +100,10 @@ begin
       'to',   jsonb_build_array('jadadirrim@pm.me'),          -- <-- CONFIRM
       'subject', subject, 'html', html));
 end $$;
-revoke all on function public.eg_send_email_jada(text, text) from public;
+-- Supabase also grants EXECUTE to anon/authenticated directly, so `from public`
+-- alone leaves this callable with the public anon key (fixed 2026-10-01).
+revoke execute on function public.eg_send_email_jada(text, text)
+  from public, anon, authenticated, service_role;
 
 -- ---- 4. email on Jada's-phone events --------------------------------------
 -- A second AFTER INSERT trigger on flags, restricted by WHEN to her device's
@@ -166,6 +169,9 @@ begin
   end if;
   -- offline_alerted is cleared by the next heartbeat (eg_phone_heartbeat_jada).
 end $$;
+
+revoke execute on function public.eg_check_phone_jada()
+  from public, anon, authenticated, service_role;
 
 select cron.unschedule('eyeguard-phone-monitor-jada')
   where exists (select 1 from cron.job where jobname = 'eyeguard-phone-monitor-jada');

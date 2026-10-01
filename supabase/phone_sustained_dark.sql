@@ -104,7 +104,8 @@ begin
         end,
         to_char(p.last_seen at time zone 'America/New_York', 'Mon DD, HH12:MI AM')));
 end $$;
-revoke all on function public.eg_check_phone_sustained_dark() from public;
+revoke execute on function public.eg_check_phone_sustained_dark()
+  from public, anon, authenticated, service_role;
 
 select cron.unschedule('eyeguard-phone-sustained-dark')
   where exists (select 1 from cron.job where jobname = 'eyeguard-phone-sustained-dark');
