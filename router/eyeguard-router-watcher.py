@@ -66,6 +66,10 @@ WATCHED_SCRIPT = "/usr/bin/eyeguard-phone.py"
 # that file and must never be read).
 CONNLOG_FILES = {"connlog.sh": "/usr/bin/connlog.sh",
                  "connlog.init": "/etc/init.d/connlog"}
+# Second phone instance (2026-10-01, Jada's phone) -- see phone_instances().
+JADA_CONF = "/etc/eyeguard/phone-jada.json"
+JADA_INIT_NAME = "eyeguard-phone-jada.init"
+JADA_INIT_PATH = "/etc/init.d/eyeguard-phone-jada"
 CONNLOG_DIR = CONF.get("connlog_dir", "/tmp/connlog")
 CONNLOG_STALE_SECONDS = int(CONF.get("connlog_stale_seconds", 300))
 CONNLOG_CONSECUTIVE = 2          # checks in a row before alerting (~10 min)
@@ -220,13 +224,14 @@ _CONNLOG_BAD = [0]
 _CONNLOG_ALERTED = [False]
 
 
-def _post_flag(detail: str):
+def _post_flag(detail: str, what: str = "router connection log",
+               title: str = "Router connection log"):
     """Red tamper flag through the existing anon insert-only flags path (same
     shape as eyeguard-phone.py's _router_tamper_flag). No SQL needed."""
     from datetime import datetime, timezone
     body = {"flagged_at": datetime.now(timezone.utc).isoformat(),
-            "verdict": "flagged", "reason": f"tamper: router connection log -- {detail}",
-            "app": "Router", "url": None, "window_title": "Router connection log",
+            "verdict": "flagged", "reason": f"tamper: {what} -- {detail}",
+            "app": "Router", "url": None, "window_title": title,
             "grade": "Likely", "risk": "high", "is_nudity": False}
     _, code = _curl_code([f"{SB}/rest/v1/flags"] + _sb_headers()
                          + ["-X", "POST", "-d", json.dumps(body)])
@@ -266,15 +271,98 @@ def _check_connlog(manifest) -> bool:
     return tampered
 
 
-def _phone_process_running() -> bool | None:
-    """None on a lookup failure (never treated as a signal -- a transient ps
-    hiccup shouldn't read as the process being down)."""
+def phone_instances(ps_out: str) -> tuple[bool, bool]:
+    """Pure. -> (primary_running, jada_running) from `ps w` output.
+
+    Since 2026-10-01 eyeguard-phone.py can run twice: the primary (Jonah's
+    phone, no arguments) and a secondary for Jada's phone, started with
+    `--conf /etc/eyeguard/phone-jada.json`. The old check ("is the script name
+    anywhere in ps") would have let a live secondary hide a dead primary, so
+    the two are matched separately: primary = a line with the script and NO
+    --conf; secondary = a line with the script and its own config path."""
+    primary = jada = False
+    for line in ps_out.splitlines():
+        if "eyeguard-phone.py" not in line:
+            continue
+        if JADA_CONF in line:
+            jada = True
+        elif "--conf" not in line:
+            primary = True
+    return primary, jada
+
+
+def _ps() -> str | None:
     try:
-        out = subprocess.run(["ps", "w"], capture_output=True, text=True,
-                             timeout=10).stdout
+        return subprocess.run(["ps", "w"], capture_output=True, text=True,
+                              timeout=10).stdout
     except Exception:
         return None
-    return "eyeguard-phone.py" in out
+
+
+def _phone_process_running() -> bool | None:
+    """The PRIMARY instance. None on a lookup failure (never treated as a
+    signal -- a transient ps hiccup shouldn't read as the process being down)."""
+    out = _ps()
+    if out is None:
+        return None
+    return phone_instances(out)[0]
+
+
+def evaluate_jada(running, init_enabled, uptime):
+    """Pure. -> list of problem strings for the second instance (empty =
+    healthy). running None = lookup failure, never a signal."""
+    if uptime is not None and uptime < BOOT_GRACE_SECONDS:
+        return []
+    problems = []
+    if running is False:
+        problems.append("the monitor for Jada's phone is not running")
+    if not init_enabled:
+        problems.append("the monitor for Jada's phone is not enabled at boot")
+    return problems
+
+
+_JADA_BAD = [0]
+_JADA_ALERTED = [False]
+
+
+def _check_jada(manifest) -> bool:
+    """Second instance (Jada's phone). Required ONLY if the published manifest
+    lists its init script -- same server-side rule as connlog, so the
+    requirement can't be dropped by editing a local file. -> True if the init
+    script's hash mismatches the manifest (reported through script_tampered).
+    Not-running / not-enabled raise the no-SQL tamper flag, debounced (2 checks
+    in a row) and once per outage."""
+    if not manifest or JADA_INIT_NAME not in manifest:
+        return False
+    tampered = False
+    problems = []
+    live = _file_hash(JADA_INIT_PATH)
+    if live is None:
+        problems.append(f"{JADA_INIT_PATH} is missing")
+    elif live != manifest[JADA_INIT_NAME]:
+        tampered = True
+        print(f"[router-watcher] {JADA_INIT_NAME} hash mismatch: expected "
+              f"{manifest[JADA_INIT_NAME]}, got {live}", flush=True)
+    out = _ps()
+    running = None if out is None else phone_instances(out)[1]
+    try:
+        uptime = float(open("/proc/uptime").read().split()[0])
+    except Exception:
+        uptime = None
+    problems += evaluate_jada(running, bool(glob.glob("/etc/rc.d/S*eyeguard-phone-jada")),
+                              uptime)
+    if problems:
+        _JADA_BAD[0] += 1
+        print(f"[router-watcher] jada-phone problems ({_JADA_BAD[0]}): {problems}",
+              flush=True)
+        if _JADA_BAD[0] >= CONNLOG_CONSECUTIVE and not _JADA_ALERTED[0]:
+            if _post_flag("; ".join(problems), what="Jada's phone monitor",
+                          title="Jada's phone monitor"):
+                _JADA_ALERTED[0] = True
+    else:
+        _JADA_BAD[0] = 0
+        _JADA_ALERTED[0] = False
+    return tampered
 
 
 def _check_once() -> tuple[bool, bool]:
@@ -297,6 +385,8 @@ def _check_once() -> tuple[bool, bool]:
     # right after a fresh install, not a signal worth a false alarm over.
 
     if _check_connlog(manifest):
+        script_tampered = True
+    if _check_jada(manifest):
         script_tampered = True
 
     running = _phone_process_running()

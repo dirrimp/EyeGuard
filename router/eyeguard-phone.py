@@ -31,7 +31,32 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 CONF_PATH = os.environ.get("EG_PHONE_CONF", "/etc/eyeguard/phone.json")
+# Second instance (2026-10-01, Jada's phone): `--conf <path>` on the command
+# line wins over the env var. It has to be argv, not env, because BusyBox `ps`
+# shows argv only -- that is how eyeguard-router-watcher.py tells the primary
+# instance (no --conf) from a secondary one, so a live secondary can never
+# mask a dead primary.
+if "--conf" in sys.argv[1:-1]:
+    CONF_PATH = sys.argv[sys.argv.index("--conf") + 1]
 CONF = json.load(open(CONF_PATH))
+# ---- per-device identity (all default to the original single-phone values,
+# so the primary instance's rows are byte-for-byte what they were) ----------
+# device_app:     the `app` column on this device's flags (dashboard label).
+# reason_prefix:  prepended to this device's reasons. The server's eg_on_red()
+#                 keys Jonah's phone logic on reasons STARTING with
+#                 phone-dark/phone-blocked/phone-signal (Find My cross-check,
+#                 phone_status id=1). A second device MUST carry a prefix so its
+#                 events can never be evaluated against Jonah's phone state.
+# heartbeat_rpc:  server RPC for this device's own status row.
+# dark_verdict:   verdict on this device's phone-dark rows.
+# secondary_instance: true = skip the ROUTER-level loops the primary already
+#                 runs (router config tamper check, Tor list refresh, sleep
+#                 relay), which would otherwise double-fire.
+DEVICE_APP = CONF.get("device_app", "iPhone")
+REASON_PREFIX = CONF.get("reason_prefix", "")
+HEARTBEAT_RPC = CONF.get("heartbeat_rpc", "eg_phone_heartbeat")
+DARK_VERDICT = CONF.get("dark_verdict", "flagged")
+SECONDARY = bool(CONF.get("secondary_instance", False))
 # Admin-trust pivot (2026-08-24): Jonah is getting SSH (root shell, not just
 # the router GUI) for network administration -- the same reasoning that
 # moved the Mac off a secret key applies here, since anyone with SSH could
@@ -283,7 +308,7 @@ def sb_phone_heartbeat(active):
     # monitor_beat/last_seen with the SERVER's clock, the same reasoning as
     # the Mac's eg_heartbeat(): no timestamp parameter exists for this
     # script to submit, so it cannot forge one even if it tried.
-    return sb_rpc("eg_phone_heartbeat", {"p_active": active})
+    return sb_rpc(HEARTBEAT_RPC, {"p_active": active})
 
 
 def home_ping_alive():
@@ -455,8 +480,9 @@ def _handle_query(raw_name, suffix=""):
                 return
             _STATE["green_seen"][label] = now
     sb_post("/rest/v1/flags", {
-        "flagged_at": now_iso(), "verdict": verdict, "reason": reason + suffix,
-        "app": "iPhone", "url": None, "window_title": label,
+        "flagged_at": now_iso(), "verdict": verdict,
+        "reason": REASON_PREFIX + reason + suffix,
+        "app": DEVICE_APP, "url": None, "window_title": label,
         "grade": "Likely" if verdict == "flagged" else "Possible",
         "risk": "high" if verdict == "flagged" else "neutral",
         "is_nudity": False})
@@ -539,8 +565,8 @@ def _handle_doh_attempt(ip):
         seen[ip] = now
     sb_post("/rest/v1/flags", {
         "flagged_at": now_iso(), "verdict": "flagged",
-        "reason": f"phone-signal: DNS-over-HTTPS bypass attempt to {ip}",
-        "app": "iPhone", "url": None, "window_title": f"DoH attempt: {ip}",
+        "reason": REASON_PREFIX + f"phone-signal: DNS-over-HTTPS bypass attempt to {ip}",
+        "app": DEVICE_APP, "url": None, "window_title": f"DoH attempt: {ip}",
         "grade": "Likely", "risk": "high", "is_nudity": False})
 
 
@@ -667,8 +693,8 @@ def _handle_tor_attempt(ip):
         seen[ip] = now
     sb_post("/rest/v1/flags", {
         "flagged_at": now_iso(), "verdict": "flagged",
-        "reason": f"phone-signal: Tor connection to guard relay {ip}",
-        "app": "iPhone", "url": None, "window_title": f"Tor guard relay: {ip}",
+        "reason": REASON_PREFIX + f"phone-signal: Tor connection to guard relay {ip}",
+        "app": DEVICE_APP, "url": None, "window_title": f"Tor guard relay: {ip}",
         "grade": "Likely", "risk": "high", "is_nudity": False})
 
 
@@ -826,10 +852,10 @@ def heartbeat_loop():
 
         if fire_dark:
             sb_post("/rest/v1/flags", {
-                "flagged_at": now_iso(), "verdict": "flagged",
-                "reason": f"phone-dark: silent for {int(dark_secs)}s "
+                "flagged_at": now_iso(), "verdict": DARK_VERDICT,
+                "reason": REASON_PREFIX + f"phone-dark: silent for {int(dark_secs)}s "
                           "(VPN off / phone off / no signal)",
-                "app": "iPhone", "url": None, "window_title": "phone went dark",
+                "app": DEVICE_APP, "url": None, "window_title": "phone went dark",
                 "grade": "Likely", "risk": "high", "is_nudity": False})
 
         # Report on the SLOWER REPORT_SECONDS cadence, or immediately whenever
@@ -1248,7 +1274,7 @@ QUERYLOG_XCHECK = QueryLogCrossCheck(QUERYLOG_MAX_LAG,
 def _querylog_flag(detail):
     sb_post("/rest/v1/flags", {
         "flagged_at": now_iso(), "verdict": "flagged",
-        "reason": f"tamper: AdGuard DNS log -- {detail}",
+        "reason": f"tamper: AdGuard DNS log -- {REASON_PREFIX}{detail}",
         "app": "Router", "url": None, "window_title": "AdGuard DNS log health",
         "grade": "Likely", "risk": "high", "is_nudity": False})
 
@@ -1678,9 +1704,20 @@ def sleep_relay_loop():
 
 
 def main():
-    if SLEEP_RELAY_TOKEN:
+    # A secondary instance (another device's config) skips the two ROUTER-level
+    # loops: the primary already runs them, and running them twice would bind
+    # the relay port twice and double every router-tamper alert. Everything
+    # per-device below (captures, DoH, Tor, querylog, connlog, liveness) runs
+    # in every instance. The Tor list refresh also stays on in every instance,
+    # so a secondary is never dependent on the primary being up.
+    if SECONDARY:
+        print(f"[eyeguard-phone] secondary instance for {DEVICE_APP!r} "
+              f"(conf {CONF_PATH}): router config check + sleep relay left to "
+              f"the primary", flush=True)
+    if SLEEP_RELAY_TOKEN and not SECONDARY:
         threading.Thread(target=sleep_relay_loop, daemon=True).start()
-    threading.Thread(target=router_check_loop, daemon=True).start()
+    if not SECONDARY:
+        threading.Thread(target=router_check_loop, daemon=True).start()
     if CONNLOG_IPMAP:
         threading.Thread(target=connlog_loop, daemon=True).start()
         for ip in CONNLOG_IPMAP:
