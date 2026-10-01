@@ -183,6 +183,7 @@ def _card(rec: dict, dt: datetime, report_dir: Path) -> str:
     if red:
         sev_txt = ("Phone" if _r.startswith("phone")
                    else "Tamper" if _r.startswith("tamper")
+                   else "Search" if _r.startswith("signal")
                    else "Nudity" if _r.startswith("nudenet")
                    else "Revealing")
     elif _r.startswith("drm"):

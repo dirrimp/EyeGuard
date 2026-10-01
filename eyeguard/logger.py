@@ -73,18 +73,22 @@ class FlagLogger:
 
     def log_text(self, matched: list[str], source: str,
                  context: dict | None = None, grade: str = "Possible",
-                 risk: str = "neutral") -> dict:
-        """Log an explicit-TEXT flag (YELLOW). `source` is 'screen' (OCR) or
-        'url' (URL/search signal). Imageless — the matched terms + site are the
-        signal; we don't save screenshots of private text."""
+                 risk: str = "neutral", red: bool = False) -> dict:
+        """Log an explicit-TEXT flag. `source` is 'screen' (OCR) or 'url'
+        (URL/search signal). YELLOW by default; `red=True` (2026-10-01, used for
+        explicit URL/search hits) makes it a RED flag, which emails immediately
+        through eg_on_red()'s `signal:` branch. Imageless — the matched terms +
+        site are the signal; we don't save screenshots of private text."""
         ctx = context or {}
+        if red:
+            grade, risk = "Likely", "high"
         if source == "url":
             reason = "signal: explicit term in URL/search — " + ", ".join(matched[:5])
         else:
             reason = "text: explicit text on screen — " + ", ".join(matched[:5])
         record = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "verdict": "alert",
+            "verdict": "flagged" if red else "alert",
             "reason": reason,
             "app": ctx.get("app"),
             "url": ctx.get("url"),
