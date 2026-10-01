@@ -46,11 +46,7 @@ rule that would vanish on reboot. This is what forces every device's DNS
 (including the phone's, even bypass attempts) into the clear, which the phone
 connector's wire-capture design depends on. Router-level DoH proxying
 (`https-dns-proxy`) is not installed; the DoT client (`stubby`) is present but
-`enabled='0'`. **Note (2026-08-05): `Block-DoT` only covers `src=lan` — it does
-NOT cover WireGuard-tunneled traffic (`src=wgserver`).** A device connected
-via the tunnel could currently attempt DoT unblocked; not yet fixed, flagged
-here as a known gap (same fix pattern as `Block-DoH-Providers-WG` below would
-apply — an equivalent `src=wgserver` rule for port 853).
+`enabled='0'`. **Update (2026-09-30): the `src=wgserver` gap is closed.** Rule `wgserver_block_dot` (`src=wgserver`, `dest=wan`, `proto='tcp udp'`, `dest_port=853`, `REJECT`) mirrors `Block-DoT`. It was TCP-only until 2026-09-30, so UDP 853 (DoQ) from tunnel peers was unblocked; both protocols are now rejected. The iptables rule has no `-o` match, so it also applies to tunnel traffic policy-routed out via wgclient2/3. Backup: `/etc/config/firewall.bak-2026-09-30-dot-udp`.
 
 **DoH (2026-08-05) — honest correction to earlier notes in this file/memory
 that said "DoH already locked down":** that was never actually true as a
