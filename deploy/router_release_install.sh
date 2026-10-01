@@ -73,6 +73,9 @@ home = c.get("home_ip")
 c["connlog_devices"] = {"phone": [i for i in (home, os.environ["PHONE_WG_IP"]) if i],
                         "mac": json.loads(os.environ["MAC"])}
 c["connlog_excluded_ips"] = json.loads(os.environ["EXCL"])
+# AdGuard size_memory was lowered 1000 -> 10 on 2026-10-01 (log now lags ~1 min, verified
+# live), so "the log stopped" can fire after 15 min instead of the 4 h pre-change default.
+c["querylog_max_lag_seconds"] = 900
 json.dump(c, open(p + ".new", "w"), indent=2)
 os.replace(p + ".new", p)
 print("phone.json: router_script_version=%s connlog_devices=%s" % (os.environ["V"], c["connlog_devices"]))
