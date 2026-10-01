@@ -61,8 +61,9 @@ echo "== 5. back up + install =="
 $R "V='$V' D='$D' PHONE_WG_IP='$PHONE_WG_IP' MAC='$MAC_WG_IPS' EXCL='$EXCLUDED' sh -s" <<'REMOTE'
 set -e
 S=/tmp/eg-release
+# Never overwrite an existing backup (a same-day re-run would replace the real "before" copy).
 for p in /usr/bin/eyeguard-phone.py /usr/bin/eyeguard-router-watcher.py /usr/bin/connlog.sh /etc/init.d/connlog /etc/eyeguard/phone.json; do
-  [ -f $p ] && cp $p $p.bak-$D-release
+  if [ -f $p ] && [ ! -f $p.bak-$D-release ]; then cp $p $p.bak-$D-release; fi
 done
 python3 - <<'PY'
 import json, os
@@ -92,8 +93,13 @@ REMOTE
 
 echo "== 6. restart services (phone connector last; auto-rollback if it doesn't come up) =="
 $R "D='$D' S=/tmp/eg-release sh -s" <<'REMOTE'
+# BusyBox on this router has no `pkill` (the old `pkill -f 'tcpdump ...'` line failed
+# silently), so stopped instances left their tcpdump children running, re-parented to
+# init. Kill exactly those: tcpdump processes whose parent is pid 1. Live instances'
+# captures (parent = the python process) are never touched.
+reap_orphans() { for p in $(pidof tcpdump); do [ "$(awk '{print $4}' /proc/$p/stat 2>/dev/null)" = 1 ] && kill $p 2>/dev/null; done; return 0; }
 /etc/init.d/connlog restart; sleep 3
-/etc/init.d/eyeguard-phone stop 2>/dev/null; pkill -f 'tcpdump -i .* -l -nn' 2>/dev/null   # orphaned captures (PHONE.md)
+/etc/init.d/eyeguard-phone stop 2>/dev/null; sleep 2; reap_orphans   # orphaned captures (PHONE.md)
 cp $S/eyeguard-phone.py /usr/bin/eyeguard-phone.py && chmod 755 /usr/bin/eyeguard-phone.py
 /etc/init.d/eyeguard-phone start; sleep 12
 if ! ps w | grep -q '[e]yeguard-phone.py'; then
