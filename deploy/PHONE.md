@@ -177,6 +177,28 @@ python3 /usr/bin/eyeguard-phone.py      # run in the foreground, watch the outpu
 - Watch for green-trail noise (CDNs/telemetry) → add those domains to
   `noise_domains` and restart the service.
 
+## AdGuard query-log view + "log stopped" tripwire (2026-09-30)
+
+tcpdump stays the real-time detector. The phone connector *also* tails
+AdGuard's `/etc/AdGuardHome/data/querylog.json` (read directly as root; the
+GL.iNet-hijacked API is not used) for the phone's IPs:
+
+- **Catch-all:** anything AdGuard resolved for the phone is classified like a
+  wire query, whatever transport reached AdGuard. Already-flagged wire queries
+  are not flagged twice; log-only ones say "(via AdGuard log, after the fact)".
+- **Lag:** AdGuard flushes in batches (`size_memory`, 1000 ≈ 40 min here), so
+  the log trails real time. It supplements the wire view, never replaces it.
+- **Tripwires** (red "tamper: AdGuard DNS log" / router flags):
+  logging disabled, file log disabled, or `ignored` domains added
+  (`adguard_querylog_ok`, checked every router cycle); **stalled** (the wire saw
+  the phone but the log has nothing that recent after `querylog_max_lag_seconds`);
+  **missing** (log current but lacks wire queries; log-only until
+  `querylog_missing_alerts` is true).
+- **Prerequisite for encrypted DNS (DoT) to AdGuard:** this must be deployed
+  and watched first; see the DoT proposal.
+
+Tests: `python3 tests/test_adguard_querylog.py`.
+
 ## Known limits (same as the Mac's, honestly)
 - **DoH** would bypass this entirely — you've locked it down at the router
   (Block-DoT rule + forced plaintext DNS). Keep it so; without it, none of
