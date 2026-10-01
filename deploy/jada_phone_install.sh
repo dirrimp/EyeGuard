@@ -88,8 +88,10 @@ echo "== 5. back up + install files + write phone-jada.json =="
 $R "V='$V' D='$D' JADA_WG_IP='$JADA_WG_IP' JADA_HOME_IP='$JADA_HOME_IP' sh -s" <<'REMOTE'
 set -e
 S=/tmp/eg-jada
+# Never overwrite an existing backup: a second run on the same day would otherwise
+# replace the real "before" copy with the already-installed new file (happened 2026-10-01).
 for p in /usr/bin/eyeguard-phone.py /usr/bin/eyeguard-router-watcher.py /etc/eyeguard/phone.json /etc/eyeguard/phone-jada.json /etc/init.d/eyeguard-phone-jada; do
-  [ -f $p ] && cp $p $p.bak-$D-jada
+  if [ -f $p ] && [ ! -f $p.bak-$D-jada ]; then cp $p $p.bak-$D-jada; fi
 done
 JADA_PEER=$(awg show wgserver allowed-ips | awk -v ip="$JADA_WG_IP/32" '$2==ip {print $1}')
 [ -n "$JADA_PEER" ] || { echo "ABORT: could not read Jada's peer key"; exit 1; }
@@ -133,10 +135,15 @@ REMOTE
 
 echo "== 6. restart: primary first (auto-rollback), then Jada's instance, then the watcher =="
 $R "D='$D' S=/tmp/eg-jada sh -s" <<'REMOTE'
+# BusyBox on this router has no `pkill` (the old `pkill -f 'tcpdump ...'` line failed
+# silently), so stopped instances left their tcpdump children running, re-parented to
+# init. Kill exactly those: tcpdump processes whose parent is pid 1. Live instances'
+# captures (parent = the python process) are never touched.
+reap_orphans() { for p in $(pidof tcpdump); do [ "$(awk '{print $4}' /proc/$p/stat 2>/dev/null)" = 1 ] && kill $p 2>/dev/null; done; return 0; }
 primary_up() { ps w | grep '[e]yeguard-phone.py' | grep -qv -- '--conf'; }
 jada_up()    { ps w | grep '[e]yeguard-phone.py' | grep -q 'phone-jada.json'; }
 /etc/init.d/eyeguard-phone-jada stop 2>/dev/null
-/etc/init.d/eyeguard-phone stop 2>/dev/null; pkill -f 'tcpdump -i .* -l -nn' 2>/dev/null   # orphaned captures (PHONE.md)
+/etc/init.d/eyeguard-phone stop 2>/dev/null; sleep 2; reap_orphans   # orphaned captures (PHONE.md)
 cp $S/eyeguard-phone.py /usr/bin/eyeguard-phone.py && chmod 755 /usr/bin/eyeguard-phone.py
 /etc/init.d/eyeguard-phone start; sleep 12
 if ! primary_up; then
@@ -155,7 +162,9 @@ if ! jada_up; then
   /etc/init.d/eyeguard-router-watcher restart; exit 1
 fi
 /etc/init.d/eyeguard-router-watcher restart; sleep 3
+reap_orphans
 echo "--- verify ---"
+echo "orphaned captures left: $(n=0; for p in $(pidof tcpdump); do [ "$(awk '{print $4}' /proc/$p/stat 2>/dev/null)" = 1 ] && n=$((n+1)); done; echo $n) (expect 0)"
 echo "primary: $(ps w | grep '[e]yeguard-phone.py' | grep -cv -- '--conf') proc   jada: $(ps w | grep '[e]yeguard-phone.py' | grep -c 'phone-jada.json') proc   router-watcher: $(ps w | grep -c '[e]yeguard-router-watcher.py') proc"
 logread | grep -E "eyeguard-phone\] secondary instance|router-watcher\]" | tail -4
 echo "Rollback: /etc/init.d/eyeguard-phone-jada stop; /etc/init.d/eyeguard-phone-jada disable; then cp <file>.bak-$D-jada <file> for"
