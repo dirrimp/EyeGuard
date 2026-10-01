@@ -58,6 +58,9 @@
     "t-mobile.com","planningcenteronline.com"],
 
   "_app_map": "Collapse service domains to a readable app name in the feed.",
+  "_querylog": "OPTIONAL (all have defaults). AdGuard query-log reader/watcher. querylog_max_lag_seconds = how far behind real time AdGuard's batched log may run before 'log stopped' alerts (default 14400 while size_memory is 1000; tighten to ~900 after size_memory is lowered). querylog_missing_alerts = email when wire queries are absent from the log (default false = log-only until watched on the live router).",
+  "querylog_max_lag_seconds": 14400,
+  "querylog_missing_alerts": false,
   "app_map": {
     "instagram.com": "Instagram", "tiktok.com": "TikTok", "snapchat.com": "Snapchat",
     "youtube.com": "YouTube", "reddit.com": "Reddit", "twitter.com": "X/Twitter",

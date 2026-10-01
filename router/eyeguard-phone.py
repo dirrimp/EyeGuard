@@ -3,7 +3,8 @@
 
 AdGuard Home's own query-log API is unusable here: GL.iNet's --glinet flag
 hijacks AdGuard's auth, so no credentials (native or added) can read it, and
-its on-disk query log only flushes on shutdown (unusably stale). Instead this
+its on-disk query log is flushed in batches (stale by minutes to tens of
+minutes -- see the querylog section below). So the real-time path instead
 watches the phone's DNS traffic directly off the wire with tcpdump -- the
 router's firewall already forces plaintext DNS (DoT/DoH blocked), so every
 lookup crosses the LAN or the WireGuard tunnel in the clear. That also means
@@ -83,6 +84,19 @@ ROUTER_BASELINE_PATH = Path(CONF.get("router_baseline_file",
 TOR_RELAY_CACHE_PATH = Path(CONF.get("tor_relay_cache_file",
                                      "/etc/eyeguard/tor_relays.json"))
 TOR_REFRESH_SECONDS = int(CONF.get("tor_refresh_seconds", 21600))  # 6h
+# AdGuard query-log reader + health watcher (2026-09-30) -- see the section
+# above querylog_loop(). MAX_LAG is how far behind real time the on-disk log
+# may legitimately run: AdGuard buffers `size_memory` entries (1000 at time
+# of writing, ~40 min at this router's volume) before each flush, so the
+# default is generous; tighten it together with size_memory.
+QUERYLOG_PATH = Path(CONF.get("adguard_querylog_file",
+                              "/etc/AdGuardHome/data/querylog.json"))
+QUERYLOG_MAX_LAG = int(CONF.get("querylog_max_lag_seconds", 14400))
+QUERYLOG_CHECK_SECONDS = int(CONF.get("querylog_check_seconds", 120))
+QUERYLOG_MISSING_THRESHOLD = int(CONF.get("querylog_missing_threshold", 5))
+# The "wire saw it, log didn't" check can only be trusted after it has been
+# watched on the live router; until then it logs but doesn't email.
+QUERYLOG_MISSING_ALERTS = bool(CONF.get("querylog_missing_alerts", False))
 
 # tcpdump's default -nn text output, e.g. "...: 36802+ Type65? ocsp2.apple.com. (33)"
 # -- works for any query type (A/AAAA/PTR/Type65/...) without enumerating them.
@@ -396,7 +410,29 @@ def _mark_alive(source):
             _STATE["last_wg_seen"] = now
 
 
-def _handle_query(raw_name):
+# (client, base_domain) -> last time the live WIRE capture saw it. The AdGuard
+# log reader consults this so a query both paths see is flagged once, not twice.
+_WIRE_SEEN: dict = {}
+_WIRE_SEEN_TTL = 3 * 3600
+
+
+def _wire_seen_record(client, raw_name, now=None):
+    now = now or time.time()
+    with _LOCK:
+        _WIRE_SEEN[(client, base_domain(raw_name))] = now
+        if len(_WIRE_SEEN) > 5000:
+            for k in [k for k, t in _WIRE_SEEN.items() if now - t > _WIRE_SEEN_TTL]:
+                del _WIRE_SEEN[k]
+
+
+def _wire_seen_recently(client, raw_name, now=None):
+    now = now or time.time()
+    with _LOCK:
+        t = _WIRE_SEEN.get((client, base_domain(raw_name)))
+    return t is not None and now - t <= _WIRE_SEEN_TTL
+
+
+def _handle_query(raw_name, suffix=""):
     c = classify(raw_name)
     if not c:
         return
@@ -409,7 +445,7 @@ def _handle_query(raw_name):
                 return
             _STATE["green_seen"][label] = now
     sb_post("/rest/v1/flags", {
-        "flagged_at": now_iso(), "verdict": verdict, "reason": reason,
+        "flagged_at": now_iso(), "verdict": verdict, "reason": reason + suffix,
         "app": "iPhone", "url": None, "window_title": label,
         "grade": "Likely" if verdict == "flagged" else "Possible",
         "risk": "high" if verdict == "flagged" else "neutral",
@@ -432,6 +468,8 @@ def capture_loop(iface, host_ip, source):
                 _mark_alive(source)  # any packet at all proves the phone/tunnel is up
                 m = QUERY_RE.search(line)
                 if m:
+                    _wire_seen_record(host_ip, m.group(1))
+                    QUERYLOG_XCHECK.record_wire(time.time(), host_ip, m.group(1))
                     _handle_query(m.group(1))
             proc.wait()
         except Exception as ex:
@@ -883,6 +921,31 @@ def _adguard_protection_enabled():
     return m.group(1) if m else None
 
 
+def parse_querylog_config(text):
+    """True iff AdGuard's `querylog:` block is logging everything to file:
+    enabled, file_enabled, ignored_enabled false, no `ignored` domains. None
+    if the block can't be found/read (treated as drift, like protection)."""
+    m = re.search(r"^querylog:\s*\n((?:[ \t]+.*\n?|\n)*)", text or "", re.MULTILINE)
+    if not m:
+        return None
+    blk = m.group(1)
+
+    def val(key):
+        mm = re.search(r"^[ \t]+" + key + r":\s*(\S.*?)\s*$", blk, re.MULTILINE)
+        return mm.group(1) if mm else None
+
+    ignored_empty = bool(re.search(r"^[ \t]+ignored:\s*\[\s*\]\s*$", blk, re.MULTILINE))
+    return (val("enabled") == "true" and val("file_enabled") == "true"
+            and val("ignored_enabled") in ("false", None) and ignored_empty)
+
+
+def _adguard_querylog_ok():
+    try:
+        return parse_querylog_config(Path("/etc/AdGuardHome/config.yaml").read_text())
+    except Exception:
+        return None
+
+
 def _wg_peer_pubkeys():
     try:
         out = subprocess.run(["awg", "show", "wgserver", "dump"],
@@ -912,6 +975,7 @@ def router_snapshot():
 
     return {
         "adguard_protection_enabled": _adguard_protection_enabled(),
+        "adguard_querylog_ok": _adguard_querylog_ok(),
         "block_dot_ok": block_dot.get("target") == "REJECT",
         "wan_input_policy": wan_zone.get("input"),
         "dropbear_password_auth": dropbear_main.get("PasswordAuth"),
@@ -926,6 +990,9 @@ def router_snapshot():
 # handled separately below since it's a set, not a scalar.
 _ROUTER_INVARIANTS = [
     ("adguard_protection_enabled", "true", "AdGuard protection was disabled"),
+    ("adguard_querylog_ok", True, "AdGuard query logging was disabled, "
+                                    "filtered or its file log turned off "
+                                    "(EyeGuard's DNS-log view is blind)"),
     ("block_dot_ok", True, "the Block-DoT firewall rule was removed/weakened "
                             "(DNS-over-TLS can now bypass filtering)"),
     ("wan_input_policy", "DROP", "the WAN firewall default-deny policy changed"),
@@ -1005,6 +1072,228 @@ def router_check_loop():
         time.sleep(ROUTER_CHECK_SECONDS)
 
 
+# ---- AdGuard query-log reader + health watcher (2026-09-30) ------------------
+#
+# tcpdump (above) stays the real-time path. This adds a SECOND view of the
+# phone's DNS from AdGuard's own on-disk query log, for two jobs:
+#
+#  1. Catch-all after the fact: whatever AdGuard resolved for the phone is
+#     classified exactly like a wire query, whatever transport the phone used
+#     to reach AdGuard (plain DNS today; DoT/DoH if a listener is ever
+#     enabled). A query the wire path already flagged is NOT flagged twice.
+#
+#  2. Tripwire: "if the logs stop, alert". The log is only trustworthy as a
+#     second view if we know it's alive and complete, so:
+#       - config drift (logging off / file log off / `ignored` domains added)
+#         is a router invariant (adguard_querylog_ok), alerted like any other
+#         router tamper;
+#       - STALLED: the wire saw the phone query more than MAX_LAG ago but the
+#         log has no phone entry that recent -> the log stopped;
+#       - MISSING: the log is current past a wire query but never contains it
+#         -> AdGuard isn't recording everything the phone asks (or the phone
+#         is talking to another resolver). Logs always; emails only if
+#         querylog_missing_alerts is true (shadow period on the live router).
+#
+# The log is flushed in batches (size_memory), so it LAGS real time by minutes
+# to tens of minutes. That's why it supplements tcpdump and never replaces it.
+
+class QueryLogTailer:
+    """Follows AdGuard's querylog.json by byte offset. Starts at EOF (no replay
+    of history at boot), survives rotation (keeps draining the old inode, then
+    reopens the new file from 0), and holds back a partial trailing line."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self._fh = None
+        self._buf = b""
+
+    def _open(self, from_start):
+        self._fh = open(self.path, "rb")
+        if not from_start:
+            self._fh.seek(0, os.SEEK_END)
+        self._buf = b""
+
+    def poll(self):
+        """-> list of complete raw lines (bytes) appended since last poll."""
+        if self._fh is None:
+            try:
+                self._open(from_start=False)
+            except OSError:
+                return []
+        out = []
+        while True:
+            chunk = self._fh.read(1 << 20)
+            if not chunk:
+                break
+            self._buf += chunk
+        *lines, self._buf = self._buf.split(b"\n")
+        out.extend(l for l in lines if l.strip())
+        try:
+            rotated = os.stat(self.path).st_ino != os.fstat(self._fh.fileno()).st_ino
+            truncated = os.stat(self.path).st_size < self._fh.tell()
+        except OSError:
+            return out  # file briefly absent mid-rotation; retry next poll
+        if rotated or truncated:
+            self._fh.close()
+            try:
+                self._open(from_start=True)
+            except OSError:
+                self._fh = None
+        return out
+
+
+def parse_querylog_line(raw):
+    """-> (epoch_ts, client_ip, qname) or None. Tolerates junk lines."""
+    try:
+        d = json.loads(raw)
+        qh, ip, t = d["QH"], d["IP"], d["T"]
+    except Exception:
+        return None
+    if not qh or not ip:
+        return None
+    try:
+        # AdGuard writes RFC3339 with 0-9 fractional digits (it trims trailing
+        # zeros); normalise to exactly 6 for fromisoformat.
+        t = t.replace("Z", "+00:00")
+        t = re.sub(r"\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], t, count=1)
+        ts = datetime.fromisoformat(t).timestamp()
+    except Exception:
+        # Never drop a query over a timestamp quirk -- a dropped explicit
+        # query is a blind spot. Treat it as "just read".
+        ts = time.time()
+    return ts, ip, qh
+
+
+class QueryLogCrossCheck:
+    """Pure (injected time) comparison of wire-seen queries against the log."""
+
+    def __init__(self, max_lag, slack=120, missing_threshold=5, cap=20000):
+        self.max_lag, self.slack = max_lag, slack
+        self.missing_threshold, self.cap = missing_threshold, cap
+        self._lock = threading.Lock()
+        self._pending = []            # [(ts, client, domain)] wire queries awaiting the log
+        self._log = {}                # (client, domain) -> [ts...]
+        self._last_log_t = {}         # client -> newest log entry timestamp
+
+    @staticmethod
+    def _norm(raw_name):
+        return (raw_name or "").rstrip(".").lower()
+
+    def record_wire(self, ts, client, raw_name):
+        d = self._norm(raw_name)   # full name, not base domain: a log that
+        # drops one subdomain must not hide behind a sibling that was logged
+        if not d or is_noise(base_domain(d)):
+            return
+        with self._lock:
+            self._pending.append((ts, client, d))
+            if len(self._pending) > self.cap:
+                del self._pending[: len(self._pending) - self.cap]
+
+    def record_log(self, ts, client, raw_name):
+        d = self._norm(raw_name)
+        if not d:
+            return
+        with self._lock:
+            self._log.setdefault((client, d), []).append(ts)
+            if ts > self._last_log_t.get(client, 0):
+                self._last_log_t[client] = ts
+
+    def evaluate(self, now):
+        """-> {'stalled': [(client, age_s)], 'missing': [(client, domain)]}.
+        Only wire queries older than max_lag are judged (the log may
+        legitimately trail by up to that long)."""
+        stalled, missing, keep = {}, [], []
+        with self._lock:
+            for ts, client, d in self._pending:
+                if now - ts <= self.max_lag:
+                    keep.append((ts, client, d))
+                    continue
+                last = self._last_log_t.get(client)
+                if last is None or last < ts - self.slack:
+                    # the log hasn't reached this (overdue) wire query: stalled.
+                    stalled[client] = max(stalled.get(client, 0), now - ts)
+                    keep.append((ts, client, d))
+                    continue
+                hits = self._log.get((client, d), ())
+                if not any(abs(t - ts) <= self.slack for t in hits):
+                    missing.append((client, d))
+            self._pending = keep
+            horizon = now - 2 * self.max_lag - self.slack
+            for k in list(self._log):
+                self._log[k] = [t for t in self._log[k] if t >= horizon]
+                if not self._log[k]:
+                    del self._log[k]
+        return {"stalled": sorted(stalled.items()), "missing": missing}
+
+
+QUERYLOG_XCHECK = QueryLogCrossCheck(QUERYLOG_MAX_LAG,
+                                     missing_threshold=QUERYLOG_MISSING_THRESHOLD)
+
+
+def _querylog_flag(detail):
+    sb_post("/rest/v1/flags", {
+        "flagged_at": now_iso(), "verdict": "flagged",
+        "reason": f"tamper: AdGuard DNS log -- {detail}",
+        "app": "Router", "url": None, "window_title": "AdGuard DNS log health",
+        "grade": "Likely", "risk": "high", "is_nudity": False})
+
+
+def querylog_loop():
+    """Reads new AdGuard log entries for the phone's IPs, classifies them like
+    wire queries (skipping ones the wire already flagged), and feeds the
+    cross-check. Exceptions never kill the loop."""
+    clients = {ip for ip in (HOME_IP, WG_IP) if ip}
+    tailer = QueryLogTailer(QUERYLOG_PATH)
+    while True:
+        try:
+            for raw in tailer.poll():
+                parsed = parse_querylog_line(raw)
+                if not parsed:
+                    continue
+                ts, ip, qname = parsed
+                if ip not in clients:
+                    continue
+                QUERYLOG_XCHECK.record_log(ts, ip, qname)
+                if not _wire_seen_recently(ip, qname):
+                    _handle_query(qname, suffix=" (via AdGuard log, after the fact)")
+        except Exception as ex:
+            print(f"[eyeguard-phone] querylog_reader {type(ex).__name__}: {ex}",
+                  flush=True)
+        time.sleep(15)
+
+
+def querylog_watch_loop():
+    """Evaluates the cross-check; alerts once per condition until it recovers."""
+    alerted = set()
+    while True:
+        time.sleep(QUERYLOG_CHECK_SECONDS)
+        try:
+            res = QUERYLOG_XCHECK.evaluate(time.time())
+            if res["stalled"]:
+                if "stalled" not in alerted:
+                    who = ", ".join(f"{c} (oldest unlogged query {int(a)}s ago)"
+                                    for c, a in res["stalled"])
+                    _querylog_flag(f"the log has stopped recording the phone: {who}")
+                    alerted.add("stalled")
+            else:
+                alerted.discard("stalled")
+            n = len(res["missing"])
+            if n:
+                sample = ", ".join(sorted({d for _, d in res["missing"]})[:3])
+                print(f"[eyeguard-phone] querylog: {n} wire quer(ies) absent from "
+                      f"AdGuard's log (e.g. {sample})", flush=True)
+            if n >= QUERYLOG_MISSING_THRESHOLD and QUERYLOG_MISSING_ALERTS:
+                if "missing" not in alerted:
+                    _querylog_flag(f"{n} phone DNS queries seen on the wire are "
+                                   f"missing from AdGuard's log")
+                    alerted.add("missing")
+            elif n == 0:
+                alerted.discard("missing")
+        except Exception as ex:
+            print(f"[eyeguard-phone] querylog_watch {type(ex).__name__}: {ex}",
+                  flush=True)
+
+
 def sleep_relay_loop():
     """LAN relay for the Mac's WillSleep signal (2026-09-04).
 
@@ -1065,6 +1354,9 @@ def main():
     if SLEEP_RELAY_TOKEN:
         threading.Thread(target=sleep_relay_loop, daemon=True).start()
     threading.Thread(target=router_check_loop, daemon=True).start()
+    if HOME_IP or WG_IP:
+        threading.Thread(target=querylog_loop, daemon=True).start()
+        threading.Thread(target=querylog_watch_loop, daemon=True).start()
     threading.Thread(target=tor_refresh_loop, daemon=True).start()
     threads = []
     if HOME_IP:
