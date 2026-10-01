@@ -39,7 +39,10 @@ def main():
     # Router connection logger (2026-10-01): hashing these also makes the
     # published manifest the server-side statement that connlog is REQUIRED --
     # the router watcher alerts if it stops, goes stale, or is edited.
-    for name in ("connlog.sh", "connlog.init"):
+    # eyeguard-phone-jada.init (2026-10-01): listing it is likewise the
+    # server-side statement that the second instance (Jada's phone) is
+    # REQUIRED -- the watcher alerts if that instance stops or is disabled.
+    for name in ("connlog.sh", "connlog.init", "eyeguard-phone-jada.init"):
         f = REPO_ROOT / "router" / name
         files[name] = "sha256:" + hashlib.sha256(f.read_bytes()).hexdigest()
 

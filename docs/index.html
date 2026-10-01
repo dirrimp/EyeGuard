@@ -269,16 +269,20 @@ function where(r){
   const loc = r.url||r.window_title;
   return app + (loc? ` — ${esc(loc)}` : "");
 }
+// A second monitored phone (2026-10-01, Jada's) prefixes its reasons with
+// "jada-" so the server never mistakes them for Jonah's phone. Strip it here
+// so the card renders as a Phone card; the device shows via r.app.
+function devReason(x){ x = x||""; return x.startsWith("jada-") ? x.slice(5) : x; }
 function card(r, dt, signed){
   const time = dt.toLocaleTimeString([], {hour:"numeric",minute:"2-digit"});
   if(r.verdict==="clear"){
-    const label = (r.reason||"").startsWith("phone") ? "Phone" : "Browsing";
+    const label = devReason(r.reason).startsWith("phone") ? "Phone" : "Browsing";
     return `<div class="card green"><div class="body"><div class="rtop">`
       + `<span class="time">${time}</span><span class="pill green">${label}</span></div>`
       + `<div class="where">${where(r)}</div></div></div>`;
   }
   const red = r.verdict==="flagged";
-  const rs = r.reason||"";
+  const rs = devReason(r.reason);
   const drm = rs.startsWith("drm"), tamper = rs.startsWith("tamper"), ext = rs.startsWith("extension");
   const vm = rs.startsWith("vm");
   const txt = rs.startsWith("text"), sig = rs.startsWith("signal"), phone = rs.startsWith("phone");
@@ -291,7 +295,7 @@ function card(r, dt, signed){
   const url = r.image_path && signed[r.image_path];
   const img = url? `<img class="thumb" src="${url}" loading="lazy">` : "";
   const detail = esc((rs.split(/—(.+)/)[1]||"").trim());
-  const what = phone ? esc(rs.split(/:(.+)/)[1]||"").trim()+" (iPhone, via network)"
+  const what = phone ? esc(rs.split(/:(.+)/)[1]||"").trim()+" ("+esc(r.app||"iPhone")+", via network)"
                    : tamper ? esc(rs.split(/:(.+)/)[1]||"").trim()+" — a possible attempt to defeat monitoring."
                    : ext ? esc(rs.split(/:(.+)/)[1]||"").trim()+" — review whether it's legitimate."
                    : vm ? esc(rs.split(/:(.+)/)[1]||"").trim()+" — review whether it's legitimate."
