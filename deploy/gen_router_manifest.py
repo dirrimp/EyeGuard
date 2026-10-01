@@ -11,7 +11,7 @@ deploy/publish_router_manifest.sh, which is the only thing that actually
 writes to the router_manifests table (using the maintainer's own
 service_role key -- never present on the router, never in this script).
 
-Only eyeguard-phone.py is covered -- the router watcher's own code isn't
+eyeguard-phone.py, connlog.sh and connlog.init are covered -- the router watcher's own code isn't
 self-checked, same reasoning the Mac's file-integrity watcher doesn't check
 itself either: a check verifying its own integrity is a tautology once an
 attacker can edit both files together anyway. What this catches is the
@@ -36,6 +36,12 @@ def main():
     script = REPO_ROOT / "router" / "eyeguard-phone.py"
     digest = hashlib.sha256(script.read_bytes()).hexdigest()
     files = {"eyeguard-phone.py": f"sha256:{digest}"}
+    # Router connection logger (2026-10-01): hashing these also makes the
+    # published manifest the server-side statement that connlog is REQUIRED --
+    # the router watcher alerts if it stops, goes stale, or is edited.
+    for name in ("connlog.sh", "connlog.init"):
+        f = REPO_ROOT / "router" / name
+        files[name] = "sha256:" + hashlib.sha256(f.read_bytes()).hexdigest()
 
     print(json.dumps({"version": version, "files": files}, indent=2))
 

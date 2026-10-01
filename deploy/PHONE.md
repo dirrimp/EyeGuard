@@ -199,6 +199,43 @@ GL.iNet-hijacked API is not used) for the phone's IPs:
 
 Tests: `python3 tests/test_adguard_querylog.py`.
 
+## Router connection log: unexplained destinations (2026-10-01, LOG-ONLY)
+
+`/usr/bin/connlog.sh` (procd `connlog`, nice 19) streams conntrack NEW/DESTROY for
+tcp/udp to non-private destinations into a tmpfs ring `/tmp/connlog/log.0-3`
+(`<epoch> <N|D> <proto> <src> <dst> <dport> <bytes>`). The phone connector reads it
+for the **allowlisted** devices in `connlog_devices` and asks one question of each NEW
+connection: *did this device resolve that destination IP recently?* "Resolved" =
+A/AAAA in AdGuard's query-log `Answer` field (seeded at boot from the existing log,
+fed live) **and** DNS responses seen on the wire; matched per **device**, not IP
+(home and tunnel IPs are one device). Closes the gap the DoH/Tor lists can't:
+hardcoded IPs, self-hosted/unlisted DoH, VPNs.
+
+- **Log-only.** Posts no flag. It keeps aggregate counters (total, explained,
+  unexplained by size band, direct-port-53/853, top unexplained /16s + ports), printed
+  hourly to `logread` and `/tmp/connlog-stats.json`. Alerting would be a separate PR
+  after the false-positive rate is shown (expected: Apple push/FaceTime IP-literals,
+  Private Relay, STUN/WebRTC, shared CDN IPs, answers older than the window).
+- **Privacy scope.** Allowlist, not denylist. A line whose source IP isn't allowlisted
+  is dropped before anything is derived from it. Jada's phone (10.1.0.5,
+  `connlog_excluded_ips`) is also hard-refused in code even if someone lists it.
+- **Watcher invariant** (`eyeguard-router-watcher.py`, separate process): connlog is
+  *required* iff the published manifest lists `connlog.sh` (so a local config edit
+  can't turn the requirement off). Alerts (red tamper flag via the existing anon
+  insert, no SQL; 2 consecutive checks, once per outage; skipped for 10 min after a
+  reboot) if it isn't running, the log hasn't been written for 5 min, or it isn't
+  enabled at boot; hash mismatch of `connlog.sh`/`connlog.init` reuses the existing
+  script-tampered signal. It reads only file mtimes and `ps`, never log lines.
+- **Honest limits.** A DoH/VPN endpoint reached via a hostname the device resolved
+  through AdGuard counts as *explained* (the DoH/Tor lists still matter). Macs are
+  covered over the tunnel (10.1.0.2/.4) only; a Mac's home LAN IP isn't configured yet.
+  The G11 collector separately pulls the *whole* connlog (all sources) every 15 min --
+  a separate decision, flagged to Agent 01.
+
+Release/install: `deploy/router_release_install.sh <version>` (Jonah runs it after Dad
+publishes the manifest; refuses on any hash mismatch). Tests:
+`python3 tests/test_connlog.py`.
+
 ## Known limits (same as the Mac's, honestly)
 - **DoH** would bypass this entirely — you've locked it down at the router
   (Block-DoT rule + forced plaintext DNS). Keep it so; without it, none of

@@ -97,6 +97,16 @@ QUERYLOG_MISSING_THRESHOLD = int(CONF.get("querylog_missing_threshold", 5))
 # The "wire saw it, log didn't" check can only be trusted after it has been
 # watched on the live router; until then it logs but doesn't email.
 QUERYLOG_MISSING_ALERTS = bool(CONF.get("querylog_missing_alerts", False))
+# Router connection-log watcher (2026-10-01) -- see the connlog section. LOG-ONLY:
+# nothing in it posts a flag. Off unless connlog_devices is set; devices are an
+# explicit ALLOWLIST ({"phone": [ips], ...}) and connlog_excluded_ips (default:
+# Jada's phone peer) can never be added to it, whatever the config says.
+CONNLOG_DIR = Path(CONF.get("connlog_dir", "/tmp/connlog"))
+CONNLOG_EXCLUDED_IPS = set(CONF.get("connlog_excluded_ips", ["10.1.0.5"]))
+CONNLOG_WINDOW = int(CONF.get("connlog_answer_window_seconds", 21600))
+CONNLOG_SETTLE = int(CONF.get("connlog_settle_seconds", 300))
+CONNLOG_REPORT_SECONDS = int(CONF.get("connlog_report_seconds", 3600))
+CONNLOG_STATS_PATH = Path(CONF.get("connlog_stats_file", "/tmp/connlog-stats.json"))
 
 # tcpdump's default -nn text output, e.g. "...: 36802+ Type65? ocsp2.apple.com. (33)"
 # -- works for any query type (A/AAAA/PTR/Type65/...) without enumerating them.
@@ -1106,20 +1116,25 @@ class QueryLogTailer:
         self.path = Path(path)
         self._fh = None
         self._buf = b""
+        self._opened_before = False
 
     def _open(self, from_start):
         self._fh = open(self.path, "rb")
         if not from_start:
             self._fh.seek(0, os.SEEK_END)
         self._buf = b""
+        self._opened_before = True
 
     def poll(self):
         """-> list of complete raw lines (bytes) appended since last poll."""
         if self._fh is None:
             try:
-                self._open(from_start=False)
+                # EOF only on the very first open (no replay of history at
+                # boot); a file that appears later is new content, read it all.
+                self._open(from_start=self._opened_before)
             except OSError:
-                return []
+                self._opened_before = True   # started up with no file: when it
+                return []                    # appears, it is all new content
         out = []
         while True:
             chunk = self._fh.read(1 << 20)
@@ -1244,6 +1259,7 @@ def querylog_loop():
     cross-check. Exceptions never kill the loop."""
     clients = {ip for ip in (HOME_IP, WG_IP) if ip}
     tailer = QueryLogTailer(QUERYLOG_PATH)
+    answer_only = set(CONNLOG_IPMAP) - clients
     while True:
         try:
             for raw in tailer.poll():
@@ -1251,9 +1267,13 @@ def querylog_loop():
                 if not parsed:
                     continue
                 ts, ip, qname = parsed
+                if ip in answer_only:      # connlog device that isn't the phone:
+                    connlog_answers_from_querylog(ip, raw)   # answers only, no flags
+                    continue
                 if ip not in clients:
                     continue
                 QUERYLOG_XCHECK.record_log(ts, ip, qname)
+                connlog_answers_from_querylog(ip, raw)
                 if not _wire_seen_recently(ip, qname):
                     _handle_query(qname, suffix=" (via AdGuard log, after the fact)")
         except Exception as ex:
@@ -1292,6 +1312,313 @@ def querylog_watch_loop():
         except Exception as ex:
             print(f"[eyeguard-phone] querylog_watch {type(ex).__name__}: {ex}",
                   flush=True)
+
+
+# ---- router connection-log watcher: unexplained destinations (2026-10-01) ----
+#
+# The router logs every NEW/DESTROY conntrack event to non-private destinations
+# (/usr/bin/connlog.sh -> /tmp/connlog/log.0-3: `<epoch> <N|D> <proto> <src>
+# <dst> <dport> <bytes>`). This closes the gap DNS/DoH/Tor lists can't: a
+# monitored device connecting to an IP that NOTHING it resolved explains --
+# hardcoded IPs, self-hosted or unlisted DoH, VPNs.
+#
+# "Explained" = that device resolved the destination IP within
+# connlog_answer_window_seconds, from (a) the A/AAAA records in AdGuard's
+# query-log `Answer` field and (b) DNS responses seen on the wire. Devices are
+# matched by DEVICE, not IP (a phone's home and tunnel IPs are one device).
+#
+# LOG-ONLY. It never posts a flag. It keeps aggregate counters (no domains, no
+# per-connection records) so the false-positive rate can be measured before any
+# alerting is proposed in a separate PR.
+#
+# PRIVACY SCOPE: only lines whose source IP is in the configured allowlist are
+# parsed past the first field. Every other line -- including Jada's phone
+# (connlog_excluded_ips, which can't be allowlisted) -- is dropped before any
+# state is touched, logged or stored. The router watcher's freshness check
+# reads only file mtimes, never lines.
+
+import base64
+import ipaddress
+import socket
+import struct
+from collections import Counter
+
+
+def parse_dns_answer(b64):
+    """base64 DNS wire message (AdGuard querylog `Answer`) -> [(ip_str, ttl)].
+    Handles name compression and CNAME chains; ignores everything but A/AAAA.
+    Returns [] on any malformed input (never raises)."""
+    try:
+        msg = base64.b64decode(b64)
+        qd, an = struct.unpack(">HH", msg[4:8])
+
+        def skip_name(i):
+            while True:
+                n = msg[i]
+                if n == 0:
+                    return i + 1
+                if n & 0xC0 == 0xC0:
+                    return i + 2
+                i += 1 + n
+
+        i = 12
+        for _ in range(qd):
+            i = skip_name(i) + 4
+        out = []
+        for _ in range(an):
+            i = skip_name(i)
+            rtype, _cls, ttl, rdlen = struct.unpack(">HHIH", msg[i:i + 10])
+            i += 10
+            rdata = msg[i:i + rdlen]
+            i += rdlen
+            if rtype == 1 and rdlen == 4:
+                out.append((socket.inet_ntop(socket.AF_INET, rdata), ttl))
+            elif rtype == 28 and rdlen == 16:
+                out.append((socket.inet_ntop(socket.AF_INET6, rdata), ttl))
+        return out
+    except Exception:
+        return []
+
+
+# tcpdump -nn response text: "... 3/0/1 CNAME x., A 1.2.3.4, AAAA 2001:db8::1 (80)"
+_WIRE_ANSWER_RE = re.compile(r"\b(?:A|AAAA) ([0-9a-fA-F:.]+)(?=[,\s(])")
+
+
+def parse_wire_answers(line):
+    out = []
+    for m in _WIRE_ANSWER_RE.finditer(line):
+        try:
+            out.append(str(ipaddress.ip_address(m.group(1))))
+        except ValueError:
+            pass
+    return out
+
+
+def build_device_map(devices, excluded):
+    """{'phone': ['192.168.8.153','10.1.0.3']} -> ({ip: device}, [dropped_ips]).
+    Excluded IPs are refused outright (defense in depth for Jada's peer)."""
+    ipmap, dropped = {}, []
+    for dev, ips in (devices or {}).items():
+        for ip in ips:
+            if ip in excluded:
+                dropped.append(ip)
+            else:
+                ipmap[ip] = dev
+    return ipmap, dropped
+
+
+def parse_connlog_line(raw, ipmap):
+    """-> (ts, ev, proto, device, dst, dport, nbytes) or None.
+    The SOURCE is checked first; a line from any IP not in ipmap returns None
+    before anything else is derived from it."""
+    try:
+        f = raw.decode("ascii", "ignore").split()
+        if len(f) < 7:
+            return None
+        device = ipmap.get(f[3])
+        if device is None:
+            return None
+        return (int(f[0]), f[1], f[2], device, f[4], int(f[5]), int(f[6]))
+    except Exception:
+        return None
+
+
+class ConnExplainer:
+    """Pure (injected time) explainer: is each NEW connection's destination
+    something the device resolved recently? Log-only statistics out."""
+
+    def __init__(self, window=21600, settle=300, slack=120, warmup_until=0):
+        self.window, self.settle, self.slack = window, settle, slack
+        self.warmup_until = warmup_until   # conns before this are not judged
+        self._lock = threading.Lock()
+        self._answers = {}      # (device, ip) -> newest answer ts
+        self._pending = []      # [(ts, device, dst, dport, proto)]
+        self._bytes = {}        # (device, dst) -> bytes from D events
+        self.stats = Counter()
+        self.unexplained_prefix = Counter()
+        self.unexplained_port = Counter()
+
+    def add_answer(self, device, ip, ts):
+        with self._lock:
+            k = (device, ip)
+            if ts > self._answers.get(k, 0):
+                self._answers[k] = ts
+
+    def add_event(self, ev):
+        ts, kind, proto, device, dst, dport, nbytes = ev
+        with self._lock:
+            if kind == "N":
+                self._pending.append((ts, device, dst, dport, proto))
+                if len(self._pending) > 50000:
+                    del self._pending[:len(self._pending) - 50000]
+            elif kind == "D" and nbytes:
+                self._bytes[(device, dst)] = self._bytes.get((device, dst), 0) + nbytes
+
+    @staticmethod
+    def _prefix(dst):
+        try:
+            ip = ipaddress.ip_address(dst)
+            return str(ipaddress.ip_network(f"{dst}/{16 if ip.version == 4 else 32}",
+                                            strict=False))
+        except ValueError:
+            return "?"
+
+    def evaluate(self, now):
+        """Judge pending NEW events older than `settle`. Updates counters;
+        returns the number judged."""
+        judged, keep = 0, []
+        with self._lock:
+            for ev in self._pending:
+                ts, device, dst, dport, proto = ev
+                if now - ts < self.settle:
+                    keep.append(ev)
+                    continue
+                if ts < self.warmup_until:
+                    self.stats["skipped_warmup"] += 1
+                    continue
+                judged += 1
+                self.stats["new_total"] += 1
+                if dport in (53, 853):
+                    self.stats["resolver_port"] += 1   # direct DNS/DoT to a public IP
+                a = self._answers.get((device, dst))
+                if a is not None and a - self.slack <= ts <= a + self.window:
+                    self.stats["explained"] += 1
+                else:
+                    self.stats["unexplained"] += 1
+                    self.unexplained_prefix[self._prefix(dst)] += 1
+                    self.unexplained_port[f"{proto}/{dport}"] += 1
+                    b = self._bytes.get((device, dst), 0)
+                    band = "big" if b >= 1_000_000 else "medium" if b >= 50_000 else "tiny"
+                    self.stats[f"unexplained_{band}"] += 1
+            self._pending = keep
+            horizon = now - self.window - self.slack
+            for k in [k for k, t in self._answers.items() if t < horizon]:
+                del self._answers[k]
+            if len(self._bytes) > 20000:
+                self._bytes.clear()
+        return judged
+
+    def snapshot(self, top=5):
+        with self._lock:
+            tot = self.stats["new_total"]
+            return {"new_total": tot, "explained": self.stats["explained"],
+                    "unexplained": self.stats["unexplained"],
+                    "unexplained_pct": round(100.0 * self.stats["unexplained"] / tot, 1) if tot else None,
+                    "unexplained_tiny": self.stats["unexplained_tiny"],
+                    "unexplained_medium": self.stats["unexplained_medium"],
+                    "unexplained_big": self.stats["unexplained_big"],
+                    "resolver_port": self.stats["resolver_port"],
+                    "skipped_warmup": self.stats["skipped_warmup"],
+                    "pending": len(self._pending),
+                    "top_unexplained_prefixes": self.unexplained_prefix.most_common(top),
+                    "top_unexplained_ports": self.unexplained_port.most_common(top)}
+
+
+def seed_answers_from_querylog(explainer, ipmap, path=QUERYLOG_PATH):
+    """Warm the answer index from AdGuard's existing log (current + rotated)
+    so a restart doesn't make every connection look unexplained. Only lines
+    for allowlisted client IPs are decoded."""
+    n = 0
+    for p in (Path(str(path) + ".1"), Path(path)):
+        try:
+            fh = open(p, "rb")
+        except OSError:
+            continue
+        with fh:
+            for raw in fh:
+                parsed = parse_querylog_line(raw)
+                if not parsed or parsed[1] not in ipmap:
+                    continue
+                try:
+                    ans = json.loads(raw).get("Answer")
+                except Exception:
+                    continue
+                for ip, _ttl in parse_dns_answer(ans) if ans else ():
+                    explainer.add_answer(ipmap[parsed[1]], ip, parsed[0])
+                    n += 1
+    return n
+
+
+CONNLOG_IPMAP, _CONNLOG_DROPPED = build_device_map(
+    CONF.get("connlog_devices", {}), CONNLOG_EXCLUDED_IPS)
+CONNLOG_EXPLAINER = ConnExplainer(CONNLOG_WINDOW, CONNLOG_SETTLE,
+                                  warmup_until=time.time() + 600)
+
+
+def connlog_answers_from_querylog(ip, raw):
+    """Feed one AdGuard log line's answers to the explainer (allowlisted IPs only)."""
+    dev = CONNLOG_IPMAP.get(ip)
+    if dev is None:
+        return
+    try:
+        d = json.loads(raw)
+        ts = parse_querylog_line(raw)[0]
+    except Exception:
+        return
+    for aip, _ttl in parse_dns_answer(d.get("Answer") or ""):
+        CONNLOG_EXPLAINER.add_answer(dev, aip, ts)
+
+
+def wire_answers_loop(iface, host_ip):
+    """Real-time DNS answers to one monitored IP, straight off the wire."""
+    dev = CONNLOG_IPMAP.get(host_ip)
+    filt = f"udp src port 53 and dst host {host_ip}"
+    while True:
+        try:
+            proc = subprocess.Popen(["tcpdump", "-i", iface, "-l", "-nn", filt],
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    text=True, bufsize=1)
+            for line in proc.stdout:
+                now = time.time()
+                for aip in parse_wire_answers(line):
+                    CONNLOG_EXPLAINER.add_answer(dev, aip, now)
+            proc.wait()
+        except Exception as ex:
+            print(f"[eyeguard-phone] wire_answers({iface}) {type(ex).__name__}: {ex}",
+                  flush=True)
+        time.sleep(5)
+
+
+def connlog_loop():
+    """Tails the router connection log for allowlisted devices, judges settled
+    NEW connections, and writes hourly AGGREGATE stats (log + tmpfs file)."""
+    if not CONNLOG_IPMAP:
+        return
+    if _CONNLOG_DROPPED:
+        print(f"[eyeguard-phone] connlog: REFUSED excluded IPs in connlog_devices: "
+              f"{_CONNLOG_DROPPED}", flush=True)
+    try:
+        n = seed_answers_from_querylog(CONNLOG_EXPLAINER, CONNLOG_IPMAP)
+        print(f"[eyeguard-phone] connlog: devices={sorted(set(CONNLOG_IPMAP.values()))} "
+              f"seeded {n} DNS answers from AdGuard log (LOG-ONLY)", flush=True)
+    except Exception as ex:
+        print(f"[eyeguard-phone] connlog seed {type(ex).__name__}: {ex}", flush=True)
+    tailers = [QueryLogTailer(CONNLOG_DIR / f"log.{i}") for i in range(4)]
+    last_eval = last_report = time.time()
+    while True:
+        try:
+            for t in tailers:
+                for raw in t.poll():
+                    ev = parse_connlog_line(raw, CONNLOG_IPMAP)
+                    if ev:
+                        CONNLOG_EXPLAINER.add_event(ev)
+            now = time.time()
+            if now - last_eval >= 60:
+                CONNLOG_EXPLAINER.evaluate(now)
+                last_eval = now
+            if now - last_report >= CONNLOG_REPORT_SECONDS:
+                snap = CONNLOG_EXPLAINER.snapshot()
+                snap["at"] = now_iso()
+                print(f"[eyeguard-phone] connlog stats (log-only): {json.dumps(snap)}",
+                      flush=True)
+                try:
+                    CONNLOG_STATS_PATH.write_text(json.dumps(snap))
+                except OSError:
+                    pass
+                last_report = now
+        except Exception as ex:
+            print(f"[eyeguard-phone] connlog {type(ex).__name__}: {ex}", flush=True)
+        time.sleep(5)
 
 
 def sleep_relay_loop():
@@ -1354,6 +1681,11 @@ def main():
     if SLEEP_RELAY_TOKEN:
         threading.Thread(target=sleep_relay_loop, daemon=True).start()
     threading.Thread(target=router_check_loop, daemon=True).start()
+    if CONNLOG_IPMAP:
+        threading.Thread(target=connlog_loop, daemon=True).start()
+        for ip in CONNLOG_IPMAP:
+            iface = HOME_IFACE if not ip.startswith("10.1.") else (WG_IFACE or HOME_IFACE)
+            threading.Thread(target=wire_answers_loop, args=(iface, ip), daemon=True).start()
     if HOME_IP or WG_IP:
         threading.Thread(target=querylog_loop, daemon=True).start()
         threading.Thread(target=querylog_watch_loop, daemon=True).start()
