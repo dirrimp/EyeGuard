@@ -1,0 +1,13 @@
+#!/bin/sh /etc/rc.common
+START=96
+STOP=10
+USE_PROCD=1
+start_service() {
+	procd_open_instance
+	procd_set_param command /bin/nice -n 19 /usr/bin/connlog.sh
+	procd_set_param respawn 3600 10 5
+	procd_close_instance
+}
+stop_service() {
+	killall conntrack 2>/dev/null
+}

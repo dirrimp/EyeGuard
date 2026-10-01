@@ -45,6 +45,7 @@ script tried urllib.request directly and every heartbeat failed with
 """
 from __future__ import annotations
 
+import glob
 import hashlib
 import json
 import os
@@ -58,6 +59,17 @@ API_KEY = CONF["api_key"]
 SB = CONF["supabase_url"].rstrip("/")
 
 WATCHED_SCRIPT = "/usr/bin/eyeguard-phone.py"
+# Router connection log (2026-10-01). Required ONLY if the published manifest
+# lists "connlog.sh" -- the requirement lives server-side (Dad's manifest), so
+# it can't be switched off by editing a local config file. This watcher reads
+# only file mtimes + `ps` for it, never log lines (Jada's phone traffic is in
+# that file and must never be read).
+CONNLOG_FILES = {"connlog.sh": "/usr/bin/connlog.sh",
+                 "connlog.init": "/etc/init.d/connlog"}
+CONNLOG_DIR = CONF.get("connlog_dir", "/tmp/connlog")
+CONNLOG_STALE_SECONDS = int(CONF.get("connlog_stale_seconds", 300))
+CONNLOG_CONSECUTIVE = 2          # checks in a row before alerting (~10 min)
+BOOT_GRACE_SECONDS = 600
 VERSION = CONF.get("router_script_version", "unknown")
 CHECK_SECONDS = int(CONF.get("router_watcher_check_seconds", 300))
 
@@ -154,6 +166,106 @@ def _script_hash() -> str | None:
         return None
 
 
+def _file_hash(path: str) -> str | None:
+    try:
+        return "sha256:" + hashlib.sha256(open(path, "rb").read()).hexdigest()
+    except OSError:
+        return None
+
+
+def evaluate_connlog(running, newest_age, init_enabled, uptime):
+    """Pure. -> list of problem strings (empty = healthy). Inputs: running
+    (bool|None), newest_age = seconds since the newest log file was written
+    (None = no files), init_enabled (bool), uptime seconds (None unknown).
+    None for `running` = lookup failure, never a signal. Skips entirely right
+    after a (weekly) reboot while the log is still spinning up."""
+    if uptime is not None and uptime < BOOT_GRACE_SECONDS:
+        return []
+    problems = []
+    if running is False:
+        problems.append("the connection logger is not running")
+    if newest_age is None:
+        problems.append("the connection log has no files")
+    elif newest_age > CONNLOG_STALE_SECONDS:
+        problems.append(f"the connection log hasn't been written for {int(newest_age)}s")
+    if not init_enabled:
+        problems.append("the connection logger is not enabled at boot")
+    return problems
+
+
+def _connlog_inputs():
+    running = None
+    try:
+        out = subprocess.run(["ps", "w"], capture_output=True, text=True,
+                             timeout=10).stdout
+        running = "conntrack -E" in out and "connlog.sh" in out
+    except Exception:
+        pass
+    mt = []
+    for f in glob.glob(os.path.join(CONNLOG_DIR, "log.*")):
+        try:
+            mt.append(os.stat(f).st_mtime)
+        except OSError:
+            pass
+    newest_age = (time.time() - max(mt)) if mt else None
+    init_enabled = bool(glob.glob("/etc/rc.d/S*connlog"))
+    try:
+        uptime = float(open("/proc/uptime").read().split()[0])
+    except Exception:
+        uptime = None
+    return running, newest_age, init_enabled, uptime
+
+
+_CONNLOG_BAD = [0]
+_CONNLOG_ALERTED = [False]
+
+
+def _post_flag(detail: str):
+    """Red tamper flag through the existing anon insert-only flags path (same
+    shape as eyeguard-phone.py's _router_tamper_flag). No SQL needed."""
+    from datetime import datetime, timezone
+    body = {"flagged_at": datetime.now(timezone.utc).isoformat(),
+            "verdict": "flagged", "reason": f"tamper: router connection log -- {detail}",
+            "app": "Router", "url": None, "window_title": "Router connection log",
+            "grade": "Likely", "risk": "high", "is_nudity": False}
+    _, code = _curl_code([f"{SB}/rest/v1/flags"] + _sb_headers()
+                         + ["-X", "POST", "-d", json.dumps(body)])
+    return code is not None and 200 <= code < 300
+
+
+def _check_connlog(manifest) -> bool:
+    """-> True if a connlog file hash mismatched the manifest (reported through
+    the existing script_tampered boolean). Also raises the no-SQL flag for
+    not-running / stale / not-enabled, debounced and once per outage."""
+    if not manifest or "connlog.sh" not in manifest:
+        return False          # not (yet) required by the published manifest
+    tampered = False
+    problems = []
+    for name, path in CONNLOG_FILES.items():
+        expected = manifest.get(name)
+        if expected is None:
+            continue
+        live = _file_hash(path)
+        if live is None:
+            problems.append(f"{path} is missing")
+        elif live != expected:
+            tampered = True
+            print(f"[router-watcher] {name} hash mismatch: expected {expected}, "
+                  f"got {live}", flush=True)
+    problems += evaluate_connlog(*_connlog_inputs())
+    if problems:
+        _CONNLOG_BAD[0] += 1
+        print(f"[router-watcher] connlog problems ({_CONNLOG_BAD[0]}): {problems}",
+              flush=True)
+        if _CONNLOG_BAD[0] >= CONNLOG_CONSECUTIVE and not _CONNLOG_ALERTED[0]:
+            if _post_flag("; ".join(problems)):
+                _CONNLOG_ALERTED[0] = True
+    else:
+        _CONNLOG_BAD[0] = 0
+        _CONNLOG_ALERTED[0] = False
+    return tampered
+
+
 def _phone_process_running() -> bool | None:
     """None on a lookup failure (never treated as a signal -- a transient ps
     hiccup shouldn't read as the process being down)."""
@@ -183,6 +295,9 @@ def _check_once() -> tuple[bool, bool]:
     # separately escalated -- the router's release process is manual
     # (scp), not auto-deployed, so "no manifest yet" is an expected state
     # right after a fresh install, not a signal worth a false alarm over.
+
+    if _check_connlog(manifest):
+        script_tampered = True
 
     running = _phone_process_running()
     process_down = running is False
