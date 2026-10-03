@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""EyeGuard G11 -> Supabase event reporter (iPhone MDM app events).
+
+Durable-first: every event is written to a queue file (fsync + atomic rename)
+BEFORE any network attempt, so a crash or offline moment never loses it.
+Then the queue is flushed oldest-first. Delivery is idempotent server-side
+(dedupe on type|bundle_id|detected_at), so a retry after an ambiguous failure
+cannot double-email.
+
+Credential file (JSON, must be mode 0600, owned by the running user):
+  /opt/kev/mdm/eg-report.json  (override: EG_REPORT_CONF)
+  {"supabase_url": "https://<ref>.supabase.co", "anon_key": "<public anon key>",
+   "device_token": "<64 hex chars given by Dad>"}
+Queue: /opt/kev/mdm/eg-queue/ (override: EG_REPORT_QUEUE), mode 0700.
+Dead letters (malformed events the server rejects with 400): eg-queue/dead/.
+
+Exit codes:  0 event delivered OR safely queued for retry
+             2 bad input / config problem (event NOT recorded)  -- see stderr
+             3 queued, but a human must act (credential rejected 401, or config missing/wrong mode)
+Nothing but fixed status words is printed to stdout; the token is never logged.
+"""
+import fcntl, hashlib, json, os, stat, sys, time, urllib.error, urllib.request
+from datetime import datetime
+
+CONF = os.environ.get("EG_REPORT_CONF", "/opt/kev/mdm/eg-report.json")
+QDIR = os.environ.get("EG_REPORT_QUEUE", "/opt/kev/mdm/eg-queue")
+TYPES = {"app_installed", "app_removed", "device_unreachable", "device_reachable_again"}
+TIMEOUT = float(os.environ.get("EG_REPORT_TIMEOUT", "10"))
+ATTEMPTS = int(os.environ.get("EG_REPORT_ATTEMPTS", "3"))
+
+
+def err(msg):
+    print("eg-report: " + msg, file=sys.stderr)
+
+
+def load_conf():
+    st = os.stat(CONF)
+    if st.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+        raise ValueError(f"{CONF} must be mode 0600 (is {oct(st.st_mode & 0o777)})")
+    c = json.load(open(CONF))
+    for k in ("supabase_url", "anon_key", "device_token"):
+        if not isinstance(c.get(k), str) or not c[k]:
+            raise ValueError(f"{CONF} missing {k}")
+    c["supabase_url"] = c["supabase_url"].rstrip("/")
+    if not c["supabase_url"].startswith("https://"):
+        raise ValueError("supabase_url must be https")
+    return c
+
+
+def parse_ts(v):
+    datetime.fromisoformat(v.replace("Z", "+00:00"))
+
+
+def validate(ev):
+    if not isinstance(ev, dict):
+        raise ValueError("event must be a JSON object")
+    if ev.get("type") not in TYPES:
+        raise ValueError("type must be one of " + ",".join(sorted(TYPES)))
+    if not ev.get("detected_at"):
+        raise ValueError("detected_at required")
+    parse_ts(ev["detected_at"])
+    if ev.get("window_start"):
+        parse_ts(ev["window_start"])
+    if ev["type"].startswith("app_") and not ev.get("bundle_id"):
+        raise ValueError("bundle_id required for app_* events")
+
+
+def enqueue(ev):
+    os.makedirs(QDIR, mode=0o700, exist_ok=True)
+    body = json.dumps(ev, sort_keys=True)
+    h = hashlib.sha256(body.encode()).hexdigest()[:12]
+    name = f"{time.strftime('%Y%m%dT%H%M%S')}-{time.time_ns() % 10**9:09d}-{h}.json"
+    tmp = os.path.join(QDIR, "." + name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(body)
+        f.flush()
+        os.fsync(f.fileno())
+    os.rename(tmp, os.path.join(QDIR, name))
+    dfd = os.open(QDIR, os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
+def queued():
+    if not os.path.isdir(QDIR):
+        return []
+    return sorted(f for f in os.listdir(QDIR) if f.endswith(".json") and not f.startswith("."))
+
+
+def post(conf, ev):
+    """Returns ('ok'|'retry'|'auth'|'dead', detail). Never raises on network errors."""
+    req = urllib.request.Request(
+        conf["supabase_url"] + "/rest/v1/rpc/eg_report_mdm_event",
+        data=json.dumps({"p_token": conf["device_token"], "p_event": ev}).encode(),
+        method="POST",
+        headers={"apikey": conf["anon_key"], "Authorization": "Bearer " + conf["anon_key"],
+                 "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            return ("ok", str(r.status))
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            return ("auth", "401")
+        if e.code in (400, 422):
+            return ("dead", str(e.code))
+        return ("retry", f"http {e.code}")          # 403/404/429/5xx: server-side issue, keep
+    except Exception as e:                          # DNS, timeout, TLS, reset
+        return ("retry", type(e).__name__)
+
+
+def flush(conf):
+    """Send queued events oldest-first. Stops at the first transient failure to
+    preserve order. Returns (delivered, remaining, auth_failed)."""
+    delivered, auth_failed = 0, False
+    for name in queued():
+        path = os.path.join(QDIR, name)
+        try:
+            ev = json.load(open(path))
+        except Exception:
+            _dead(path)
+            continue
+        status = "retry"
+        for i in range(ATTEMPTS):
+            status, detail = post(conf, ev)
+            if status != "retry":
+                break
+            time.sleep(min(2 ** i, 8))
+        if status == "ok":
+            os.unlink(path)
+            delivered += 1
+        elif status == "dead":
+            err(f"server rejected {name} as malformed ({detail}); moved to dead/")
+            _dead(path)
+        elif status == "auth":
+            err("server rejected the device token (401); events stay queued")
+            auth_failed = True
+            break
+        else:
+            err(f"delivery failed ({detail}); {len(queued())} event(s) queued for retry")
+            break
+    return delivered, len(queued()), auth_failed
+
+
+def _dead(path):
+    d = os.path.join(QDIR, "dead")
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    os.rename(path, os.path.join(d, os.path.basename(path)))
+
+
+def main(argv):
+    if len(argv) != 2:
+        err("usage: eg-report.sh '<event-json>' | --flush | --status")
+        return 2
+    arg = argv[1]
+    if arg == "--status":
+        print(f"queued={len(queued())}")
+        return 0
+    os.makedirs(QDIR, mode=0o700, exist_ok=True)
+    lock = open(os.path.join(QDIR, ".lock"), "a")
+    fcntl.flock(lock, fcntl.LOCK_EX)               # serialize concurrent callers
+    ev = None
+    if arg != "--flush":
+        try:
+            ev = json.loads(arg)
+            validate(ev)
+        except Exception as e:
+            err(f"invalid event: {e}")
+            return 2
+    try:
+        conf = load_conf()
+    except Exception as e:
+        err(f"config error: {e}")
+        if ev is not None:                          # still never lose the event
+            enqueue(ev)
+            err("event queued anyway; fix the config and run --flush")
+            print("queued")
+            return 3
+        return 2
+    if ev is not None:
+        enqueue(ev)
+    delivered, remaining, auth_failed = flush(conf)
+    if auth_failed:
+        print("queued")
+        return 3
+    print("delivered" if remaining == 0 else "queued")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
