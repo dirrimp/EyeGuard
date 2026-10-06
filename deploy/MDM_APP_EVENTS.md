@@ -32,11 +32,58 @@ credential can do exactly one thing: call `eg_report_mdm_event`, which returns
 (type, bundle_id, detected_at), so retries are idempotent. received_at is the
 server's clock.
 
+## Poller, webhook and heartbeat (second PR)
+`g11/mdm/hook.py` (container `mdm-hook`, receives NanoMDM check-ins/acks, diffs the
+installed-app list, writes events to `outbox/`) and `g11/mdm/poll.py` (cron `*/15`,
+asks the phone for its app list, delivers the outbox through `eg-report.sh`) were
+already running on the G11. They are now in the repo; commit 1 of the PR is the
+live code byte-for-byte, commit 2 is the change.
+
+**Server-verified liveness.** After each completed run the poller sends
+`eg-report.sh --heartbeat '{enrolled, unlisted, stalest_apps_age_s, outbox_pending}'`
+(counts only; no app names, bundle ids or device ids). `supabase/mdm_heartbeat.sql`
+adds `eg_mdm_heartbeat()` (same device token as the event RPC) and a cron check
+every 5 minutes. Each email is sent once per condition and re-arms when it clears:
+
+| Condition (server clock / figures) | Email |
+|---|---|
+| no heartbeat for > 45 min | "app monitoring STOPPED reporting" |
+| `enrolled = 0` or an enrolled phone never returned a list, for > 2 h | "no iPhone is being watched by MDM" |
+| newest app list > 3 h old, and the poller's own unreachable alert is not active | "iPhone app list is stale" |
+
+A poller that crashes sends no heartbeat, so a crash is itself the alert.
+Heartbeats are not queued: a backfilled late beat would hide an outage.
+Exit codes for `--heartbeat`: 0 accepted, 3 credential/config problem, 4 transient.
+
+**Bug fixed in `hook.py`.** On profile removal (`CheckOut`) the hook emitted
+`device_unreachable` but did not mark the device unreachable, so after re-enrolment
+it never emitted `device_reachable_again`. The server's once-per-outage debounce
+then stayed armed forever and the NEXT real outage was logged but not emailed.
+`tests/test_mdm_system.py` reproduces this against the original code and proves the fix.
+
+## Rollout order
+1. Dad: review + merge this PR.
+2. Dad: run `supabase/mdm_heartbeat.sql` (no placeholders; do NOT re-run
+   `mdm_app_events.sql` after it: that file still holds the recipient placeholder).
+   First-run grace: the "stopped" check is held off 2 h so the G11 can be updated.
+3. Jonah, on the G11: copy `g11/eg_report.py` and `g11/eg-report.sh` to `/opt/kev/mdm/`,
+   `g11/mdm/poll.py` to `/opt/kev/mdm/poll.py`, `g11/mdm/hook.py` to
+   `/opt/stack/mdm/hook/hook.py`, then `docker restart mdm-hook`.
+4. Jonah: enrol the iPhone (`/opt/stack/mdm/enroll/enroll.mobileconfig`). Until a phone
+   is enrolled nothing is being watched; the "no iPhone is being watched" email
+   fires after 2 h of heartbeats with `enrolled = 0` and will keep that visible.
+
 ## Residuals (accepted, stated plainly)
+- The hook's port (:8080) is unauthenticated inside the private docker network
+  (never published). A container on that network could forge check-ins. Same trust
+  class as the G11 itself; a signed-webhook follow-up would close it.
+- A lost baseline file (`apps-<udid>.json` deleted) re-baselines silently: installs
+  during that gap are missed. Needs root on the G11; the server cannot see it.
+- Heartbeat counts come from the G11; the server verifies timing (its own clock) but
+  cannot verify a lying client. Anyone with root on the G11 can fake them.
 - The G11 is Jonah's machine. Anyone with root there can suppress or skip
-  reports (same class as any client-side signal). Server-side backstop for the
-  poller itself dying silently is NOT in this PR (follow-up: a heartbeat RPC +
-  gone-quiet check like `eg_check_phone_jada`).
+  reports (same class as any client-side signal). The poller dying silently IS
+  now covered server-side (see heartbeat above).
 - A removed MDM profile surfaces only as `device_unreachable`.
 - MDM has no install timestamp; the email says so.
 

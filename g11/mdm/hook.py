@@ -60,7 +60,11 @@ def handle_checkin(ev):
     if not udid:
         return
     if "CheckOut" in mt:
-        touch_device(udid, enrolled=False, checked_out_at=now_iso())
+        # unreachable_reported=True so the first ack after re-enrolment emits
+        # device_reachable_again; without it the server's once-per-outage debounce
+        # (mdm_status.unreachable_alerted) is never re-armed and the NEXT real
+        # outage would be logged but not emailed.
+        touch_device(udid, enrolled=False, checked_out_at=now_iso(), unreachable_reported=True)
         emit({"type": "device_unreachable", "detected_at": now_iso(), "device": "Jonah iPhone",
               "reason": "MDM profile removed from the device (CheckOut)"})
     elif "Authenticate" in mt or "TokenUpdate" in mt:

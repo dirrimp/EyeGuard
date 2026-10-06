@@ -6,17 +6,22 @@
 2. Reports a device as unreachable once if no app list arrived for UNREACHABLE_AFTER.
 3. Delivers queued events to EyeGuard via SENDER (defined by the EyeGuard repo).
    Until SENDER exists, events stay queued in outbox/ and nothing is lost.
+4. After a COMPLETED run, sends a heartbeat (counts only, no app data). The
+   server alerts if heartbeats stop, if no phone is enrolled, or if app lists
+   go stale -- so this script dying, cron stopping or the G11 going dark is
+   caught by the server, not trusted to this script. A run that crashes
+   (e.g. missing API key) deliberately sends no heartbeat.
 """
 import json, os, ssl, subprocess, sys, time, urllib.request, uuid, base64
 from datetime import datetime, timezone, timedelta
 
-STATE = "/opt/stack/mdm/hook-state"
+STATE = os.environ.get("MDM_STATE", "/opt/stack/mdm/hook-state")
 OUTBOX = os.path.join(STATE, "outbox")
 SENT = os.path.join(STATE, "sent")
-SENDER = "/opt/kev/mdm/eg-report.sh"
+SENDER = os.environ.get("MDM_SENDER", "/opt/kev/mdm/eg-report.sh")
 API = "https://mdm.orthanc.me/v1"
 UNREACHABLE_AFTER = timedelta(hours=2)
-LOG = "/opt/kev/mdm/poll.log"
+LOG = os.environ.get("MDM_LOG", "/opt/kev/mdm/poll.log")
 
 
 def log(msg):
@@ -106,5 +111,30 @@ def main():
             break  # keep order; retry next run
 
 
+def heartbeat():
+    """Counts only. Server compares against its own clock (gone-quiet) and these
+    figures (no phone enrolled / stale app lists)."""
+    devices = load("devices.json", {})
+    now = datetime.now(timezone.utc)
+    enrolled = [d for d in devices.values() if d.get("enrolled")]
+    ages, unlisted = [], 0
+    for d in enrolled:
+        t = d.get("last_apps_at")
+        if t:
+            ages.append(int((now - datetime.fromisoformat(t)).total_seconds()))
+        else:
+            unlisted += 1
+    pending = len([f for f in os.listdir(OUTBOX) if f.endswith(".json")]) if os.path.isdir(OUTBOX) else 0
+    info = {"enrolled": len(enrolled), "unlisted": unlisted,
+            "stalest_apps_age_s": max(ages) if ages else None, "outbox_pending": pending}
+    if not os.access(SENDER, os.X_OK):
+        log("heartbeat skipped: sender not installed")
+        return info
+    r = subprocess.run([SENDER, "--heartbeat", json.dumps(info)], capture_output=True, text=True, timeout=60)
+    log(f"heartbeat rc={r.returncode} {json.dumps(info)} {r.stderr.strip()[:160]}")
+    return info
+
+
 if __name__ == "__main__":
     main()
+    heartbeat()
