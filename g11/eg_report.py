@@ -26,7 +26,7 @@ from datetime import datetime
 
 CONF = os.environ.get("EG_REPORT_CONF", "/opt/kev/mdm/eg-report.json")
 QDIR = os.environ.get("EG_REPORT_QUEUE", "/opt/kev/mdm/eg-queue")
-TYPES = {"app_installed", "app_removed", "device_unreachable", "device_reachable_again"}
+TYPES = {"app_installed", "app_removed", "device_unreachable", "device_reachable_again", "device_reenrolled"}
 TIMEOUT = float(os.environ.get("EG_REPORT_TIMEOUT", "10"))
 ATTEMPTS = int(os.environ.get("EG_REPORT_ATTEMPTS", "3"))
 

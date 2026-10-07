@@ -64,7 +64,7 @@ update public.mdm_status
 -- Written only by the SECURITY DEFINER functions below; no API role can change it.
 create table if not exists public.mdm_incidents (
   id         bigint generated always as identity primary key,
-  kind       text not null check (kind in ('monitor_silent','no_phone_watched','app_list_stale','phone_unreachable')),
+  kind       text not null check (kind in ('monitor_silent','no_phone_watched','app_list_stale','phone_unreachable','mdm_reenrolled')),
   started_at timestamptz not null default now(),
   ended_at   timestamptz,
   detail     text
@@ -282,6 +282,90 @@ create trigger eg_mdm_recovered before insert on public.mdm_events
   for each row when (NEW.event_type = 'device_reachable_again')
   execute function public.eg_on_mdm_recovered();
 
+-- ---- 3c. MDM removed and installed again ("re-enrolled") ---------------------------
+-- A phone that goes offline (airplane mode, away from the home network) and has its MDM
+-- profile removed sends no "check-out". Reinstalling inside any unreachable threshold would be
+-- invisible. The G11 hook therefore reports every Authenticate (profile install) for a phone
+-- it already knew, and the database emails at once, however short the gap. Needs the type to
+-- be accepted: widen the stored list and the one function that validates it.
+alter table public.mdm_events drop constraint if exists mdm_events_event_type_check;
+alter table public.mdm_events add constraint mdm_events_event_type_check check (event_type in
+  ('app_installed','app_removed','device_unreachable','device_reachable_again','device_reenrolled'));
+
+-- Same function as in mdm_app_events.sql (PR #113) with ONE change: 'device_reenrolled' is an
+-- accepted type. Do not re-run mdm_app_events.sql after this file.
+create or replace function public.eg_report_mdm_event(p_token text, p_event jsonb)
+returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  t text; det timestamptz; win timestamptz; k text; n bigint;
+  nm text; bid text; ver text; dev text;
+begin
+  if p_token is null or length(p_token) < 32 or length(p_token) > 256
+     or not exists (select 1 from public.mdm_auth
+                    where token_sha256 = encode(digest(p_token, 'sha256'), 'hex')) then
+    raise exception 'unauthorized' using errcode = 'PT401';
+  end if;
+  if p_event is null or jsonb_typeof(p_event) <> 'object' then
+    raise exception 'event must be a JSON object' using errcode = 'PT400';
+  end if;
+  t := p_event->>'type';
+  if t is null or t not in ('app_installed','app_removed','device_unreachable','device_reachable_again','device_reenrolled') then
+    raise exception 'bad type' using errcode = 'PT400';
+  end if;
+  begin
+    det := (p_event->>'detected_at')::timestamptz;
+    win := nullif(p_event->>'window_start', '')::timestamptz;
+  exception when others then
+    raise exception 'bad timestamp' using errcode = 'PT400';
+  end;
+  if det is null then raise exception 'detected_at required' using errcode = 'PT400'; end if;
+  nm  := left(p_event->>'name', 200);
+  bid := left(p_event->>'bundle_id', 200);
+  ver := left(p_event->>'version', 100);
+  dev := left(coalesce(p_event->>'device', 'iPhone'), 100);
+  if t like 'app\_%' and (bid is null or bid = '') then
+    raise exception 'bundle_id required for app events' using errcode = 'PT400';
+  end if;
+  k := t || '|' || coalesce(bid, '') || '|' || to_char(det at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US');
+  insert into public.mdm_events (event_type, detected_at, window_start, device,
+                                 app_name, bundle_id, app_version, dedupe_key)
+  values (t, det, win, dev, nm, bid, ver, k)
+  on conflict (dedupe_key) do nothing;
+  get diagnostics n = row_count;
+  return jsonb_build_object('ok', true, 'duplicate', n = 0);
+end $$;
+revoke execute on function public.eg_report_mdm_event(text, jsonb)
+  from public, anon, authenticated, service_role;
+grant execute on function public.eg_report_mdm_event(text, jsonb) to anon;
+
+create or replace function public.eg_on_mdm_reenrolled() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare det text;
+begin
+  det := to_char(NEW.detected_at at time zone 'America/New_York', 'Mon DD, HH12:MI AM TZ');
+  insert into public.mdm_incidents (kind, started_at, ended_at, detail)
+    values ('mdm_reenrolled', NEW.detected_at, NEW.detected_at, left(coalesce(NEW.device, 'iPhone'), 100));
+  perform public.eg_send_email_mdm(
+    E'\U0001F6A8 EyeGuard \u2014 MDM was removed and installed again on ' || coalesce(NEW.device, 'iPhone'),
+    format('<p><b>The MDM profile was installed again on %s at %s.</b></p>'
+        || '<p>This server already knew this phone, so the profile was removed (or the phone was erased) '
+        || 'and then enrolled again. While MDM was off, apps could have been installed or removed without '
+        || 'being seen; the next app list shows what is on the phone now.</p>'
+        || '<p>If nobody did this on purpose, treat it as tampering. If someone did, this email is the record of it.</p>',
+        public.eg_mdm_esc(coalesce(NEW.device, 'iPhone')), det));
+  return NEW;
+exception when others then
+  raise warning 'eg_on_mdm_reenrolled: % (event kept)', sqlerrm;
+  return NEW;
+end $$;
+revoke execute on function public.eg_on_mdm_reenrolled() from public, anon, authenticated, service_role;
+
+drop trigger if exists eg_mdm_reenrolled on public.mdm_events;
+create trigger eg_mdm_reenrolled after insert on public.mdm_events
+  for each row when (NEW.event_type = 'device_reenrolled')
+  execute function public.eg_on_mdm_reenrolled();
+
 select cron.unschedule('eyeguard-mdm-status')
   where exists (select 1 from cron.job where jobname = 'eyeguard-mdm-status');
 select cron.schedule('eyeguard-mdm-status', '* * * * *',
@@ -295,6 +379,7 @@ select
   not has_table_privilege('anon', 'public.mdm_status', 'select')                       as status_not_anon_readable,
   exists (select 1 from cron.job where jobname = 'eyeguard-mdm-status')                as cron_scheduled,
   exists (select 1 from pg_trigger where tgname = 'eg_mdm_recovered')                  as recovery_trigger,
+  exists (select 1 from pg_trigger where tgname = 'eg_mdm_reenrolled')                 as reenroll_trigger,
   not has_table_privilege('anon', 'public.mdm_incidents', 'select')                    as incidents_not_anon_readable,
   not has_table_privilege('authenticated', 'public.mdm_incidents', 'update')           as incidents_not_writable,
   exists (select 1 from information_schema.columns

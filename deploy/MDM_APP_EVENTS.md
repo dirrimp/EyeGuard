@@ -47,6 +47,8 @@ every 5 minutes. Each email is sent once per condition and re-arms when it clear
 
 | Condition (server clock / figures) | Email |
 |---|---|
+| phone silent > 30 min (was 2 h; poller emits `device_unreachable`) | "cannot reach the phone" email, then an all-clear when it answers again |
+| MDM profile installed again on a phone already enrolled | "MDM was removed and installed again" email at once (any gap length), plus a permanent incident |
 | no heartbeat for > 15 min (poller runs every 5 min = 3 misses; checked every minute) | "app monitoring STOPPED reporting" |
 | `enrolled = 0` or an enrolled phone never returned a list, for > 2 h | "no iPhone is being watched by MDM" |
 | newest app list > 3 h old, and the poller's own unreachable alert is not active | "iPhone app list is stale" |
@@ -74,6 +76,21 @@ then stayed armed forever and the NEXT real outage was logged but not emailed.
 4. Jonah: enrol the iPhone (`/opt/stack/mdm/enroll/enroll.mobileconfig`). Until a phone
    is enrolled nothing is being watched; the "no iPhone is being watched" email
    fires after 2 h of heartbeats with `enrolled = 0` and will keep that visible.
+
+## Removing the MDM profile (what is and is not possible)
+- **The enrollment profile cannot be made non-removable.** iOS refuses to install an MDM profile
+  marked `PayloadRemovalDisallowed` ("A profile containing an MDM payload must be removable"),
+  supervised or not. An earlier version of this setup assumed supervision would make it
+  non-removable; that was wrong. The profile in `/opt/stack/mdm/enroll/` was corrected on 2026-10-07.
+- **What catches removal instead:**
+  1. Removed while the phone is online: `CheckOutWhenRemoved` makes the phone tell the server,
+     so the removal alert is immediate.
+  2. Removed while offline (airplane mode, away from home), then reinstalled: no check-out is
+     sent, so the hook reports every re-enrolment of a known phone and the database emails at once.
+  3. Removed and NOT reinstalled: the phone goes silent and the unreachable alert fires after 30 min.
+  4. Phone erased and re-enrolled: same as 2.
+- Only a device in Apple Business Manager can be made impossible to unenroll. That needs an ABM
+  account and is not part of this setup.
 
 ## Residuals (accepted, stated plainly)
 - The hook's port (:8080) is unauthenticated inside the private docker network

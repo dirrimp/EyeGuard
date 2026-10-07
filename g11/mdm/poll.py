@@ -20,7 +20,7 @@ OUTBOX = os.path.join(STATE, "outbox")
 SENT = os.path.join(STATE, "sent")
 SENDER = os.environ.get("MDM_SENDER", "/opt/kev/mdm/eg-report.sh")
 API = "https://mdm.orthanc.me/v1"
-UNREACHABLE_AFTER = timedelta(hours=2)
+UNREACHABLE_AFTER = timedelta(minutes=30)   # was 2 h; 6 missed 5-minute checks. The server also sends an all-clear when it answers again
 POLL_STATE = "poll-state.json"          # poller-owned (the hook owns devices.json: no write races)
 AWAIT_REPOLL = timedelta(minutes=30)    # don't stack commands for a phone that has not answered
 LOG = os.environ.get("MDM_LOG", "/opt/kev/mdm/poll.log")

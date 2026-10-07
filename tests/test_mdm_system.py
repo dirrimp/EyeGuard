@@ -86,6 +86,25 @@ if orig:
 else:
     print("  [skip] original-hook regression proof (no git history)")
 
+print("A1b. re-enrolment of a known phone (remove profile offline, reinstall: no CheckOut is ever sent)")
+st2 = tempfile.mkdtemp()
+h2 = load_module(str(ROOT / "g11/mdm/hook.py"), "hook_re", {"HOOK_STATE": st2})
+h2.handle_checkin({"udid": "U-RE", "message_type": "Authenticate"})
+check("the FIRST enrolment of a phone is not an alert", not [e for e in events(st2) if e["type"] == "device_reenrolled"])
+h2.handle_checkin({"udid": "U-RE", "message_type": "TokenUpdate"})
+check("TokenUpdate (routine push-token refresh) is not an alert", not [e for e in events(st2) if e["type"] == "device_reenrolled"])
+h2.handle_checkin({"udid": "U-RE", "message_type": "Authenticate"})
+re_ev = [e for e in events(st2) if e["type"] == "device_reenrolled"]
+check("a second Authenticate for a known phone (no CheckOut in between) emits device_reenrolled at once", len(re_ev) == 1 and re_ev[0]["device"], str(events(st2)))
+h2.handle_checkin({"udid": "U-RE", "message_type": "CheckOut"})
+h2.handle_checkin({"udid": "U-RE", "message_type": "Authenticate"})
+types2 = sorted(e["type"] for e in events(st2))
+check("remove (online) then reinstall: the removal alert AND the re-enrolment alert both fire",
+      types2.count("device_unreachable") == 1 and types2.count("device_reenrolled") == 2, str(types2))
+h3 = load_module(str(ROOT / "g11/mdm/hook.py"), "hook_re2", {"HOOK_STATE": tempfile.mkdtemp()})
+h3.handle_checkin({"udid": "U-NEW", "message_type": "Authenticate"})
+check("a different, never-seen phone enrolling is still not an alert", not [e for e in events(h3.STATE) if e["type"] == "device_reenrolled"])
+
 print("A2. poll.py heartbeat payload")
 rec = Path(tempfile.mkdtemp()) / "args.txt"
 sender = Path(tempfile.mkdtemp()) / "fake-sender.sh"
@@ -133,6 +152,13 @@ json.dump(ps, open(Path(cst) / "poll-state.json", "w")); devs(last_apps_at=(now_
 check("an unanswered request is re-sent after 30 minutes (never stuck forever)", enq == ["u1", "u1", "u1"])
 check("poller-owned state lives in poll-state.json, not the hook's devices.json",
       "last_enqueue_at" not in json.load(open(Path(cst) / "devices.json"))["u1"])
+def ob_types(): return sorted(e["type"] for e in events(cst))
+for f in (Path(cst) / "outbox").glob("*.json"): f.unlink()
+devs(last_apps_at=(now_ - timedelta(minutes=29)).isoformat()); pc.main()
+check("a phone last heard from 29 minutes ago is NOT reported unreachable", "device_unreachable" not in ob_types(), str(ob_types()))
+devs(last_apps_at=(now_ - timedelta(minutes=31)).isoformat()); pc.main()
+check("31 minutes of silence IS reported unreachable (threshold is 30 minutes, was 2 hours)", "device_unreachable" in ob_types(), str(ob_types()))
+check("the threshold constant is 30 minutes", pc.UNREACHABLE_AFTER == timedelta(minutes=30))
 l1 = pc.lock(); l2 = pc.lock()
 check("only one poller run at a time (second run gets no lock)", l1 is not None and l2 is None)
 l1.close(); l3 = pc.lock()
@@ -356,6 +382,22 @@ grant usage on schema public, extensions to anon, authenticated;
               val("select ended_at - started_at from public.mdm_incidents where kind='phone_unreachable' order by id desc limit 1") == "03:00:00"
               and val("select count(*) from public.mdm_incidents where kind='phone_unreachable' and ended_at is null") == "0")
         check("the all-clear reports how long the phone was unreachable", "03:00:00" in val("select body->>'html' from net.sent order by id desc limit 1"))
+        print("   re-enrolment event (new type)")
+        psql("update public.mdm_status set unreachable_alerted=false where id=1;")
+        re_e = {"type": "device_reenrolled", "detected_at": "2026-03-01T10:00:00Z", "device": "Jonah iPhone"}
+        n = sent(); r = psql(f"select public.eg_report_mdm_event('{tok}', '{json.dumps(re_e)}'::jsonb);", expect_error=True)
+        check("the server accepts device_reenrolled", '"ok": true' in r[0], r[0] + r[1])
+        check("it emails at once, says the profile was removed and installed again, and tells them to treat it as tampering unless intended",
+              sent() == n + 1 and "removed and installed again" in subjects().split(" | ")[-1] and "tampering" in val("select body->>'html' from net.sent order by id desc limit 1"), subjects().split(" | ")[-1])
+        check("it leaves a permanent incident (opened and closed at the event time)",
+              val("select count(*) from public.mdm_incidents where kind='mdm_reenrolled' and ended_at = started_at") == "1")
+        psql(f"select public.eg_report_mdm_event('{tok}', '{json.dumps(re_e)}'::jsonb);")
+        check("a retried identical event sends no second email and no second incident",
+              sent() == n + 1 and val("select count(*) from public.mdm_incidents where kind='mdm_reenrolled'") == "1")
+        bad_t = json.dumps({"type": "device_exploded", "detected_at": "2026-03-01T10:00:00Z"})
+        check("an unknown event type is still rejected",
+              "bad type" in psql(f"select public.eg_report_mdm_event('{tok}', '{bad_t}'::jsonb);", expect_error=True)[1])
+        check("the event does not disturb the unreachable debounce", val("select unreachable_alerted from public.mdm_status") == "f")
         dd = {"type": "app_installed", "detected_at": "2026-01-01T00:00:00Z", "bundle_id": "com.dup2"}
         n = sent()
         for _ in range(2): psql(f"select public.eg_report_mdm_event('{tok}', '{json.dumps(dd)}'::jsonb);")

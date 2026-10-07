@@ -67,7 +67,17 @@ def handle_checkin(ev):
         touch_device(udid, enrolled=False, checked_out_at=now_iso(), unreachable_reported=True)
         emit({"type": "device_unreachable", "detected_at": now_iso(), "device": "Jonah iPhone",
               "reason": "MDM profile removed from the device (CheckOut)"})
-    elif "Authenticate" in mt or "TokenUpdate" in mt:
+    elif "Authenticate" in mt:
+        # Authenticate is sent only when the MDM profile is (re)installed. If this phone is
+        # already known, the profile was removed (or the phone erased) and put back. Going
+        # offline first means no CheckOut was ever sent, so this is the only signal there is,
+        # however short the gap was.
+        known = load("devices.json", {}).get(udid)
+        d = touch_device(udid, enrolled=True)
+        if known:
+            emit({"type": "device_reenrolled", "detected_at": now_iso(), "device": d["name"],
+                  "reason": "MDM profile installed again on a phone that was already enrolled"})
+    elif "TokenUpdate" in mt:
         touch_device(udid, enrolled=True)
 
 
