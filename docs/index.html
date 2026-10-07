@@ -272,16 +272,19 @@ function arow(a, btns){
     + `<div class="abtns">${btns.map(([d,l])=>`<button class="abtn ${d}" data-b="${esc(a.bundle_id)}" data-n="${name}" data-d="${d}">${l}</button>`).join("")}</div></div>`;
 }
 const KIND = {monitor_silent:"Monitor stopped reporting", no_phone_watched:"No phone being watched",
-  app_list_stale:"Phone's app list went stale", phone_unreachable:"Phone unreachable"};
+  app_list_stale:"Phone's app list went stale", phone_unreachable:"Phone unreachable",
+  g11_drift:"G11 code differed from approved", g11_outdated:"G11 ran older approved code",
+  g11_attest_missing:"G11 integrity report stopped"};
 function dur(a,b){
   const m = Math.max(0, Math.round(((b?new Date(b):new Date())-new Date(a))/60000));
   return m<90 ? m+" min" : m<2880 ? (m/60).toFixed(1)+" h" : Math.round(m/1440)+" d";
 }
 async function loadApps(){
   const box = $("apps");
-  const [ov, ap, inc] = await Promise.all([sb.rpc("eg_mdm_overview"),
+  const [ov, ap, inc, at] = await Promise.all([sb.rpc("eg_mdm_overview"),
     sb.from("mdm_apps").select("*").order("first_seen_at",{ascending:false}),
-    sb.from("mdm_incidents").select("*").order("started_at",{ascending:false}).limit(30)]);
+    sb.from("mdm_incidents").select("*").order("started_at",{ascending:false}).limit(30),
+    sb.rpc("eg_mdm_attest_status")]);
   if(ov.error || ap.error){ box.innerHTML=""; return; }
   const gaps = inc.error ? [] : (inc.data||[]);
   const o = ov.data||{}, apps = ap.data||[];
@@ -293,7 +296,13 @@ async function loadApps(){
   const blk = den.length===0 ? null
             : o.block_ok===true ? ["ok","Block list applied ("+esc(o.block_count)+")"]
             : ["bad","Block list not applied"+(o.block_detail? ": "+esc(o.block_detail):"")];
-  const chips = [sup, ["", "Last app list "+esc(ago(o.last_snapshot_at))],
+  // G11 code integrity: the G11's own report compared by the database with what Dad's CI published
+  const as = at && !at.error && at.data ? at.data.state : null;
+  const att = as==="ok" ? ["ok","G11 code matches approved (self-reported)"]
+            : as==="outdated" ? ["warn","G11 running older approved code"]
+            : as==="drift" ? ["bad","G11 CODE DIFFERS FROM APPROVED"]
+            : as==="no_manifest" ? ["warn","No approved G11 manifest published yet"] : null;
+  const chips = [sup, att, ["", "Last app list "+esc(ago(o.last_snapshot_at))],
                  ["ok", okk.length+" approved"], pend.length? ["warn", pend.length+" pending"] : null,
                  den.length? ["bad", den.length+" denied"] : null, blk].filter(Boolean)
     .map(([c,t])=>`<span class="chip ${c}">${t}</span>`).join("");

@@ -21,7 +21,7 @@ MDM_DIR="${MDM_DIR:-/opt/kev/mdm}"
 HOOK_DIR="${HOOK_DIR:-/opt/stack/mdm/hook}"
 CRONTAB_CMD="${CRONTAB_CMD:-crontab}"
 DOCKER_CMD="${DOCKER_CMD:-docker}"
-CRON_LINE='*/5 * * * * /usr/bin/python3 '"$MDM_DIR"'/poll.py >/dev/null 2>&1  # MDM app-install notifier poller (every 5 min)'
+CRON_TEMPLATE="$REPO/deploy/g11-poller.cron"   # single source: the manifest generator hashes the same line
 TS="$(date +%Y%m%dT%H%M%S)"
 say() { printf '%s\n' "$*"; }
 die() { printf 'g11_install: %s\n' "$*" >&2; exit 1; }
@@ -37,6 +37,8 @@ t = json.load(open(sys.argv[1])).get("device_token", "")
 if not re.fullmatch(r"[0-9a-f]{64}", t):
     sys.exit("g11_install: device_token is not 64 hex characters (placeholder, extra characters, or wrong value)")
 PY
+[ -f "$CRON_TEMPLATE" ] || die "deploy/g11-poller.cron not found"
+CRON_LINE="$(sed "s|@MDM_DIR@|$MDM_DIR|g" "$CRON_TEMPLATE" | sed '/^$/d' | head -n1)"
 for f in g11/eg_report.py g11/eg-report.sh g11/mdm/poll.py g11/mdm/hook.py; do
   [ -f "$REPO/$f" ] || die "$f not found in $REPO (run from a full checkout)"
 done
