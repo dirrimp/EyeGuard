@@ -175,6 +175,7 @@ def rpc_once(conf, fn, payload):
 
 def main_oneshot(cmd, args):
     """--sync | --action-result <id> ok|fail [detail] | --block-result ok|fail <count> [detail]
+    | --attest '<json>'  (integrity report: {"items": {"file:poll.py": "sha256:..", ...}})
     Not queued: the poller retries on its next run. 0 ok, 2 bad input, 3 credential/config, 4 transient."""
     try:
         if cmd == "--sync" and not args:
@@ -182,6 +183,11 @@ def main_oneshot(cmd, args):
         elif cmd == "--action-result" and len(args) >= 2 and args[1] in ("ok", "fail"):
             fn, payload = "eg_mdm_action_result", {"p_id": int(args[0]), "p_ok": args[1] == "ok",
                                                    "p_detail": " ".join(args[2:])[:300]}
+        elif cmd == "--attest" and len(args) == 1:
+            rep = json.loads(args[0])
+            if not isinstance(rep, dict) or not isinstance(rep.get("items"), dict):
+                raise ValueError("attest report needs an items object")
+            fn, payload = "eg_mdm_attest", {"p_report": rep}
         elif cmd == "--block-result" and len(args) >= 2 and args[0] in ("ok", "fail"):
             fn, payload = "eg_mdm_block_result", {"p_ok": args[0] == "ok", "p_count": int(args[1]),
                                                   "p_detail": " ".join(args[2:])[:300]}
@@ -272,10 +278,10 @@ def main_heartbeat(raw):
 def main(argv):
     if len(argv) == 3 and argv[1] == "--heartbeat":
         return main_heartbeat(argv[2])
-    if len(argv) >= 2 and argv[1] in ("--sync", "--action-result", "--block-result"):
+    if len(argv) >= 2 and argv[1] in ("--sync", "--action-result", "--block-result", "--attest"):
         return main_oneshot(argv[1], argv[2:])
     if len(argv) != 2:
-        err("usage: eg-report.sh '<event-json>' | --flush | --status | --heartbeat '<json>' | --sync | --action-result | --block-result")
+        err("usage: eg-report.sh '<event-json>' | --flush | --status | --heartbeat '<json>' | --sync | --action-result | --block-result | --attest")
         return 2
     arg = argv[1]
     if arg == "--status":

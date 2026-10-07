@@ -196,6 +196,7 @@ Every item here produces an email to the partner:
 |------|------|
 | `eyeguard/` | the Mac agent — `capture`, `detector` (+ `clip_preprocess`, `clip_assets/`), `risk`, `context`, `logger`, `uploader`, `frame_crypto`, `net`, `menubar`, `retention`, `viewer`; the root daemons `session_watcher`, `deploy_watcher`; the tamper monitors `integrity`, `extensions`, `vm_monitor`; `findmy_watcher` |
 | `router/` | `eyeguard-phone.py` (DNS wire capture), `eyeguard-router-watcher.py` (config/integrity), procd init scripts, config example |
+| `deploy/G11_ATTESTATION.md`, `supabase/g11_attest.sql`, `deploy/gen_g11_manifest.py` | Dad-owned integrity watch over the G11's EyeGuard code (CI-published approved hashes, compared by the database) and the plan for TPM-backed proof |
 | `g11/` | `eg-report.sh` / `eg_report.py`: durable-queue event reporter + `--heartbeat` run on the G11; `g11/mdm/`: the NanoMDM webhook (`hook.py`) and cron poller (`poll.py`) |
 | `supabase/*.sql` | schema, RLS lock, heartbeat + alert functions, the anon-client pivot, and every incremental alert-logic migration — run in the SQL Editor |
 | `docs/index.html` | the partner dashboard (GitHub Pages) |

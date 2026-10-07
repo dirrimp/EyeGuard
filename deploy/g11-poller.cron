@@ -1,0 +1,1 @@
+*/5 * * * * /usr/bin/python3 @MDM_DIR@/poll.py >/dev/null 2>&1  # MDM app-install notifier poller (every 5 min)
