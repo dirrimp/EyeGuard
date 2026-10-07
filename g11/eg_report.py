@@ -75,8 +75,23 @@ def validate(ev):
         raise ValueError("bundle_id required for app_* events")
 
 
+def drop_superseded_snapshots():
+    """Only the newest app_snapshot matters (the server diffs the latest list), so
+    older queued ones are deleted rather than stacking up while the server is
+    unreachable or its SQL is not installed yet."""
+    for name in queued():
+        path = os.path.join(QDIR, name)
+        try:
+            if json.load(open(path)).get("type") == "app_snapshot":
+                os.unlink(path)
+        except Exception:
+            pass
+
+
 def enqueue(ev):
     os.makedirs(QDIR, mode=0o700, exist_ok=True)
+    if ev.get("type") == "app_snapshot":
+        drop_superseded_snapshots()
     body = json.dumps(ev, sort_keys=True)
     h = hashlib.sha256(body.encode()).hexdigest()[:12]
     name = f"{time.strftime('%Y%m%dT%H%M%S')}-{time.time_ns() % 10**9:09d}-{h}.json"

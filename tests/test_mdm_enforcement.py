@@ -93,6 +93,16 @@ check("--action-result maps id/ok/detail",
 seen.clear(); rc = rep.main(["x", "--block-result", "ok", "3", "applied"])
 check("--block-result maps ok/count/detail", rc == 0 and seen[0][1]["p_ok"] is True and seen[0][1]["p_count"] == 3)
 check("bad arguments -> exit 2", rep.main(["x", "--action-result", "abc", "ok"]) == 2 and rep.main(["x", "--block-result", "maybe", "1"]) == 2)
+qd = Path(rep.QDIR); [f.unlink() for f in qd.glob("*.json")] if qd.is_dir() else None
+mode["code"] = 503
+for i in range(4):
+    rep.main(["x", json.dumps({**snap, "detected_at": f"2026-10-07T12:0{i}:00Z"})])
+rep.main(["x", json.dumps({"type": "device_unreachable", "detected_at": "2026-10-07T12:09:00Z"})])
+q = [json.load(open(qd / f)) for f in rep.queued()]
+check("while the server is down only the NEWEST snapshot stays queued; other events are kept",
+      sorted(e["type"] for e in q) == ["app_snapshot", "device_unreachable"]
+      and [e for e in q if e["type"] == "app_snapshot"][0]["detected_at"].endswith("12:03:00Z"), str(q))
+[f.unlink() for f in qd.glob("*.json")]
 mode["code"] = 401; check("401 -> exit 3", rep.main(["x", "--sync"]) == 3)
 mode["code"] = 503; check("503 -> exit 4", rep.main(["x", "--sync"]) == 4)
 check("one-shot commands are never queued", not os.path.isdir(rep.QDIR) or not rep.queued())

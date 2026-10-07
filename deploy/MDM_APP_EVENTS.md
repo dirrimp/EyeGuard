@@ -63,7 +63,61 @@ it never emitted `device_reachable_again`. The server's once-per-outage debounce
 then stayed armed forever and the NEXT real outage was logged but not emailed.
 `tests/test_mdm_system.py` reproduces this against the original code and proves the fix.
 
-## Rollout order
+## Official app list, approve / deny (third PR)
+The SERVER owns the list of approved apps (`mdm_apps`). The G11 only relays a raw
+snapshot of what is installed (`app_snapshot`, one per InstalledApplicationList); the
+server compares it with the list. (Previously the G11 held the baseline in files, and
+losing them re-baselined silently.)
+
+| Event | What happens |
+|---|---|
+| first snapshot (>= 1 app) | everything on the phone is **auto-trusted once** as the official list; the baseline then closes. Nothing the G11 sends can approve an app afterwards. Re-opening is Dad-only SQL. |
+| app not on the list | `pending`; ONE email to Dad + Jada (one email per snapshot even for several apps); partners decide in the **Partner Dashboard -> Apps** |
+| Approve | joins the official list (logged: who, when); both partners are emailed |
+| Deny | flagged, reminded daily while installed, MDM **remove** queued, bundle id added to the **block list** the G11 pushes. Both partners emailed, with a plain statement of what is and is not possible |
+| Revoke | approved -> pending |
+| pending > 24 h | one reminder per day |
+
+Who can decide: only the two partner accounts (`eg_mdm_decide`, checked with `auth.uid()`
+on the server). Not the G11, not anon, not Jonah. Decisions are in an append-only log.
+Approval is in the dashboard on purpose: an emailed "approve" link can be forwarded or
+auto-clicked by a mail scanner.
+
+### What deny can actually do (read this)
+- **Detection works on any enrolled iPhone.** Profile enrolment is enough to list all apps.
+- **Block needs a SUPERVISED phone** (restriction keys are ignored otherwise). The poller
+  asks the phone `IsSupervised` each cycle and pushes the block list ONLY when it is
+  true; otherwise it reports "not enforced" (emailed once) instead of pretending.
+  The key names (`blockedAppBundleIDs`, plus the older `blacklistedAppBundleIDs`) follow
+  Apple's docs but are **unverified until tried on the real supervised phone**.
+- **Remove only works on apps MDM installed itself**, even on a supervised phone. For
+  apps installed from the App Store by the user, block is the control that works.
+  Failures are retried 3 times, then emailed with the phone's reason.
+- **Supervising means erasing the iPhone** (Apple Configurator). The phone is currently
+  neither supervised nor enrolled, so nothing is being watched yet.
+
+### Baseline caveat (chosen: auto-trust)
+Whatever is on the phone at the first snapshot is approved without review, including an
+app that came back with a restored backup. Safer order: supervise, enrol, glance through
+the list in the dashboard (approved list, Revoke) right after the first snapshot.
+
+### Rollout order (matters)
+1. Dad: review + merge #114, then this PR. Run `supabase/mdm_heartbeat.sql`, THEN
+   `supabase/mdm_approvals.sql` (no placeholders in either; do NOT re-run
+   `mdm_app_events.sql`). Dashboard updates itself via GitHub Pages after merge.
+2. Jonah, on the G11, only AFTER the SQL is in: copy `g11/eg_report.py`, `g11/eg-report.sh`,
+   `g11/mdm/poll.py` -> `/opt/kev/mdm/`, `g11/mdm/hook.py` -> `/opt/stack/mdm/hook/hook.py`,
+   `docker restart mdm-hook`. (Before the SQL exists, snapshots can't be delivered; the
+   reporter keeps only the newest one queued.)
+3. Decide on supervision; enrol the phone; review the first list; test deny on a harmless app.
+
+### Residuals
+- Auto-trusted baseline (above). Anyone with root on the G11 can suppress snapshots (the
+  heartbeat/stale alerts notice silence, not a lying G11).
+- A pending app stays pending: it is NOT blocked until a partner decides.
+- One monitored phone: `mdm_apps` is keyed by bundle id only.
+
+## Rollout order (heartbeat PR)
 1. Dad: review + merge this PR.
 2. Dad: run `supabase/mdm_heartbeat.sql` (no placeholders; do NOT re-run
    `mdm_app_events.sql` after it: that file still holds the recipient placeholder).
