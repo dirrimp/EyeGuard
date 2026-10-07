@@ -105,7 +105,7 @@ residuals, and `deploy/WORKFLOW.md` for the propose → review → ship loop.
 └───────────────────────────────┬─────────────────────────────────┘
                                 ▼
                 partner dashboard — static page on the partner's
-                GitHub Pages · magic-link login · read-only
+                GitHub Pages · magic-link login · flags read-only; partners approve/deny phone apps
 ```
 
 ## Detection (the Mac)
@@ -252,4 +252,4 @@ device lockdown) are each set up separately — see `deploy/` and `router/`.
 | Config lock — partner-held pause password + append-only + lockout | ✅ in place |
 | Hardened-runtime code signing (denies `lldb` / `DYLD_INSERT_LIBRARIES` against the agent) | ✅ signed & enforcing; interpreter-swap covered by a root-owned bundle + a per-cycle `csops` check (`deploy/STATUS.md`) |
 | Sign the `.app` bundle itself / MDM-managed browser / full MDM | ⬜ optional — see `deploy/STATUS.md` |
-| iPhone app-install alerts via G11 MDM (`g11/`, `supabase/mdm_app_events.sql`, `supabase/mdm_heartbeat.sql`) | 🟡 events live (PR #113); poller/hook + heartbeat in review; the iPhone itself is not enrolled yet |
+| iPhone app-install alerts via G11 MDM (`g11/`, `supabase/mdm_app_events.sql`, `supabase/mdm_heartbeat.sql`, `supabase/mdm_approvals.sql`) | 🟡 events live (PR #113); heartbeat (#114) and official list + approve/deny in review; the iPhone is not yet supervised or enrolled |

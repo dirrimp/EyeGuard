@@ -47,10 +47,12 @@ def hook_flow(hook_path, tag):
     return h, st, base, inst, rem
 
 h, st, base, inst, rem = hook_flow(str(ROOT / "g11/mdm/hook.py"), "new")
-check("first app list is a silent baseline (no events)", base == 0, f"{base} events")
-check("a new app emits one app_installed with bundle_id",
-      len(inst) == 1 and inst[0]["bundle_id"] == "com.c" and inst[0]["window_start"], str(inst))
-check("a removed app emits app_removed", len(rem) == 1 and rem[0]["bundle_id"] == "com.b", str(rem))
+snaps = [e for e in events(st) if e["type"] == "app_snapshot"]
+check("each app list is relayed as one app_snapshot (the server diffs, see test_mdm_approvals.py)",
+      len(snaps) == 3 and not inst and not rem, f"{len(snaps)} snapshots, {len(inst)} installs, {len(rem)} removals")
+lists = sorted(sorted(a["bundle_id"] for a in e["apps"]) for e in snaps)   # same-ms files sort randomly
+check("snapshots list the apps present at that moment",
+      lists == [["com.a", "com.b"], ["com.a", "com.b", "com.c"], ["com.a", "com.c"]], str(lists))
 
 # profile removal -> re-enrol: the server debounce must be re-armed
 h.handle_checkin({"udid": "UDID-TEST-1", "message_type": "CheckOut"})
@@ -64,8 +66,8 @@ h.handle_ack(plist_ack([("com.a", "A"), ("com.c", "C"), ("com.d", "D")]))   # D 
 evs = events(st)
 check("first ack after re-enrol emits device_reachable_again exactly once",
       sum(e["type"] == "device_reachable_again" for e in evs) == 1)
-check("app installed while the profile was removed is still caught (diff vs old list)",
-      any(e["type"] == "app_installed" and e["bundle_id"] == "com.d" for e in evs))
+check("an app installed while the profile was removed is in the next snapshot (server catches it)",
+      any(e["type"] == "app_snapshot" and "com.d" in [a["bundle_id"] for a in e["apps"]] for e in evs))
 h.handle_ack(plist_ack([("com.a", "A"), ("com.c", "C"), ("com.d", "D")]))
 check("no repeat reachable_again on later acks",
       sum(e["type"] == "device_reachable_again" for e in events(st)) == 1)
