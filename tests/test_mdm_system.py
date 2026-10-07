@@ -239,11 +239,23 @@ grant usage on schema public, extensions to anon, authenticated;
         age("last_heartbeat_at", "50 minutes"); chk()
         check("50 min since beat -> exactly one STOPPED email", sent() == 1 and "STOPPED" in subjects(), subjects() or "")
         chk(); chk(); check("repeated checks do not re-email", sent() == 1)
+        check("the silence is recorded as an OPEN incident in the permanent log", val("select count(*) from public.mdm_incidents where kind='monitor_silent' and ended_at is null") == "1" and val("select count(*) from public.mdm_incidents") == "1" ,
+              val("select * from public.mdm_incidents"))
+        age("last_heartbeat_at", "72 minutes")
         hb({"enrolled": 1, "unlisted": 0, "stalest_apps_age_s": 600, "outbox_pending": 0})
         check("a heartbeat re-arms the quiet alert", val("select quiet_alerted from public.mdm_status") == "f")
+        check("...and sends ONE all-clear that says how long it was silent",
+              sent() == 2 and "back online" in subjects().split(" | ")[-1] and "silent for about 01:" in val("select body->>'html' from net.sent order by id desc limit 1"),
+              subjects().split(" | ")[-1])
+        check("recovery CLOSES the incident but never deletes it", val("select count(*) from public.mdm_incidents where kind='monitor_silent' and ended_at is null") == "0" and val("select count(*) from public.mdm_incidents where kind='monitor_silent' and ended_at is not null") == "1")
+        check("the all-clear does not claim nothing happened (gap is permanent, blind spots admitted)",
+              "not proof nothing happened" in val("select body->>'html' from net.sent order by id desc limit 1"))
+        n = sent(); hb({"enrolled": 1, "unlisted": 0, "stalest_apps_age_s": 600, "outbox_pending": 0})
+        check("a normal heartbeat afterwards sends no further all-clear", sent() == n)
         age("last_heartbeat_at", "60 minutes"); chk()
-        check("a second outage emails again", sent() == 2)
+        check("a second outage emails again", sent() == n + 1)
         hb({"enrolled": 1, "unlisted": 0, "stalest_apps_age_s": 600, "outbox_pending": 0})
+        check("...and is closed out again", sent() == n + 2 and "back online" in subjects().split(" | ")[-1])
 
         # 2. blind (no phone enrolled)
         n0 = sent(); hb({"enrolled": 0, "unlisted": 0, "outbox_pending": 0}); chk()
@@ -255,15 +267,23 @@ grant usage on schema public, extensions to anon, authenticated;
         hb({"enrolled": 1, "unlisted": 1, "outbox_pending": 0})
         check("enrolled but never listed also counts as blind (timer kept)",
               val("select blind_since is not null from public.mdm_status") == "t")
-        hb({"enrolled": 1, "unlisted": 0, "stalest_apps_age_s": 60, "outbox_pending": 0})
+        check("a 'no phone watched' incident is open while the alert stands", val("select count(*) from public.mdm_incidents where kind='no_phone_watched' and ended_at is null") == "1")
+        n = sent(); hb({"enrolled": 1, "unlisted": 0, "stalest_apps_age_s": 60, "outbox_pending": 0})
+        check("...and closed (kept) when a phone is watched again", val("select count(*) from public.mdm_incidents where kind='no_phone_watched' and ended_at is null") == "0" and val("select count(*) from public.mdm_incidents where kind='no_phone_watched' and ended_at is not null") == "1")
         check("phone watched again -> blind state and alert re-armed",
               val("select blind_since is null and not blind_alerted from public.mdm_status") == "t")
+        check("...with ONE all-clear ('being watched again')", sent() == n + 1 and "being watched again" in subjects().split(" | ")[-1], subjects().split(" | ")[-1])
+        n = sent(); hb({"enrolled": 0, "unlisted": 0, "outbox_pending": 0}); hb({"enrolled": 1, "unlisted": 0, "stalest_apps_age_s": 60, "outbox_pending": 0})
+        check("no all-clear when the 'no iPhone' alert was never sent (short blip, nothing to close)", sent() == n)
 
         # 3. stale app list
         n1 = sent(); hb({"enrolled": 1, "unlisted": 0, "stalest_apps_age_s": 11000, "outbox_pending": 0}); chk()
         check("app list 3h+ old -> one 'stale' email", sent() == n1 + 1 and "stale" in subjects().split(" | ")[-1])
         chk(); check("stale email not repeated", sent() == n1 + 1)
-        hb({"enrolled": 1, "unlisted": 0, "stalest_apps_age_s": 100, "outbox_pending": 0})
+        check("a stale app list opens an incident", val("select count(*) from public.mdm_incidents where kind='app_list_stale' and ended_at is null") == "1")
+        n = sent(); hb({"enrolled": 1, "unlisted": 0, "stalest_apps_age_s": 100, "outbox_pending": 0})
+        check("...closed on recovery", val("select count(*) from public.mdm_incidents where kind='app_list_stale' and ended_at is null") == "0" and val("select count(*) from public.mdm_incidents where kind='app_list_stale' and ended_at is not null") == "1")
+        check("fresh app list again -> ONE all-clear closing the 'stale' alert", sent() == n + 1 and "fresh again" in subjects().split(" | ")[-1], subjects().split(" | ")[-1])
         psql("update public.mdm_status set unreachable_alerted = true where id=1;")
         n2 = sent(); hb({"enrolled": 1, "unlisted": 0, "stalest_apps_age_s": 12000, "outbox_pending": 0}); chk()
         check("no double mail when the poller's own unreachable alert is active", sent() == n2)
@@ -288,12 +308,29 @@ grant usage on schema public, extensions to anon, authenticated;
             e.update(kw)
             return psql(f"select public.eg_report_mdm_event('{tok}', '{json.dumps(e)}'::jsonb);", expect_error=True)
         psql("update public.mdm_status set unreachable_alerted=false where id=1;")
+        n = sent(); ev("device_reachable_again", device="d")
+        check("reachable_again with no 'unreachable' alert outstanding sends nothing", sent() == n)
         n = sent(); ev("app_installed", bundle_id="com.x", name="X")
         check("PR #113 app_installed still emails", sent() == n + 1)
         n = sent(); ev("device_unreachable", device="d"); ev("device_unreachable", device="d", name="again")
         check("device_unreachable emails once per outage", sent() == n + 1)
-        ev("device_reachable_again", device="d"); ev("device_unreachable", device="d", name="third")
-        check("device_reachable_again re-arms; the next outage emails again", sent() == n + 2)
+        ev("device_reachable_again", device="d")
+        check("phone answers again -> ONE all-clear closing the unreachable email",
+              sent() == n + 2 and "reachable again" in subjects().split(" | ")[-1], subjects().split(" | ")[-1])
+        ev("device_unreachable", device="d", name="third")
+        check("device_reachable_again re-arms; the next outage emails again", sent() == n + 3)
+        ev("device_reachable_again", device="d")          # clear whatever is armed
+        fixed_u = {"type": "device_unreachable", "detected_at": "2026-02-01T00:00:00Z", "device": "d"}
+        fixed_r = {"type": "device_reachable_again", "detected_at": "2026-02-01T03:00:00Z", "device": "d"}
+        psql("update public.mdm_status set unreachable_alerted=false where id=1;")
+        psql(f"select public.eg_report_mdm_event('{tok}', '{json.dumps(fixed_u)}'::jsonb);")
+        n = sent()
+        for _ in range(2): psql(f"select public.eg_report_mdm_event('{tok}', '{json.dumps(fixed_r)}'::jsonb);")
+        check("a RETRIED reachable_again delivers exactly ONE all-clear (BEFORE trigger + dedupe)", sent() == n + 1, f"{sent() - n} sent")
+        check("an unreachable phone is logged as a closed incident with its true start and end",
+              val("select ended_at - started_at from public.mdm_incidents where kind='phone_unreachable' order by id desc limit 1") == "03:00:00"
+              and val("select count(*) from public.mdm_incidents where kind='phone_unreachable' and ended_at is null") == "0")
+        check("the all-clear reports how long the phone was unreachable", "03:00:00" in val("select body->>'html' from net.sent order by id desc limit 1"))
         dd = {"type": "app_installed", "detected_at": "2026-01-01T00:00:00Z", "bundle_id": "com.dup2"}
         n = sent()
         for _ in range(2): psql(f"select public.eg_report_mdm_event('{tok}', '{json.dumps(dd)}'::jsonb);")
@@ -301,6 +338,12 @@ grant usage on schema public, extensions to anon, authenticated;
         check("event log stays append-only (authenticated cannot update/delete)",
               "permission denied" in psql("begin; set local role authenticated; update public.mdm_events set device='x'; rollback;", expect_error=True)[1]
               and "permission denied" in psql("begin; set local role authenticated; delete from public.mdm_events; rollback;", expect_error=True)[1])
+        psql("grant usage on schema public to anon, authenticated;")
+        def as_role(role, sql): return psql(f"begin; set local role {role}; {sql}; rollback;", expect_error=True)
+        check("anon cannot read the incident log", "permission denied" in as_role("anon", "select * from public.mdm_incidents")[1])
+        check("a logged-in user cannot edit or delete incidents",
+              "permission denied" in as_role("authenticated", "update public.mdm_incidents set ended_at = now()")[1]
+              and "permission denied" in as_role("authenticated", "delete from public.mdm_incidents")[1])
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
 
