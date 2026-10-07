@@ -168,10 +168,15 @@ def approvals(devices, key):
         return
     udid = enrolled[0]
     d = devices[udid]
-    try:
-        enqueue_command(udid, key, {"RequestType": "DeviceInformation", "Queries": ["IsSupervised"]})
-    except Exception as e:
-        log(f"DeviceInformation FAILED {e}")
+    ps = load(POLL_STATE, {})
+    last = ps.get(udid, {}).get("last_devinfo_at")
+    if not last or datetime.now(timezone.utc) - datetime.fromisoformat(last) > timedelta(hours=1):
+        try:                                 # supervision almost never changes: ask hourly, not every 5 minutes
+            enqueue_command(udid, key, {"RequestType": "DeviceInformation", "Queries": ["IsSupervised"]})
+            ps[udid] = dict(ps.get(udid, {}), last_devinfo_at=datetime.now(timezone.utc).isoformat())
+            save(POLL_STATE, ps)
+        except Exception as e:
+            log(f"DeviceInformation FAILED {e}")
     report_results()
     rc, out, err = sender("--sync")
     if rc != 0:

@@ -128,8 +128,9 @@ reset(); script["--sync"] = (0, json.dumps({"blocked": [], "actions": [{"id": 7,
 pl.approvals(dev(True), "k")
 rm = [r for _, r in enq if r["RequestType"] == "RemoveApplication"]
 check("a queued removal becomes an MDM RemoveApplication for that bundle id", rm and rm[0]["Identifier"] == "com.x")
-check("poller asks the phone whether it is supervised each cycle", any(r["RequestType"] == "DeviceInformation" for _, r in enq))
+check("poller asks the phone whether it is supervised", any(r["RequestType"] == "DeviceInformation" for _, r in enq))
 reset(); pl.approvals(dev(True), "k")
+check("...but only once an hour, not every 5-minute run", not [1 for _, r in enq if r["RequestType"] == "DeviceInformation"])
 check("an unanswered removal is not re-sent within 20 minutes", not [1 for _, r in enq if r["RequestType"] == "RemoveApplication"])
 
 reset(); cid = json.load(open(Path(pst) / "pending-cmds.json")); cid = [k for k, v in cid.items() if v["kind"] == "remove"][0]
