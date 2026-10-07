@@ -16,11 +16,11 @@ window.__apps=[mk("Cool Game",2,"3.1","com.cool.game","pending"),mk("<img src=x 
 window.__inc=[{kind:"monitor_silent",started_at:new Date(Date.now()-3600e3).toISOString(),ended_at:new Date(Date.now()-1800e3).toISOString(),detail:"<b>x</b>"},
   {kind:"phone_unreachable",started_at:new Date(Date.now()-600e3).toISOString(),ended_at:null,detail:"iPhone"}];
 window.__calls=[]; window.__ov={data:{baseline_closed:true,supervised:false,last_snapshot_at:new Date().toISOString(),block_ok:null}};
-window.__decide={data:{ok:true}}; window.__confirmMsgs=[]; window.__confirmAnswer=true;
+window.__att={data:{state:"ok"}}; window.__decide={data:{ok:true}}; window.__confirmMsgs=[]; window.__confirmAnswer=true;
 window.confirm=(m)=>{window.__confirmMsgs.push(m);return window.__confirmAnswer;};
 window.supabase={createClient:()=>({
  auth:{getSession:async()=>({data:{session:{user:{email:"dad@example.test"}}}}),onAuthStateChange:()=>{},signOut:async()=>{}},
- rpc:async(fn,a)=>{window.__calls.push([fn,a]);return fn==="eg_mdm_overview"?window.__ov:window.__decide;},
+ rpc:async(fn,a)=>{window.__calls.push([fn,a]);return fn==="eg_mdm_overview"?window.__ov:fn==="eg_mdm_attest_status"?window.__att:window.__decide;},
  from:(t)=>t==="mdm_apps"?{select:()=>({order:async()=>({data:window.__apps})})}
    :t==="mdm_incidents"?{select:()=>({order:()=>({limit:async()=>window.__incres||({data:window.__inc})})})}:{select:()=>({order:()=>({limit:async()=>({data:[]})})})},
  storage:{from:()=>({createSignedUrls:async()=>({data:[]})})}})};
@@ -47,6 +47,7 @@ async function boot(setup) {
   check("a resolved gap is not presented as proof nothing happened", /not proof nothing happened/.test(box.textContent));
   check("incident detail text is escaped", !box.querySelector(".asub b") && box.textContent.includes("<b>x</b>"));
 
+  check("G11 integrity chip: matches approved (and says it is self-reported)", /G11 code matches approved \(self-reported\)/.test(box.textContent));
   w.__confirmAnswer = false;
   box.querySelector('.abtn.approve[data-b="com.cool.game"]').click(); await sleep(50);
   check("declining the confirm makes NO decision call", !w.__calls.some(c => c[0] === "eg_mdm_decide") && w.__confirmMsgs.length === 1);
@@ -70,6 +71,18 @@ async function boot(setup) {
   check("a server refusal is shown to the user and the buttons come back",
     /Could not save: not allowed/.test(d.getElementById("aerr").textContent) && !d.querySelector(".abtn").disabled);
   w.close();
+
+  for (const [st, rx, cls] of [["drift", /G11 CODE DIFFERS FROM APPROVED/, "bad"], ["outdated", /older approved code/, "warn"], ["no_manifest", /No approved G11 manifest/, "warn"]]) {
+    const dm = new JSDOM(html.replace('window.__att={data:{state:"ok"}}', `window.__att={data:{state:"${st}"}}`), { runScripts: "dangerously", url: "https://example.test/", pretendToBeVisual: true });
+    await sleep(250);
+    const chip = [...dm.window.document.querySelectorAll("#apps .chip")].find(c => rx.test(c.textContent));
+    check(`integrity state '${st}' shows a ${cls} chip`, !!chip && chip.classList.contains(cls));
+    dm.window.close();
+  }
+  const dn = new JSDOM(html.replace('window.__att={data:{state:"ok"}}', 'window.__att={error:{message:"x"}}'), { runScripts: "dangerously", url: "https://example.test/", pretendToBeVisual: true });
+  await sleep(250);
+  check("integrity status unavailable: no chip, rest of the panel unaffected", !/G11 code|G11 CODE|G11 running/.test(dn.window.document.getElementById("apps").textContent) && /Awaiting your decision/.test(dn.window.document.getElementById("apps").textContent));
+  dn.window.close();
 
   // incident table missing (SQL not installed yet): the apps panel still works
   const dom4 = new JSDOM(html.replace('window.__calls=[]', 'window.__incres={error:{message:"missing"}};window.__calls=[]'), { runScripts: "dangerously", url: "https://example.test/", pretendToBeVisual: true });

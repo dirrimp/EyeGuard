@@ -1,0 +1,48 @@
+name: Publish G11 manifest
+
+# On every merge to main that touches what runs on the G11, record the approved hashes in
+# public.g11_manifests (Dad's Supabase). The G11 reports what it actually has and the
+# DATABASE compares (supabase/g11_attest.sql). Same trust path as the Mac release manifest:
+# SUPABASE_SERVICE_ROLE_KEY exists only as a GitHub Actions secret owned by Dad. Nothing on the
+# G11, and no agent session, ever holds a key that can write a manifest. Rows are insert-only.
+#
+# Order: Dad runs supabase/g11_attest.sql BEFORE merging, or this job fails with a 404 on the
+# table (loudly, on purpose). The first merge after the SQL publishes the first manifest.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "g11/**"
+      - "deploy/g11-poller.cron"
+      - "deploy/gen_g11_manifest.py"
+      - "deploy/g11_install.sh"
+
+jobs:
+  publish-g11-manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish manifest for this commit
+        env:
+          SUPABASE_URL: https://ucgldleacehxjjwwqomk.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
+            echo "::error::SUPABASE_SERVICE_ROLE_KEY secret is not set (repo Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
+          BODY="$(python3 - "$GITHUB_SHA" <<'PY'
+          import json, subprocess, sys
+          m = json.loads(subprocess.check_output(["python3", "deploy/gen_g11_manifest.py", sys.argv[1]]))
+          print(json.dumps({"version": m["version"], "items": m["items"]}))
+          PY
+          )"
+          echo "$BODY" | python3 -m json.tool >/dev/null
+          curl -sf -X POST "$SUPABASE_URL/rest/v1/g11_manifests" \
+            -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: resolution=ignore-duplicates" \
+            -d "$BODY"
+          echo "published G11 manifest $GITHUB_SHA"

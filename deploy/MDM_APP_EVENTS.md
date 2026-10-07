@@ -146,6 +146,14 @@ the list in the dashboard (approved list, Revoke) right after the first snapshot
 - Only a device in Apple Business Manager can be made impossible to unenroll. That needs an ABM
   account and is not part of this setup.
 
+## Dad-owned integrity watch over the G11 (fourth PR)
+`deploy/G11_ATTESTATION.md` explains it fully. In short: merging to `main` publishes the approved
+hashes of the G11 code into Dad's database (CI, Dad's secret, insert-only); the G11 reports what
+it has every 5 minutes; the DATABASE compares. Unapproved code is emailed at once, an old-but-approved
+deploy after 24 h, a missing report after 15 min; each has an all-clear and a permanent incident.
+It is evidence, not proof, against someone with root on the G11; the TPM layer that would be proof is
+documented there with what it needs.
+
 ## Residuals (accepted, stated plainly)
 - The hook's port (:8080) is unauthenticated inside the private docker network
   (never published). A container on that network could forge check-ins. Same trust

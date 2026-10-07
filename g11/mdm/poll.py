@@ -29,6 +29,8 @@ BUNDLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
 CMD_STALE = timedelta(minutes=20)    # an unanswered command is re-sent after this
 BLOCK_REFRESH = timedelta(hours=6)
 LOG = os.environ.get("MDM_LOG", "/opt/kev/mdm/poll.log")
+HOOK_PATH = os.environ.get("MDM_HOOK_PATH", "/opt/stack/mdm/hook/hook.py")
+CRONTAB_CMD = os.environ.get("MDM_CRONTAB", "crontab")
 
 
 def log(msg):
@@ -335,6 +337,44 @@ def heartbeat():
     return info
 
 
+def file_hash(path):
+    try:
+        with open(path, "rb") as f:
+            return "sha256:" + hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return None                          # missing = reported as missing, never skipped
+
+
+def attestation():
+    """What this G11 is actually running, as hashes only (no content). The SERVER compares
+    this with the manifest Dad's CI published; see supabase/g11_attest.sql for exactly what
+    that does and does not prove (the report is made on this machine, so it is evidence,
+    not proof against root)."""
+    here = os.path.dirname(os.path.abspath(SENDER))
+    items = {"file:eg_report.py": file_hash(os.path.join(here, "eg_report.py")),
+             "file:eg-report.sh": file_hash(os.path.join(here, "eg-report.sh")),
+             "file:poll.py": file_hash(os.path.abspath(__file__)),
+             "file:hook.py": file_hash(HOOK_PATH)}
+    try:
+        cur = subprocess.run([CRONTAB_CMD, "-l"], capture_output=True, text=True, timeout=20).stdout
+    except Exception:
+        cur = ""
+    lines = [l.strip() for l in cur.splitlines() if "poll.py" in l and not l.lstrip().startswith("#")]
+    # exactly one live poller line is expected; none, or extras, hash to something no manifest has
+    items["cron:poller"] = ("sha256:" + hashlib.sha256(lines[0].encode()).hexdigest()) if len(lines) == 1 else \
+        ("sha256:" + hashlib.sha256(("\n".join(sorted(lines)) + "\n#count=%d" % len(lines)).encode()).hexdigest())
+    return {"items": items}
+
+
+def send_attestation():
+    rep = attestation()
+    if not os.access(SENDER, os.X_OK):
+        return rep
+    r = subprocess.run([SENDER, "--attest", json.dumps(rep)], capture_output=True, text=True, timeout=60)
+    log(f"attest rc={r.returncode} {r.stderr.strip()[:160]}")
+    return rep
+
+
 def lock():
     """One run at a time. A run that is still going when the next fires (slow network)
     makes the newer one exit quietly; the running one sends the heartbeat when done. A run
@@ -355,3 +395,7 @@ if __name__ == "__main__":
         sys.exit(0)
     main()
     heartbeat()
+    try:
+        send_attestation()                   # after the heartbeat so a failure here never blocks it
+    except Exception as e:
+        log(f"attest ERROR {e!r}")
