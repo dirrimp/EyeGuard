@@ -196,7 +196,7 @@ Every item here produces an email to the partner:
 |------|------|
 | `eyeguard/` | the Mac agent — `capture`, `detector` (+ `clip_preprocess`, `clip_assets/`), `risk`, `context`, `logger`, `uploader`, `frame_crypto`, `net`, `menubar`, `retention`, `viewer`; the root daemons `session_watcher`, `deploy_watcher`; the tamper monitors `integrity`, `extensions`, `vm_monitor`; `findmy_watcher` |
 | `router/` | `eyeguard-phone.py` (DNS wire capture), `eyeguard-router-watcher.py` (config/integrity), procd init scripts, config example |
-| `g11/` | `eg-report.sh` / `eg_report.py`: durable-queue event reporter run on the G11 (MDM app-install events) |
+| `g11/` | `eg-report.sh` / `eg_report.py`: durable-queue event reporter + `--heartbeat` run on the G11; `g11/mdm/`: the NanoMDM webhook (`hook.py`) and cron poller (`poll.py`) |
 | `supabase/*.sql` | schema, RLS lock, heartbeat + alert functions, the anon-client pivot, and every incremental alert-logic migration — run in the SQL Editor |
 | `docs/index.html` | the partner dashboard (GitHub Pages) |
 | `deploy/` | LaunchDaemon plists, `update.sh`, manifest publishers, `decrypt_frame.py`, and the current docs: `STATUS.md` (as-built + accepted residuals + open items), `WORKFLOW.md` (dev/deploy loop), `PHONE.md` (router monitoring), `RELEASE_CHECKLIST.md` |
@@ -252,4 +252,4 @@ device lockdown) are each set up separately — see `deploy/` and `router/`.
 | Config lock — partner-held pause password + append-only + lockout | ✅ in place |
 | Hardened-runtime code signing (denies `lldb` / `DYLD_INSERT_LIBRARIES` against the agent) | ✅ signed & enforcing; interpreter-swap covered by a root-owned bundle + a per-cycle `csops` check (`deploy/STATUS.md`) |
 | Sign the `.app` bundle itself / MDM-managed browser / full MDM | ⬜ optional — see `deploy/STATUS.md` |
-| iPhone app-install alerts via G11 MDM (`g11/`, `supabase/mdm_app_events.sql`) | 🟡 PR open; needs Dad's SQL + token, and the phone enrolled |
+| iPhone app-install alerts via G11 MDM (`g11/`, `supabase/mdm_app_events.sql`, `supabase/mdm_heartbeat.sql`) | 🟡 events live (PR #113); poller/hook + heartbeat in review; the iPhone itself is not enrolled yet |

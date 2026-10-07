@@ -17,6 +17,8 @@ Dead letters (malformed events the server rejects with 400): eg-queue/dead/.
 Exit codes:  0 event delivered OR safely queued for retry
              2 bad input / config problem (event NOT recorded)  -- see stderr
              3 queued, but a human must act (credential rejected 401, or config missing/wrong mode)
+--heartbeat '<json>' (NOT queued: a late beat would hide an outage, so a miss is a miss):
+             0 beat accepted   3 credential/config problem   4 transient failure (next run retries)
 Nothing but fixed status words is printed to stdout; the token is never logged.
 """
 import fcntl, hashlib, json, os, stat, sys, time, urllib.error, urllib.request
@@ -24,7 +26,7 @@ from datetime import datetime
 
 CONF = os.environ.get("EG_REPORT_CONF", "/opt/kev/mdm/eg-report.json")
 QDIR = os.environ.get("EG_REPORT_QUEUE", "/opt/kev/mdm/eg-queue")
-TYPES = {"app_installed", "app_removed", "device_unreachable", "device_reachable_again"}
+TYPES = {"app_installed", "app_removed", "device_unreachable", "device_reachable_again", "device_reenrolled"}
 TIMEOUT = float(os.environ.get("EG_REPORT_TIMEOUT", "10"))
 ATTEMPTS = int(os.environ.get("EG_REPORT_ATTEMPTS", "3"))
 
@@ -111,6 +113,23 @@ def post(conf, ev):
         return ("retry", type(e).__name__)
 
 
+def heartbeat(conf, info):
+    """One attempt, no queue. Returns 'ok' | 'auth' | 'retry'."""
+    req = urllib.request.Request(
+        conf["supabase_url"] + "/rest/v1/rpc/eg_mdm_heartbeat",
+        data=json.dumps({"p_token": conf["device_token"], "p_info": info}).encode(),
+        method="POST",
+        headers={"apikey": conf["anon_key"], "Authorization": "Bearer " + conf["anon_key"],
+                 "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT):
+            return "ok"
+    except urllib.error.HTTPError as e:
+        return "auth" if e.code == 401 else "retry"
+    except Exception:
+        return "retry"
+
+
 def flush(conf):
     """Send queued events oldest-first. Stops at the first transient failure to
     preserve order. Returns (delivered, remaining, auth_failed)."""
@@ -150,9 +169,35 @@ def _dead(path):
     os.rename(path, os.path.join(d, os.path.basename(path)))
 
 
+def main_heartbeat(raw):
+    try:
+        info = json.loads(raw)
+        if not isinstance(info, dict):
+            raise ValueError("heartbeat info must be a JSON object")
+    except Exception as e:
+        err(f"invalid heartbeat info: {e}")
+        return 2
+    try:
+        conf = load_conf()
+    except Exception as e:
+        err(f"config error: {e}")
+        return 3
+    r = heartbeat(conf, info)
+    if r == "ok":
+        print("ok")
+        return 0
+    if r == "auth":
+        err("server rejected the device token (401)")
+        return 3
+    err("heartbeat not delivered (transient); the next run will try again")
+    return 4
+
+
 def main(argv):
+    if len(argv) == 3 and argv[1] == "--heartbeat":
+        return main_heartbeat(argv[2])
     if len(argv) != 2:
-        err("usage: eg-report.sh '<event-json>' | --flush | --status")
+        err("usage: eg-report.sh '<event-json>' | --flush | --status | --heartbeat '<json>'")
         return 2
     arg = argv[1]
     if arg == "--status":
