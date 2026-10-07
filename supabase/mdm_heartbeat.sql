@@ -8,7 +8,7 @@
 --
 -- Three emails (each sent ONCE per condition, re-armed when it clears), all to
 -- the same recipients as the app-install emails (it calls eg_send_email_mdm):
---   1. Heartbeats stopped for > 45 min (poller runs every 15 min = 3 misses).
+--   1. Heartbeats stopped for > 15 min (poller runs every 5 min = 3 misses).
 --   2. Heartbeats arriving but NO phone is enrolled / an enrolled phone has
 --      never returned an app list, continuously for > 2 hours.
 --   3. Enrolled phone's newest app list is > 3 hours old, unless the poller's
@@ -30,6 +30,9 @@
 --   mdm_app_events.sql afterwards: its eg_send_email_mdm() recipient list in
 --   the repo still holds the placeholder and would overwrite your edited one.
 -- * Run the whole file in the SQL editor, then the verify select at the bottom.
+-- * Cadence: the G11 poller must run every 5 minutes (deploy/g11_install.sh does this). This check
+--   runs every minute and alerts when no heartbeat for > 15 min. If you run this SQL first, the
+--   first-run grace below gives Jonah 2 hours to deploy the G11 side.
 -- * First-run grace: last_heartbeat_at is seeded 2 hours in the FUTURE, so the
 --   "stopped" email cannot fire until the G11 has had time to be updated.
 --   If the G11 is never updated, you WILL get the "stopped" email ~2h45m
@@ -174,12 +177,12 @@ begin
 
   -- 1. watcher gone quiet. Takes priority: the figures below are only trusted
   --    while heartbeats are fresh.
-  if now() - s.last_heartbeat_at > interval '45 minutes' then
+  if now() - s.last_heartbeat_at > interval '15 minutes' then
     if not s.quiet_alerted then
       perform public.eg_send_email_mdm(
         E'\U0001F6D1 EyeGuard \u2014 iPhone app monitoring STOPPED reporting',
         format('<p><b>The G11 app-install monitor has not checked in for %s.</b></p>'
-            || '<p>It reports every 15 minutes. Until it is back, installs on the '
+            || '<p>It reports every 5 minutes. Until it is back, installs on the '
             || 'iPhone are <b>not being watched</b>. Likely causes: the G11 is off or '
             || 'offline, the poller cron stopped or crashed, or the device token was '
             || 'rejected.</p>', age(now(), s.last_heartbeat_at)));
@@ -281,7 +284,7 @@ create trigger eg_mdm_recovered before insert on public.mdm_events
 
 select cron.unschedule('eyeguard-mdm-status')
   where exists (select 1 from cron.job where jobname = 'eyeguard-mdm-status');
-select cron.schedule('eyeguard-mdm-status', '*/5 * * * *',
+select cron.schedule('eyeguard-mdm-status', '* * * * *',
   $$ select public.eg_check_mdm_status(); $$);
 
 -- ---- 4. verify (read-only). Expect every column true. -----------------------

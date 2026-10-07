@@ -115,6 +115,29 @@ except Exception as e:
     ok = False
 check("missing sender does not crash the poller", ok)
 
+print("A2b. poll.py cadence safety (5-minute runs)")
+cst = tempfile.mkdtemp()
+pc = load_module(str(ROOT / "g11/mdm/poll.py"), "poll_c", {"MDM_STATE": cst, "MDM_SENDER": str(Path(cst) / "none"), "MDM_LOG": str(Path(cst) / "log")})
+enq = []
+pc.api_key = lambda: "k"; pc.enqueue = lambda u, k: enq.append(u) or 200
+def devs(**kw): json.dump({"u1": dict({"enrolled": True, "name": "d"}, **kw)}, open(Path(cst) / "devices.json", "w"))
+devs(); pc.main()
+check("first run asks the phone for its app list", enq == ["u1"])
+pc.main()
+check("next run does NOT stack another request while the phone has not answered", enq == ["u1"])
+now_ = datetime.now(timezone.utc)
+devs(last_apps_at=(now_ + timedelta(seconds=5)).isoformat()); pc.main()
+check("once the phone answered, the next run asks again", enq == ["u1", "u1"])
+ps = json.load(open(Path(cst) / "poll-state.json")); ps["u1"]["last_enqueue_at"] = (now_ - timedelta(minutes=31)).isoformat()
+json.dump(ps, open(Path(cst) / "poll-state.json", "w")); devs(last_apps_at=(now_ - timedelta(hours=1)).isoformat()); pc.main()
+check("an unanswered request is re-sent after 30 minutes (never stuck forever)", enq == ["u1", "u1", "u1"])
+check("poller-owned state lives in poll-state.json, not the hook's devices.json",
+      "last_enqueue_at" not in json.load(open(Path(cst) / "devices.json"))["u1"])
+l1 = pc.lock(); l2 = pc.lock()
+check("only one poller run at a time (second run gets no lock)", l1 is not None and l2 is None)
+l1.close(); l3 = pc.lock()
+check("the lock is released when the run ends", l3 is not None); l3.close()
+
 print("A3. eg_report.py --heartbeat")
 class H:
     seen = []; code = 200
@@ -234,10 +257,12 @@ grant usage on schema public, extensions to anon, authenticated;
               val("select now() - last_heartbeat_at < interval '5 seconds' from public.mdm_status") == "t")
 
         # 1. gone quiet
-        age("last_heartbeat_at", "44 minutes"); chk()
-        check("44 min since beat -> no email yet", sent() == 0)
-        age("last_heartbeat_at", "50 minutes"); chk()
-        check("50 min since beat -> exactly one STOPPED email", sent() == 1 and "STOPPED" in subjects(), subjects() or "")
+        age("last_heartbeat_at", "14 minutes"); chk()
+        check("14 min since beat (2 missed 5-min runs) -> no email yet", sent() == 0)
+        age("last_heartbeat_at", "16 minutes"); chk()
+        check("16 min since beat (3 missed runs) -> exactly one STOPPED email", sent() == 1 and "STOPPED" in subjects(), subjects() or "")
+        check("the STOPPED email says it reports every 5 minutes",
+              "every 5 minutes" in val("select body->>'html' from net.sent order by id desc limit 1"))
         chk(); chk(); check("repeated checks do not re-email", sent() == 1)
         check("the silence is recorded as an OPEN incident in the permanent log", val("select count(*) from public.mdm_incidents where kind='monitor_silent' and ended_at is null") == "1" and val("select count(*) from public.mdm_incidents") == "1" ,
               val("select * from public.mdm_incidents"))

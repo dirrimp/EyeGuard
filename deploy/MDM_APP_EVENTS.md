@@ -4,7 +4,7 @@
 
 ## Why
 Ask to Buy does not catch redownloads of previously-approved apps. The G11's
-NanoMDM can list what is installed, so a diff every 15 min catches them.
+NanoMDM can list what is installed, so a check every 5 min catches them.
 
 ## Data flow
 G11 poller -> `eg-report.sh '<event-json>'` -> queue file (fsync) -> HTTPS POST
@@ -34,7 +34,7 @@ server's clock.
 
 ## Poller, webhook and heartbeat (second PR)
 `g11/mdm/hook.py` (container `mdm-hook`, receives NanoMDM check-ins/acks, diffs the
-installed-app list, writes events to `outbox/`) and `g11/mdm/poll.py` (cron `*/15`,
+installed-app list, writes events to `outbox/`) and `g11/mdm/poll.py` (cron `*/5`,
 asks the phone for its app list, delivers the outbox through `eg-report.sh`) were
 already running on the G11. They are now in the repo; commit 1 of the PR is the
 live code byte-for-byte, commit 2 is the change.
@@ -47,7 +47,7 @@ every 5 minutes. Each email is sent once per condition and re-arms when it clear
 
 | Condition (server clock / figures) | Email |
 |---|---|
-| no heartbeat for > 45 min | "app monitoring STOPPED reporting" |
+| no heartbeat for > 15 min (poller runs every 5 min = 3 misses; checked every minute) | "app monitoring STOPPED reporting" |
 | `enrolled = 0` or an enrolled phone never returned a list, for > 2 h | "no iPhone is being watched by MDM" |
 | newest app list > 3 h old, and the poller's own unreachable alert is not active | "iPhone app list is stale" |
 
@@ -66,9 +66,11 @@ then stayed armed forever and the NEXT real outage was logged but not emailed.
 2. Dad: run `supabase/mdm_heartbeat.sql` (no placeholders; do NOT re-run
    `mdm_app_events.sql` after it: that file still holds the recipient placeholder).
    First-run grace: the "stopped" check is held off 2 h so the G11 can be updated.
-3. Jonah, on the G11: copy `g11/eg_report.py` and `g11/eg-report.sh` to `/opt/kev/mdm/`,
-   `g11/mdm/poll.py` to `/opt/kev/mdm/poll.py`, `g11/mdm/hook.py` to
-   `/opt/stack/mdm/hook/hook.py`, then `docker restart mdm-hook`.
+3. Jonah, on the G11, from a checkout of `main`: `deploy/g11_install.sh --dry-run`, then
+   `deploy/g11_install.sh`. It backs up replaced files, installs them with the right modes, sets
+   the poller to every 5 minutes, restarts the hook only if it changed, and refuses to run if the
+   credential file is missing, not mode 600, or its token is not 64 hex characters. Do this within
+   2 hours of Dad running the SQL (the first-run grace); after that the silence alert is real.
 4. Jonah: enrol the iPhone (`/opt/stack/mdm/enroll/enroll.mobileconfig`). Until a phone
    is enrolled nothing is being watched; the "no iPhone is being watched" email
    fires after 2 h of heartbeats with `enrolled = 0` and will keep that visible.
@@ -91,6 +93,6 @@ then stayed armed forever and the NEXT real outage was logged but not emailed.
 1. Copy `g11/eg-report.sh` and `g11/eg_report.py` to `/opt/kev/mdm/` (0755).
 2. Create `/opt/kev/mdm/eg-report.json`, mode 0600:
    `{"supabase_url":"https://<ref>.supabase.co","anon_key":"<public anon key>","device_token":"<token from Dad>"}`
-3. Optional retry timer: cron `*/5 * * * * /opt/kev/mdm/eg-report.sh --flush`.
+3. Optional retry timer: cron `*/5 * * * * /opt/kev/mdm/eg-report.sh --flush` (the poller now flushes each run).
 Exit codes: 0 delivered or queued; 2 bad input (not recorded); 3 queued but a
 human must act (token rejected, or config missing / wrong mode).
