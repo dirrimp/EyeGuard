@@ -176,8 +176,11 @@ grant usage on schema public, extensions, auth to anon, authenticated;
     check("block-list failure emails once", sent() == n0 + 1)
     psql(f"select public.eg_mdm_block_result('{tok}', false, 2, 'not supervised');")
     check("repeated block failure does not re-email", sent() == n0 + 1)
-    psql(f"select public.eg_mdm_block_result('{tok}', true, 2, 'ok');")
+    n1 = sent(); psql(f"select public.eg_mdm_block_result('{tok}', true, 2, 'ok');")
     check("block-list success recorded", val("select block_ok from public.mdm_status") == "t")
+    check("a recovered block list sends ONE all-clear", sent() == n1 + 1 and "block list is applied" in last_subject(), last_subject())
+    n1 = sent(); psql(f"select public.eg_mdm_block_result('{tok}', true, 2, 'ok');")
+    check("repeated success does not re-send it", sent() == n1)
 
     print("removed / reinstalled apps")
     decide(DAD, "com.evil", "deny")
@@ -206,6 +209,22 @@ grant usage on schema public, extensions, auth to anon, authenticated;
     check("reminders are throttled to once per 24h", sent() == n0)
     check("approved apps are never nagged",
           val("select count(*) from public.mdm_apps where status='approved' and last_nag_at is not null") == "0")
+
+    print("monitor-back-online email knows about apps seen during the gap (needs both SQL files)")
+    from datetime import datetime, timezone
+    iso_now = lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    hb_ok = lambda: psql(f"select public.eg_mdm_heartbeat('{tok}', '{{\"enrolled\":1,\"unlisted\":0,\"stalest_apps_age_s\":60,\"outbox_pending\":0}}'::jsonb);")
+    psql("update public.mdm_status set last_heartbeat_at = now() - interval '50 minutes', quiet_alerted = false where id=1;")
+    psql("select public.eg_check_mdm_status();")
+    hb_ok()
+    check("quiet gap with nothing new: all-clear says no new app was detected (and admits blind spots)",
+          "back online" in last_subject() and "No new app was detected" in last_html() and "not proof" in last_html(), last_subject())
+    psql("update public.mdm_status set last_heartbeat_at = now() - interval '50 minutes', quiet_alerted = false where id=1;")
+    psql("select public.eg_check_mdm_status();")
+    snap(BASE + NEW + [("com.during.gap", "During Gap")], det=iso_now())
+    n1 = sent(); hb_ok()
+    check("quiet gap during which an app appeared: all-clear says so and points at the dashboard",
+          sent() == n1 + 1 and "1 new app(s) appeared" in last_html() and "Partner Dashboard" in last_html(), last_html()[:240])
 
     print("privileges and RLS")
     for t in ("mdm_apps", "mdm_app_log", "mdm_decisions", "mdm_actions"):

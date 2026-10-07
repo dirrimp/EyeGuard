@@ -271,11 +271,19 @@ function arow(a, btns){
   return `<div class="arow"><div><div class="aname">${name}</div><div class="asub">${sub}</div></div>`
     + `<div class="abtns">${btns.map(([d,l])=>`<button class="abtn ${d}" data-b="${esc(a.bundle_id)}" data-n="${name}" data-d="${d}">${l}</button>`).join("")}</div></div>`;
 }
+const KIND = {monitor_silent:"Monitor stopped reporting", no_phone_watched:"No phone being watched",
+  app_list_stale:"Phone's app list went stale", phone_unreachable:"Phone unreachable"};
+function dur(a,b){
+  const m = Math.max(0, Math.round(((b?new Date(b):new Date())-new Date(a))/60000));
+  return m<90 ? m+" min" : m<2880 ? (m/60).toFixed(1)+" h" : Math.round(m/1440)+" d";
+}
 async function loadApps(){
   const box = $("apps");
-  const [ov, ap] = await Promise.all([sb.rpc("eg_mdm_overview"),
-    sb.from("mdm_apps").select("*").order("first_seen_at",{ascending:false})]);
+  const [ov, ap, inc] = await Promise.all([sb.rpc("eg_mdm_overview"),
+    sb.from("mdm_apps").select("*").order("first_seen_at",{ascending:false}),
+    sb.from("mdm_incidents").select("*").order("started_at",{ascending:false}).limit(30)]);
   if(ov.error || ap.error){ box.innerHTML=""; return; }
+  const gaps = inc.error ? [] : (inc.data||[]);
   const o = ov.data||{}, apps = ap.data||[];
   const pend = apps.filter(a=>a.status==="pending"), den = apps.filter(a=>a.status==="denied"),
         okk = apps.filter(a=>a.status==="approved");
@@ -299,10 +307,17 @@ async function loadApps(){
     + den.map(a=>arow(a,[["approve","Approve instead"]])).join("")+`</div>`;
   if(okk.length) html += `<details class="asec"><summary>Approved list (${okk.length})</summary>`
     + okk.map(a=>arow(a,[["revoke","Revoke"]])).join("")+`</details>`;
+  if(gaps.length) html += `<details class="asec"${gaps.some(g=>!g.ended_at)?" open":""}><summary>Monitoring gaps (${gaps.length})</summary>`
+    + gaps.map(g=>`<div class="arow"><div><div class="aname">${esc(KIND[g.kind]||g.kind)}</div>`
+      + `<div class="asub">${esc(new Date(g.started_at).toLocaleString([],{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}))}`
+      + ` · ${g.ended_at? "lasted "+esc(dur(g.started_at,g.ended_at)) : "STILL OPEN ("+esc(dur(g.started_at))+" so far)"}`
+      + `${g.detail? " · "+esc(g.detail):""}</div></div>`
+      + `<span class="chip ${g.ended_at?"warn":"bad"}">${g.ended_at?"resolved":"open"}</span></div>`).join("")
+    + `<div class="asub" style="margin-top:8px">A resolved gap is not proof nothing happened: MDM sees which apps are installed at each check, not what happened in between.</div></details>`;
   html += `<div class="aerr" id="aerr"></div></div>`;
-  const keep = box.querySelector("details")?.open;           // don't collapse it under the reader
+  const wasOpen = [...box.querySelectorAll("details")].map(d=>d.open);   // don't collapse them under the reader
   box.innerHTML = html;
-  if(keep) box.querySelector("details").open = true;
+  box.querySelectorAll("details").forEach((d,i)=>{ if(wasOpen[i]) d.open = true; });
 }
 document.addEventListener("click", async (e)=>{
   const b = e.target.closest(".abtn[data-b]");

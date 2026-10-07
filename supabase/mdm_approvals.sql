@@ -188,9 +188,9 @@ begin
         public.eg_mdm_esc(a->>'bundle_id'), public.eg_mdm_esc(a->>'version'));
     end loop;
     subj := case when n = 1
-      then E'\U0001F4F2 EyeGuard — new app awaiting approval: '
+      then E'\U0001F4F2 EyeGuard \u2014 new app awaiting approval: '
            || coalesce(nullif(fresh->0->>'name', ''), fresh->0->>'bundle_id')
-      else E'\U0001F4F2 EyeGuard — ' || n || ' new apps awaiting approval' end;
+      else E'\U0001F4F2 EyeGuard \u2014 ' || n || ' new apps awaiting approval' end;
     perform public.eg_send_email_mdm(subj,
       format('<p><b>%s new app(s) appeared on %s that are not on the approved list.</b></p><ul>%s</ul>'
           || '<p>Open the <a href="https://dirrimp.github.io/EyeGuard/">Partner Dashboard</a>, '
@@ -243,7 +243,7 @@ begin
   end if;
   verb := case p_decision when 'approve' then 'APPROVED' when 'deny' then 'DENIED' else 'moved back to pending' end;
   perform public.eg_send_email_mdm(
-    E'\U0001F5F3️ EyeGuard — ' || coalesce(nullif(ex.app_name, ''), ex.bundle_id) || ' ' || verb,
+    E'\U0001F5F3\uFE0F EyeGuard \u2014 ' || coalesce(nullif(ex.app_name, ''), ex.bundle_id) || ' ' || verb,
     format('<p><b>%s</b> %s <b>%s</b> (%s).</p>%s',
       public.eg_mdm_esc(coalesce(em, 'a partner')), lower(verb),
       public.eg_mdm_esc(coalesce(nullif(ex.app_name, ''), ex.bundle_id)),
@@ -297,7 +297,7 @@ begin
     update public.mdm_actions set status = 'failed', result = left(p_detail, 300), updated_at = now() where id = p_id;
     select coalesce(nullif(app_name, ''), bundle_id) into nm from public.mdm_apps where bundle_id = r.bundle_id;
     perform public.eg_send_email_mdm(
-      E'⚠️ EyeGuard — could not remove denied app: ' || coalesce(nm, r.bundle_id),
+      E'\u26A0\uFE0F EyeGuard \u2014 could not remove denied app: ' || coalesce(nm, r.bundle_id),
       format('<p><b>MDM could not remove %s from the phone</b> after %s attempts.</p>'
           || '<p>Reason reported: %s</p><p>MDM can only remove apps it installed itself. The app stays '
           || 'flagged as denied and you will be reminded daily while it is installed.</p>',
@@ -325,11 +325,17 @@ begin
          block_detail = left(p_detail, 300), block_applied_at = now() where id = 1;
   if not p_ok and prev is distinct from false then
     perform public.eg_send_email_mdm(
-      E'⚠️ EyeGuard — could not apply the app block list',
+      E'\u26A0\uFE0F EyeGuard \u2014 could not apply the app block list',
       format('<p><b>The G11 could not push the app block list (%s app(s)) to the phone.</b></p>'
           || '<p>Reason reported: %s</p><p>Blocking requires a <b>supervised</b> phone. '
           || 'Denied apps stay flagged and are reminded daily.</p>',
           coalesce(p_count::text, '?'), public.eg_mdm_esc(left(p_detail, 300))));
+  end if;
+  if p_ok and prev is false then
+    perform public.eg_send_email_mdm(
+      E'\u2705 EyeGuard \u2014 the app block list is applied',
+      format('<p><b>The G11 has now pushed the app block list (%s app(s)) to the phone.</b> This clears the '
+          || 'earlier &ldquo;could not apply the block list&rdquo; alert.</p>', coalesce(p_count::text, '?')));
   end if;
   return jsonb_build_object('ok', true);
 end $$;
@@ -367,7 +373,7 @@ begin
      and (last_nag_at is null or last_nag_at < now() - interval '24 hours');
   if np > 0 then
     perform public.eg_send_email_mdm(
-      E'\U0001F4F2 EyeGuard — ' || np || ' app(s) still awaiting approval',
+      E'\U0001F4F2 EyeGuard \u2014 ' || np || ' app(s) still awaiting approval',
       format('<p><b>These apps have been on the phone for over a day without a decision:</b></p><ul>%s</ul>'
           || '<p>Open the <a href="https://dirrimp.github.io/EyeGuard/">Partner Dashboard</a> '
           || '&rarr; Apps to approve or deny.</p>', pend));
@@ -382,7 +388,7 @@ begin
      and (last_nag_at is null or last_nag_at < now() - interval '24 hours');
   if nd > 0 then
     perform public.eg_send_email_mdm(
-      E'\U0001F6AB EyeGuard — ' || nd || ' DENIED app(s) still on the phone',
+      E'\U0001F6AB EyeGuard \u2014 ' || nd || ' DENIED app(s) still on the phone',
       format('<p><b>These apps were denied but are still installed:</b></p><ul>%s</ul><p>%s</p>', dnd,
         case when s.supervised is true
           then 'The phone is supervised: check that the block list applied.'

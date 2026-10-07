@@ -13,13 +13,16 @@ const STUB = `<script>
 const mk=(n,b,v,bid,st)=>({bundle_id:bid,app_name:n,app_version:v,status:st,present:true,first_seen_at:new Date(Date.now()-3600e3*b).toISOString()});
 window.__apps=[mk("Cool Game",2,"3.1","com.cool.game","pending"),mk("<img src=x onerror=document.title='XSS'>",1,"1","com.evil","pending"),
   mk("Sketchy Chat",30,"2","com.sketchy.chat","denied"),mk("Calendar",900,"9","com.cal","approved")];
+window.__inc=[{kind:"monitor_silent",started_at:new Date(Date.now()-3600e3).toISOString(),ended_at:new Date(Date.now()-1800e3).toISOString(),detail:"<b>x</b>"},
+  {kind:"phone_unreachable",started_at:new Date(Date.now()-600e3).toISOString(),ended_at:null,detail:"iPhone"}];
 window.__calls=[]; window.__ov={data:{baseline_closed:true,supervised:false,last_snapshot_at:new Date().toISOString(),block_ok:null}};
 window.__decide={data:{ok:true}}; window.__confirmMsgs=[]; window.__confirmAnswer=true;
 window.confirm=(m)=>{window.__confirmMsgs.push(m);return window.__confirmAnswer;};
 window.supabase={createClient:()=>({
  auth:{getSession:async()=>({data:{session:{user:{email:"dad@example.test"}}}}),onAuthStateChange:()=>{},signOut:async()=>{}},
  rpc:async(fn,a)=>{window.__calls.push([fn,a]);return fn==="eg_mdm_overview"?window.__ov:window.__decide;},
- from:(t)=>t==="mdm_apps"?{select:()=>({order:async()=>({data:window.__apps})})}:{select:()=>({order:()=>({limit:async()=>({data:[]})})})},
+ from:(t)=>t==="mdm_apps"?{select:()=>({order:async()=>({data:window.__apps})})}
+   :t==="mdm_incidents"?{select:()=>({order:()=>({limit:async()=>window.__incres||({data:window.__inc})})})}:{select:()=>({order:()=>({limit:async()=>({data:[]})})})},
  storage:{from:()=>({createSignedUrls:async()=>({data:[]})})}})};
 </script>`;
 const html = page.replace(/<script src="https:\/\/cdn\.jsdelivr\.net[^"]*"><\/script>/, () => STUB);
@@ -38,6 +41,11 @@ async function boot(setup) {
   check("unsupervised phone is called out plainly", /NOT supervised/i.test(box.textContent));
   check("hostile app name is rendered as text, never as markup", !box.querySelector("img") && w.document.title !== "XSS"
     && box.textContent.includes("<img src=x onerror=document.title='XSS'>"));
+
+  check("monitoring gaps are listed, with the open one flagged", /Monitoring gaps \(2\)/.test(box.textContent)
+    && /Monitor stopped reporting/.test(box.textContent) && /STILL OPEN/.test(box.textContent) && box.querySelectorAll("details")[1].open);
+  check("a resolved gap is not presented as proof nothing happened", /not proof nothing happened/.test(box.textContent));
+  check("incident detail text is escaped", !box.querySelector(".asub b") && box.textContent.includes("<b>x</b>"));
 
   w.__confirmAnswer = false;
   box.querySelector('.abtn.approve[data-b="com.cool.game"]').click(); await sleep(50);
@@ -62,6 +70,13 @@ async function boot(setup) {
   check("a server refusal is shown to the user and the buttons come back",
     /Could not save: not allowed/.test(d.getElementById("aerr").textContent) && !d.querySelector(".abtn").disabled);
   w.close();
+
+  // incident table missing (SQL not installed yet): the apps panel still works
+  const dom4 = new JSDOM(html.replace('window.__calls=[]', 'window.__incres={error:{message:"missing"}};window.__calls=[]'), { runScripts: "dangerously", url: "https://example.test/", pretendToBeVisual: true });
+  await sleep(300);
+  const b4 = dom4.window.document.getElementById("apps");
+  check("no incident table yet: no gaps section, apps panel unaffected", /Awaiting your decision/.test(b4.textContent) && !/Monitoring gaps/.test(b4.textContent));
+  dom4.window.close();
 
   // a logged-in account that is NOT a partner (or SQL not installed): panel stays hidden
   const dom2 = new JSDOM(html.replace('window.__ov={data:', 'window.__ov={error:{message:"not allowed"},data:'), { runScripts: "dangerously", url: "https://example.test/", pretendToBeVisual: true });
