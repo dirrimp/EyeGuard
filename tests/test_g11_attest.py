@@ -236,6 +236,11 @@ grant usage on schema public, extensions, auth to anon, authenticated, service_r
         attest(V2)
         check("first report arrives -> all-clear", "arriving again" in subj() and inc("g11_attest_missing", True) == "0")
 
+        re_e = json.dumps({"type": "device_reenrolled", "detected_at": "2026-03-02T10:00:00Z", "device": "Jonah iPhone"})
+        r = psql(f"select public.eg_report_mdm_event('{tok}', $j${re_e}$j$::jsonb);", err_ok=True)
+        check("after this file widens the incident kinds, a re-enrolment still logs its incident (no constraint clash)",
+              '"ok": true' in r[0] and val("select count(*) from public.mdm_incidents where kind='mdm_reenrolled'") == "1", r[0] + r[1])
+
         print("   partner view")
         ok = psql(f"begin; set local role authenticated; select set_config('request.jwt.claim.sub','{DAD}',true); select public.eg_mdm_attest_status(); commit;", err_ok=True)
         check("a partner sees the state and the approved version", '"state"' in ok[0] and '"manifest"' in ok[0], ok[0] + ok[1])

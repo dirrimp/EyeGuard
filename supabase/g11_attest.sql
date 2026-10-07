@@ -57,7 +57,7 @@ alter table public.mdm_status
 
 alter table public.mdm_incidents drop constraint if exists mdm_incidents_kind_check;
 alter table public.mdm_incidents add constraint mdm_incidents_kind_check check (kind in (
-  'monitor_silent','no_phone_watched','app_list_stale','phone_unreachable',
+  'monitor_silent','no_phone_watched','app_list_stale','phone_unreachable','mdm_reenrolled',
   'g11_drift','g11_outdated','g11_attest_missing'));
 
 -- ---- 3. the G11 reports what it has; the server decides ------------------------------
