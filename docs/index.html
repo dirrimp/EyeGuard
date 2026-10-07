@@ -57,6 +57,37 @@ body{background:var(--bg);color:var(--ink);font:15px/1.45 var(--body);
 .fbtn[data-sev="yellow"].active{border-color:var(--yellow);color:#ffc24d;}
 .fbtn[data-sev="green"].active{border-color:var(--green);color:#5fd98a;}
 
+
+/* ---------- apps panel (MDM approve / deny) ---------- */
+.apps{margin:18px 0 6px;}
+.apps:empty{display:none;}
+.apanel{background:var(--card);border:1px solid var(--line);border-top:3px solid var(--teal);padding:16px 18px;}
+.apanel h2{font-family:var(--head);font-size:13px;color:var(--muted);text-transform:uppercase;
+  letter-spacing:.08em;margin:0 0 10px;font-weight:700;display:flex;gap:10px;align-items:center;}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 14px;}
+.chip{font-size:11px;text-transform:uppercase;letter-spacing:.05em;padding:4px 10px;
+  border:1px solid var(--line);color:var(--muted);}
+.chip.ok{color:#5fd98a;border-color:var(--green);}
+.chip.warn{color:#ffc24d;border-color:var(--yellow);}
+.chip.bad{color:#ff8a85;border-color:var(--red);}
+.arow{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap;
+  padding:10px 0;border-top:1px solid var(--line);}
+.arow:first-of-type{border-top:0;}
+.aname{font-weight:700;}
+.asub{color:var(--muted);font-size:12px;word-break:break-all;}
+.abtns{display:flex;gap:8px;}
+.abtn{font-family:var(--head);font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;
+  color:var(--ink);background:rgba(255,255,255,.08);border:1px solid var(--line);padding:8px 14px;cursor:pointer;}
+.abtn.approve{background:#1d4a2f;border-color:var(--green);}
+.abtn.deny{background:#4a1f1d;border-color:var(--red);}
+.abtn:disabled{opacity:.5;cursor:default;}
+.asec{margin-top:16px;}
+.asec>h3{font-family:var(--head);font-size:12px;color:var(--muted);text-transform:uppercase;
+  letter-spacing:.08em;margin:0 0 4px;}
+details.asec>summary{cursor:pointer;font-family:var(--head);font-size:12px;color:var(--muted);
+  text-transform:uppercase;letter-spacing:.08em;}
+.aerr{color:#ff8a85;font-size:13px;margin-top:10px;}
+
 /* ---------- feed (wide, fills landscape) ---------- */
 .feed{max-width:1680px;margin:0 auto;padding:8px 28px 60px;}
 .day{margin-top:26px;}
@@ -167,8 +198,9 @@ footer{color:var(--muted);font-size:11px;text-align:center;padding:24px;
     </div>
   </div>
 
+  <div class="apps" id="apps"></div>
   <div class="feed" id="feed"></div>
-  <footer>Read-only · history auto-deletes after 7 days · flags carry a review image, browsing shows site only</footer>
+  <footer>Flags are read-only (apps can be approved or denied above) · history auto-deletes after 7 days · flags carry a review image, browsing shows site only</footer>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
@@ -223,7 +255,86 @@ function showApp(session){
 const esc = (s)=>String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;")
   .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 
+// ---------- apps (MDM official list: approve / deny) ----------
+// All rights are enforced on the SERVER (eg_mdm_decide accepts only the two partner
+// accounts). If this account is not a partner or the SQL is not installed yet the
+// panel simply stays hidden.
+function ago(iso){
+  if(!iso) return "never";
+  const m = Math.round((Date.now()-new Date(iso).getTime())/60000);
+  return m<2 ? "just now" : m<90 ? m+" min ago" : m<2880 ? Math.round(m/60)+" h ago" : Math.round(m/1440)+" d ago";
+}
+function arow(a, btns){
+  const name = esc(a.app_name||a.bundle_id);
+  const sub = esc(a.bundle_id)+(a.app_version? " · v"+esc(a.app_version):"")
+    + (a.present? "" : " · not installed now") + " · first seen " + esc(ago(a.first_seen_at));
+  return `<div class="arow"><div><div class="aname">${name}</div><div class="asub">${sub}</div></div>`
+    + `<div class="abtns">${btns.map(([d,l])=>`<button class="abtn ${d}" data-b="${esc(a.bundle_id)}" data-n="${name}" data-d="${d}">${l}</button>`).join("")}</div></div>`;
+}
+const KIND = {monitor_silent:"Monitor stopped reporting", no_phone_watched:"No phone being watched",
+  app_list_stale:"Phone's app list went stale", phone_unreachable:"Phone unreachable"};
+function dur(a,b){
+  const m = Math.max(0, Math.round(((b?new Date(b):new Date())-new Date(a))/60000));
+  return m<90 ? m+" min" : m<2880 ? (m/60).toFixed(1)+" h" : Math.round(m/1440)+" d";
+}
+async function loadApps(){
+  const box = $("apps");
+  const [ov, ap, inc] = await Promise.all([sb.rpc("eg_mdm_overview"),
+    sb.from("mdm_apps").select("*").order("first_seen_at",{ascending:false}),
+    sb.from("mdm_incidents").select("*").order("started_at",{ascending:false}).limit(30)]);
+  if(ov.error || ap.error){ box.innerHTML=""; return; }
+  const gaps = inc.error ? [] : (inc.data||[]);
+  const o = ov.data||{}, apps = ap.data||[];
+  const pend = apps.filter(a=>a.status==="pending"), den = apps.filter(a=>a.status==="denied"),
+        okk = apps.filter(a=>a.status==="approved");
+  const sup = o.supervised===true ? ["ok","Phone supervised: enforcement possible"]
+            : o.supervised===false ? ["warn","Phone NOT supervised: deny flags only, cannot block"]
+            : ["warn","Supervision unknown"];
+  const blk = den.length===0 ? null
+            : o.block_ok===true ? ["ok","Block list applied ("+esc(o.block_count)+")"]
+            : ["bad","Block list not applied"+(o.block_detail? ": "+esc(o.block_detail):"")];
+  const chips = [sup, ["", "Last app list "+esc(ago(o.last_snapshot_at))],
+                 ["ok", okk.length+" approved"], pend.length? ["warn", pend.length+" pending"] : null,
+                 den.length? ["bad", den.length+" denied"] : null, blk].filter(Boolean)
+    .map(([c,t])=>`<span class="chip ${c}">${t}</span>`).join("");
+  let html = `<div class="apanel"><h2>Apps on the phone</h2><div class="chips">${chips}</div>`;
+  if(!o.baseline_closed){
+    html += `<div class="asub">Waiting for the first app list from the phone. It becomes the approved list.</div>`;
+  }
+  if(pend.length) html += `<div class="asec"><h3>Awaiting your decision</h3>`
+    + pend.map(a=>arow(a,[["approve","Approve"],["deny","Deny"]])).join("")+`</div>`;
+  if(den.length) html += `<div class="asec"><h3>Denied</h3>`
+    + den.map(a=>arow(a,[["approve","Approve instead"]])).join("")+`</div>`;
+  if(okk.length) html += `<details class="asec"><summary>Approved list (${okk.length})</summary>`
+    + okk.map(a=>arow(a,[["revoke","Revoke"]])).join("")+`</details>`;
+  if(gaps.length) html += `<details class="asec"${gaps.some(g=>!g.ended_at)?" open":""}><summary>Monitoring gaps (${gaps.length})</summary>`
+    + gaps.map(g=>`<div class="arow"><div><div class="aname">${esc(KIND[g.kind]||g.kind)}</div>`
+      + `<div class="asub">${esc(new Date(g.started_at).toLocaleString([],{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}))}`
+      + ` · ${g.ended_at? "lasted "+esc(dur(g.started_at,g.ended_at)) : "STILL OPEN ("+esc(dur(g.started_at))+" so far)"}`
+      + `${g.detail? " · "+esc(g.detail):""}</div></div>`
+      + `<span class="chip ${g.ended_at?"warn":"bad"}">${g.ended_at?"resolved":"open"}</span></div>`).join("")
+    + `<div class="asub" style="margin-top:8px">A resolved gap is not proof nothing happened: MDM sees which apps are installed at each check, not what happened in between.</div></details>`;
+  html += `<div class="aerr" id="aerr"></div></div>`;
+  const wasOpen = [...box.querySelectorAll("details")].map(d=>d.open);   // don't collapse them under the reader
+  box.innerHTML = html;
+  box.querySelectorAll("details").forEach((d,i)=>{ if(wasOpen[i]) d.open = true; });
+}
+document.addEventListener("click", async (e)=>{
+  const b = e.target.closest(".abtn[data-b]");
+  if(!b) return;
+  const d = b.dataset.d, n = b.dataset.n || b.dataset.b;
+  const q = d==="deny" ? `Deny "${n}"?\n\nIt is flagged and reminded about daily. If the phone is supervised it is also blocked and a removal is attempted. Both partners are emailed.`
+          : d==="revoke" ? `Take "${n}" off the approved list?\n\nIt goes back to pending until someone approves it again.`
+          : `Approve "${n}"?\n\nIt joins the official list. Both partners are emailed.`;
+  if(!confirm(q)) return;
+  document.querySelectorAll(".abtn").forEach(x=>x.disabled=true);
+  const { error } = await sb.rpc("eg_mdm_decide", {p_bundle_id:b.dataset.b, p_decision:d});
+  if(error){ await loadApps(); const el=$("aerr"); if(el) el.textContent="Could not save: "+(error.message||"error"); return; }
+  await loadApps();
+});
+
 async function load(){
+  loadApps().catch(console.error);
   const { data, error } = await sb.from("flags")
     .select("*").order("flagged_at",{ascending:false}).limit(1200);
   if(error){ console.error(error); return; }

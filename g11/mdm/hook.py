@@ -3,8 +3,10 @@
 
 NanoMDM POSTs every check-in and command result here. This keeps:
   state/devices.json   enrolled devices (udid -> name, enrolled/checked-out, last_seen)
-  state/apps-<udid>.json  last known installed-app list
-and writes one JSON file per event into state/outbox/ for poll.sh to deliver to EyeGuard.
+  state/results/<uuid>.json  outcome of commands the poller sent (pending-cmds.json)
+and writes one JSON file per event into state/outbox/ for poll.py to deliver to EyeGuard.
+Each app list becomes ONE app_snapshot event; the server diffs it against the official
+list (no baseline is kept here).
 Stdlib only. Listens on :8080 inside the private docker network (never published).
 """
 import base64, json, os, plistlib, sys, time, uuid
@@ -81,6 +83,22 @@ def handle_checkin(ev):
         touch_device(udid, enrolled=True)
 
 
+def record_result(cmd_uuid, status, pl):
+    """Outcome of a command the POLLER sent (it lists them in pending-cmds.json).
+    Written to results/<uuid>.json for the poller to report. NotNow/Idle are not
+    outcomes (the device was busy; MDM redelivers). No app data is stored."""
+    if not cmd_uuid or status not in ("Acknowledged", "Error", "CommandFormatError"):
+        return
+    if cmd_uuid not in load("pending-cmds.json", {}):
+        return
+    parts = []
+    for e in (pl.get("ErrorChain") or [])[:3]:
+        parts.append(f"{e.get('ErrorCode', '?')}: {str(e.get('USEnglishDescription') or e.get('LocalizedDescription') or '')[:100]}")
+    os.makedirs(os.path.join(STATE, "results"), exist_ok=True)
+    save(os.path.join("results", f"{cmd_uuid}.json"),
+         {"uuid": cmd_uuid, "status": status, "error": "; ".join(parts)[:300]})
+
+
 def handle_ack(ev):
     udid = ev.get("udid")
     raw = ev.get("raw_payload")
@@ -92,35 +110,33 @@ def handle_ack(ev):
         print(f"[hook] bad payload: {e}", flush=True)
         return
     devices = load("devices.json", {})
-    prev_seen = devices.get(udid, {}).get("last_apps_at")
     was_unreachable = devices.get(udid, {}).get("unreachable_reported")
     d = touch_device(udid)
     if was_unreachable:
         d = touch_device(udid, unreachable_reported=False)
         emit({"type": "device_reachable_again", "detected_at": now_iso(), "device": d["name"]})
+    status = pl.get("Status") or ev.get("status")
+    record_result(ev.get("command_uuid") or pl.get("CommandUUID"), status, pl)
+    qr = pl.get("QueryResponses")
+    if isinstance(qr, dict) and "IsSupervised" in qr:
+        d = touch_device(udid, supervised=bool(qr["IsSupervised"]))
     if pl.get("Status") != "Acknowledged" or "InstalledApplicationList" not in pl:
         return
-    apps = {}
+    apps = []
     for a in pl["InstalledApplicationList"]:
         bid = a.get("Identifier")
         if bid:
-            apps[bid] = {"name": a.get("Name") or bid,
-                         "version": a.get("ShortVersion") or a.get("Version") or ""}
-    key = f"apps-{udid}.json"
-    old = load(key, None)
+            apps.append({"bundle_id": bid, "name": a.get("Name") or bid,
+                         "version": a.get("ShortVersion") or a.get("Version") or ""})
+    if not apps:          # a real phone always has apps; never send (or trust) an empty list
+        print(f"[hook] {now_iso()} empty app list ignored", flush=True)
+        return
     t = now_iso()
-    if old is None:
-        print(f"[hook] {t} baseline: {len(apps)} apps", flush=True)
-    else:
-        for bid in sorted(set(apps) - set(old)):
-            emit({"type": "app_installed", "detected_at": t, "window_start": prev_seen or t,
-                  "device": d["name"], "name": apps[bid]["name"], "bundle_id": bid,
-                  "version": apps[bid]["version"]})
-        for bid in sorted(set(old) - set(apps)):
-            emit({"type": "app_removed", "detected_at": t, "window_start": prev_seen or t,
-                  "device": d["name"], "name": old[bid]["name"], "bundle_id": bid,
-                  "version": old[bid]["version"]})
-    save(key, apps)
+    # The SERVER owns the official list and does the diff; the G11 only relays what
+    # is installed. (Previously the baseline lived in apps-<udid>.json here, and
+    # losing that file silently re-baselined.)
+    emit({"type": "app_snapshot", "detected_at": t, "device": d["name"],
+          "supervised": d.get("supervised"), "apps": apps})
     touch_device(udid, last_apps_at=t, app_count=len(apps))
 
 
