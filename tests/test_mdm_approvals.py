@@ -222,6 +222,12 @@ grant usage on schema public, extensions, auth to anon, authenticated;
           and "permission denied" in as_user(DAD, "update public.mdm_decisions set decision='approve'")[1])
     check("nobody but cron can run the reminder check",
           "permission denied" in as_user(DAD, "select public.eg_check_mdm_apps()")[1])
+    ov = as_user(DAD, "select public.eg_mdm_overview()")[0].split("\n")[-1]
+    check("partner overview returns supervised / block-list state",
+          '"supervised": true' in ov and '"block_ok": true' in ov, ov)
+    check("overview is partner-only (Jonah and anon refused)",
+          "not allowed" in as_user(JONAH, "select public.eg_mdm_overview()")[1]
+          and "permission denied" in as_user(None, "select public.eg_mdm_overview()", "anon")[1])
     check("token RPCs are not callable by a logged-in user",
           "permission denied" in as_user(DAD, f"select public.eg_mdm_sync('{tok}')")[1])
 finally:

@@ -336,6 +336,24 @@ end $$;
 revoke execute on function public.eg_mdm_block_result(text, boolean, int, text) from public, anon, authenticated, service_role;
 grant execute on function public.eg_mdm_block_result(text, boolean, int, text) to anon;
 
+-- ---- 5b. what the partner dashboard shows above the app list ------------------
+create or replace function public.eg_mdm_overview() returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+declare s public.mdm_status;
+begin
+  if not public.eg_is_mdm_partner() then
+    raise exception 'not allowed' using errcode = 'PT403';
+  end if;
+  select * into s from public.mdm_status where id = 1;
+  return jsonb_build_object(
+    'baseline_closed', s.baseline_closed, 'supervised', s.supervised,
+    'last_snapshot_at', s.last_snapshot_at, 'last_heartbeat_at', s.last_heartbeat_at,
+    'enrolled', s.enrolled_count, 'block_ok', s.block_ok, 'block_count', s.block_count,
+    'block_detail', s.block_detail, 'block_applied_at', s.block_applied_at);
+end $$;
+revoke execute on function public.eg_mdm_overview() from public, anon, authenticated, service_role;
+grant execute on function public.eg_mdm_overview() to authenticated;
+
 -- ---- 6. reminders (cron only) ---------------------------------------------------
 create or replace function public.eg_check_mdm_apps() returns void
 language plpgsql security definer set search_path = public as $$
@@ -389,6 +407,7 @@ select
   not has_function_privilege('anon', 'public.eg_mdm_decide(text, text, text)', 'execute')   as decide_not_anon,
   has_function_privilege('authenticated', 'public.eg_mdm_decide(text, text, text)', 'execute') as decide_for_logged_in,
   not has_function_privilege('anon', 'public.eg_check_mdm_apps()', 'execute')               as reminders_locked,
+  not has_function_privilege('anon', 'public.eg_mdm_overview()', 'execute')                 as overview_not_anon,
   not has_table_privilege('anon', 'public.mdm_apps', 'select')                              as apps_not_anon_readable,
   not has_table_privilege('authenticated', 'public.mdm_apps', 'insert')                     as apps_not_writable,
   exists (select 1 from cron.job where jobname = 'eyeguard-mdm-apps')                       as cron_scheduled;
