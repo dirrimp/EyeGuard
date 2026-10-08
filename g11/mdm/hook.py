@@ -24,18 +24,43 @@ def now_iso():
 
 
 def load(name, default):
-    try:
-        with open(os.path.join(STATE, name)) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return default
+    p = os.path.join(STATE, name)
+    for cand in (p, p + ".bak"):        # fall back to the last good copy if the file is empty/corrupt
+        try:
+            with open(cand) as f:
+                data = json.load(f)
+            if cand != p:
+                print(f"[hook] WARNING {name} was unreadable; using the last good copy", flush=True)
+            return data
+        except FileNotFoundError:
+            continue
+        except json.JSONDecodeError:
+            print(f"[hook] ERROR {os.path.basename(cand)} is empty or corrupt", flush=True)
+            continue
+    return default
 
 
 def save(name, data):
     p = os.path.join(STATE, name)
-    with open(p + ".tmp", "w") as f:
-        json.dump(data, f, indent=1, sort_keys=True)
-    os.replace(p + ".tmp", p)
+    try:                                # keep the previous good copy for recovery
+        if os.path.getsize(p) > 0:
+            import shutil
+            shutil.copyfile(p, p + ".bak")
+    except OSError:
+        pass
+    tmp = p + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=1, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, p)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def emit(event):

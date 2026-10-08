@@ -12,7 +12,7 @@
    caught by the server, not trusted to this script. A run that crashes
    (e.g. missing API key) deliberately sends no heartbeat.
 """
-import base64, fcntl, hashlib, json, os, plistlib, re, ssl, subprocess, sys, time, urllib.request, uuid
+import base64, fcntl, hashlib, json, os, plistlib, re, shutil, ssl, subprocess, sys, time, urllib.request, uuid
 from datetime import datetime, timezone, timedelta
 
 STATE = os.environ.get("MDM_STATE", "/opt/stack/mdm/hook-state")
@@ -60,24 +60,61 @@ def enqueue(udid, key):
         return r.status
 
 
-def load(name, default):
+def _atomic_write(path, text):
+    """Write the WHOLE file (flush + fsync) to a temp file, and only then swap it in. If anything
+    fails (a full disk raises ENOSPC here), the temp file is removed, the existing file is left
+    exactly as it was, and the error is raised so the caller knows. (The previous version wrote
+    through an unclosed file object: on a full disk the last write failed silently and a
+    truncated file replaced the good one. That is how devices.json became 0 bytes.)"""
+    tmp = path + ".tmp"
     try:
-        return json.load(open(os.path.join(STATE, name)))
-    except (FileNotFoundError, json.JSONDecodeError):
-        return default
+        with open(tmp, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def load(name, default):
+    """Read a state file. If it is unreadable (empty/corrupt), fall back to the last good copy
+    (.bak, kept by save) and say so loudly; only a file that never existed yields the default."""
+    p = os.path.join(STATE, name)
+    for cand in (p, p + ".bak"):
+        try:
+            with open(cand) as f:
+                data = json.load(f)
+            if cand != p:
+                log(f"WARNING {name} was unreadable; using the last good copy ({os.path.basename(cand)})")
+            return data
+        except FileNotFoundError:
+            continue
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            log(f"ERROR {os.path.basename(cand)} is empty or corrupt")
+            continue
+    return default
 
 
 def save(name, data):
     p = os.path.join(STATE, name)
-    json.dump(data, open(p + ".tmp", "w"), indent=1, sort_keys=True)
-    os.replace(p + ".tmp", p)
+    text = json.dumps(data, indent=1, sort_keys=True)
+    try:                                    # keep the previous good copy for recovery
+        if os.path.getsize(p) > 0:
+            shutil.copyfile(p, p + ".bak")
+    except OSError:
+        pass
+    _atomic_write(p, text)
 
 
 def emit(event):
     os.makedirs(OUTBOX, exist_ok=True)
     p = os.path.join(OUTBOX, f"{int(time.time()*1000)}-{uuid.uuid4().hex[:8]}.json")
-    json.dump(event, open(p + ".tmp", "w"))
-    os.replace(p + ".tmp", p)
+    _atomic_write(p, json.dumps(event))
 
 
 def sender(*args):

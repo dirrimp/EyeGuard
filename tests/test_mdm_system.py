@@ -214,6 +214,51 @@ t0 = time.time(); pw.main(); dt = time.time() - t0
 check("when a request is still outstanding (skipped, nothing asked) the run does not wait at all", not asked_n and dt < 1.0, f"{dt:.1f}s asked={asked_n}")
 check("the production wait is 25 seconds", load_module(str(ROOT / "g11/mdm/poll.py"), "poll_w2", {"MDM_ANSWER_WAIT": "25"}).ANSWER_WAIT == 25)
 
+print("A2d. state survives a full disk (this is what destroyed devices.json on 2026-10-07)")
+import builtins, errno
+sd = tempfile.mkdtemp()
+pd = load_module(str(ROOT / "g11/mdm/poll.py"), "poll_d", {"MDM_STATE": sd, "MDM_SENDER": str(Path(sd) / "none"), "MDM_LOG": str(Path(sd) / "log")})
+good = {"u1": {"enrolled": True, "name": "d", "last_apps_at": "2026-10-08T00:00:00+00:00"}}
+pd.save("devices.json", good)
+_real_open = builtins.open
+class _Full:
+    """A file on a full disk, as it really behaves: writes look fine (buffered), only part reaches the disk, and ENOSPC surfaces when the data is flushed/closed."""
+    def __init__(self, f): self._f = f
+    def __enter__(self): return self
+    def __exit__(self, *a): self._f.close(); return False
+    def write(self, x):                               # looks like it worked, but only part of it landed
+        self._f.write(x[: max(1, len(x) // 3)]); return len(x)
+    def flush(self): raise OSError(errno.ENOSPC, "No space left on device")   # the failure only shows when flushing
+    def fileno(self): return self._f.fileno()
+    def close(self): self._f.close()
+def full_open(path, mode="r", *a, **k):
+    f = _real_open(path, mode, *a, **k)
+    return _Full(f) if str(path).endswith(".tmp") and "w" in mode else f
+def raises_enospc(fn):
+    builtins.open = full_open
+    try: fn(); return False
+    except OSError as e: return e.errno == errno.ENOSPC
+    finally: builtins.open = _real_open
+dev = Path(sd) / "devices.json"
+check("save() on a full disk raises (the caller knows) instead of pretending it worked", raises_enospc(lambda: pd.save("devices.json", {"u1": {"enrolled": True, "x": "y" * 500}})))
+check("...the GOOD devices.json is untouched (not truncated, not replaced by a partial file)", json.load(open(dev)) == good and dev.stat().st_size > 0)
+check("...and no half-written temp file is left behind", not list(Path(sd).glob("*.tmp")))
+check("emit() on a full disk raises and leaves NO truncated event in the outbox", raises_enospc(lambda: pd.emit({"type": "device_unreachable", "detected_at": "x"}))
+      and not list((Path(sd) / "outbox").glob("*")))
+pd.save("devices.json", {"u1": {"enrolled": True, "name": "d", "v": 2}})
+check("a normal save keeps the previous good copy as devices.json.bak", json.load(open(str(dev) + ".bak")) == good)
+dev.write_text("")                                         # exactly what the full disk left on the G11
+check("an EMPTY devices.json recovers from the last good copy and says so in the log",
+      pd.load("devices.json", {}) == good and "using the last good copy" in (Path(sd) / "log").read_text())
+check("the heartbeat built from the recovered state still counts the enrolled phone (it said enrolled=0 before)", pd.heartbeat()["enrolled"] == 1)
+Path(str(dev) + ".bak").unlink()
+check("empty file and no good copy: falls back to nothing, loudly (ERROR in the log), never a crash",
+      pd.load("devices.json", {"d": 1}) == {"d": 1} and "is empty or corrupt" in (Path(sd) / "log").read_text())
+check("a state file that never existed is just the default (first run is not an error)", pd.load("never.json", {"fresh": True}) == {"fresh": True})
+hd = tempfile.mkdtemp(); hk = load_module(str(ROOT / "g11/mdm/hook.py"), "hook_d", {"HOOK_STATE": hd})
+hk.save("devices.json", good); hk.save("devices.json", {"u1": {"enrolled": True, "v": 2}}); (Path(hd) / "devices.json").write_text("")
+check("the hook also recovers an empty devices.json from its last good copy", hk.load("devices.json", {}) == good)
+
 print("A3. eg_report.py --heartbeat")
 class H:
     seen = []; code = 200
