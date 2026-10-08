@@ -166,6 +166,54 @@ check("only one poller run at a time (second run gets no lock)", l1 is not None 
 l1.close(); l3 = pc.lock()
 check("the lock is released when the run ends", l3 is not None); l3.close()
 
+print("A2c. same-run delivery (install-to-alert latency)")
+import threading
+lt = tempfile.mkdtemp(); rec = Path(lt) / "sender.rec"
+fake = Path(lt) / "fake-sender.sh"; fake.write_text(f'#!/bin/sh\nprintf "%s\\n" "$1" >> {rec}\necho delivered\nexit 0\n'); fake.chmod(0o755)
+pw = load_module(str(ROOT / "g11/mdm/poll.py"), "poll_w", {"MDM_STATE": lt, "MDM_SENDER": str(fake), "MDM_LOG": str(Path(lt) / "log"), "MDM_ANSWER_WAIT": "3"})
+pw.api_key = lambda: "k"
+def put_dev(**kw): json.dump({"u1": dict({"enrolled": True, "name": "d"}, **kw)}, open(Path(lt) / "devices.json", "w"))
+asked_n = []
+def make_enqueue(delay):
+    def enq(udid, key):
+        asked_n.append(udid)
+        if delay is not None:
+            def answer():                      # what the hook does: snapshot into the outbox FIRST, then last_apps_at
+                ob = Path(lt) / "outbox"; ob.mkdir(exist_ok=True)
+                f = ob / f"{int(time.time()*1000)}-aa.json"
+                f.write_text(json.dumps({"type": "app_snapshot", "detected_at": "x", "apps": [{"bundle_id": "com.new.app"}]}))
+                d = json.load(open(Path(lt) / "devices.json")); d["u1"]["last_apps_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+                json.dump(d, open(Path(lt) / "devices.json", "w"))
+            threading.Timer(delay, answer).start()
+        return 200
+    return enq
+def sender_got(): return [l for l in (rec.read_text().splitlines() if rec.exists() else []) if l.startswith("{")]
+def reset_run():
+    for sub in ("outbox", "sent"):
+        for f in (Path(lt) / sub).glob("*.json"): f.unlink()
+    if rec.exists(): rec.unlink()
+    (Path(lt) / "poll-state.json").unlink(missing_ok=True)
+
+put_dev(); reset_run(); pw.enqueue = make_enqueue(1.0); t0 = time.time(); pw.main(); dt = time.time() - t0
+check("phone answers in 1 s -> its snapshot is delivered in THE SAME run (was: the next run, 5 minutes later)",
+      len(sender_got()) == 1 and "com.new.app" in sender_got()[0] and not list((Path(lt) / "outbox").glob("*.json")), str(sender_got()))
+check("...and the run did not wait longer than needed", dt < 2.5, f"{dt:.1f}s")
+
+put_dev(); reset_run(); pw.enqueue = make_enqueue(None); t0 = time.time(); pw.main(); dt = time.time() - t0
+check("phone never answers -> the run gives up after the wait (3 s here, 25 s in production) and does not crash", 2.8 <= dt < 5.5 and not sender_got(), f"{dt:.1f}s {sender_got()}")
+
+put_dev(); reset_run(); asked_n.clear(); pw.enqueue = make_enqueue(0.2); pw.main()
+check("a sub-second answer is delivered in the same run", len(sender_got()) == 1)
+json.dump({"u1": json.load(open(Path(lt) / "devices.json"))["u1"]}, open(Path(lt) / "devices.json", "w"))
+pw.main()
+check("...and is NOT mistaken for 'no answer yet': the next run asks again", asked_n.count("u1") == 2, str(asked_n))
+
+put_dev(); reset_run(); asked_n.clear(); pw.enqueue = make_enqueue(None)
+json.dump({"u1": {"last_enqueue_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat()}}, open(Path(lt) / "poll-state.json", "w"))
+t0 = time.time(); pw.main(); dt = time.time() - t0
+check("when a request is still outstanding (skipped, nothing asked) the run does not wait at all", not asked_n and dt < 1.0, f"{dt:.1f}s asked={asked_n}")
+check("the production wait is 25 seconds", load_module(str(ROOT / "g11/mdm/poll.py"), "poll_w2", {"MDM_ANSWER_WAIT": "25"}).ANSWER_WAIT == 25)
+
 print("A3. eg_report.py --heartbeat")
 class H:
     seen = []; code = 200

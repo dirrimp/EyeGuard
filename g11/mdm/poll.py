@@ -22,6 +22,7 @@ SENDER = os.environ.get("MDM_SENDER", "/opt/kev/mdm/eg-report.sh")
 API = "https://mdm.orthanc.me/v1"
 UNREACHABLE_AFTER = timedelta(minutes=30)   # was 2 h; 6 missed 5-minute checks. The server also sends an all-clear when it answers again
 POLL_STATE = "poll-state.json"          # poller-owned (the hook owns devices.json: no write races)
+ANSWER_WAIT = float(os.environ.get("MDM_ANSWER_WAIT", "25"))   # seconds to wait for the phone's answer
 AWAIT_REPOLL = timedelta(minutes=30)    # don't stack commands for a phone that has not answered
 CMDS = "pending-cmds.json"          # commands this poller sent; hook records their outcome
 RESULTS = os.path.join(STATE, "results")
@@ -249,10 +250,30 @@ def prune_sent(days=2):
                 os.remove(p)
 
 
+def wait_for_answers(asked):
+    """The phone normally answers within a couple of seconds, and the hook turns the answer
+    into a snapshot in the outbox. Without this wait, that snapshot sat there until the NEXT
+    poll five minutes later (install-to-email up to ~10 minutes). Wait briefly so it is
+    delivered in THIS run. Gives up after ANSWER_WAIT: an unanswered phone is handled by the
+    unreachable alert, and the next run delivers whatever arrives later."""
+    deadline = time.time() + ANSWER_WAIT
+    pending = dict(asked)
+    while pending and time.time() < deadline:
+        now_devices = load("devices.json", {})
+        for udid, t in list(pending.items()):
+            la = now_devices.get(udid, {}).get("last_apps_at")
+            if la and datetime.fromisoformat(la) >= t:
+                del pending[udid]
+        if pending:
+            time.sleep(0.5)
+    return not pending
+
+
 def main():
     key = api_key()
     devices = load("devices.json", {})
     now = datetime.now(timezone.utc)
+    asked = {}                              # udid -> when we asked (whole seconds, like the hook's clock)
     for udid, d in devices.items():
         if not d.get("enrolled"):
             continue
@@ -269,8 +290,11 @@ def main():
         else:
             try:
                 log(f"enqueue {udid[:8]}… -> {enqueue(udid, key)}")
-                ps[udid] = dict(ps.get(udid, {}), last_enqueue_at=now.isoformat())
+                # whole seconds: the hook stamps last_apps_at in whole seconds, so a sub-second
+                # answer must still count as an answer (microseconds would make it look unanswered)
+                ps[udid] = dict(ps.get(udid, {}), last_enqueue_at=now.replace(microsecond=0).isoformat())
                 save(POLL_STATE, ps)
+                asked[udid] = now.replace(microsecond=0)
             except Exception as e:
                 log(f"enqueue {udid[:8]}… FAILED {e}")
         last = d.get("last_apps_at") or d.get("last_seen")
@@ -282,6 +306,9 @@ def main():
                 d["unreachable_reported"] = True
                 save("devices.json", devices)
                 log(f"device {udid[:8]}… unreachable since {last}")
+    if asked:
+        got = wait_for_answers(asked)
+        log("phone answered; delivering in this run" if got else f"no answer within {ANSWER_WAIT:g}s; next run will deliver it")
     # deliver queued events in order
     os.makedirs(SENT, exist_ok=True)
     coalesce_snapshots()
