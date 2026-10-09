@@ -131,6 +131,25 @@ the list in the dashboard (approved list, Revoke) right after the first snapshot
    is enrolled nothing is being watched; the "no iPhone is being watched" email
    fires after 2 h of heartbeats with `enrolled = 0` and will keep that visible.
 
+## Alert email sender (found 2026-10-09: no MDM alert email had been delivered)
+Resend rejects any email sent from a domain that is not verified in the account (HTTP 403,
+"The orthanc.me domain is not verified"). `eg_send_email_mdm()` (and `eg_send_email_jada()`)
+were written with `alerts@orthanc.me`, the sender PLANNED in `switch_sender_to_orthanc.sql`,
+instead of the sender the live `eg_send_email()` actually uses. Every MDM alert (new app,
+unreachable, re-enrolled, all-clears, integrity) and every Jada-phone alert was refused by
+Resend while the system itself behaved correctly. The delivery response is visible in Dad's
+database: `select id, status_code, left(content::text,120) from net._http_response order by id desc limit 5;`
+(200/202 = accepted).
+
+- **Fix:** `supabase/align_alert_senders.sql` reads the sender from the live `eg_send_email()` and
+  rewrites only the `'from'` value in the two newer functions (recipients, security and privileges
+  are preserved), so they can never diverge from the working sender again. It stops without changing
+  anything if it cannot read the live sender.
+- **Switching to `orthanc.me` later:** only after Resend shows it **Verified** (records at deSEC), and
+  by running `switch_sender_to_orthanc.sql` for the live function, then `align_alert_senders.sql` again.
+- A silent delivery failure is the same class of problem as a silent monitoring failure: after any
+  change to an alert path, send one test event and read `net._http_response`.
+
 ## Removing the MDM profile (what is and is not possible)
 - **The enrollment profile cannot be made non-removable.** iOS refuses to install an MDM profile
   marked `PayloadRemovalDisallowed` ("A profile containing an MDM payload must be removable"),
