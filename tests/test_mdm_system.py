@@ -140,12 +140,12 @@ print("A2b. poll.py cadence safety (5-minute runs)")
 cst = tempfile.mkdtemp()
 pc = load_module(str(ROOT / "g11/mdm/poll.py"), "poll_c", {"MDM_STATE": cst, "MDM_SENDER": str(Path(cst) / "none"), "MDM_LOG": str(Path(cst) / "log")})
 enq = []
-pc.api_key = lambda: "k"; pc.enqueue = lambda u, k: enq.append(u) or 200
+pc.api_key = lambda: "k"; pc.enqueue_command = lambda *a, **k: "cid"; pc.enqueue = lambda u, k: enq.append(u) or 200; pc_push = []; pc.push = lambda u, k: pc_push.append(u) or 200
 def devs(**kw): json.dump({"u1": dict({"enrolled": True, "name": "d"}, **kw)}, open(Path(cst) / "devices.json", "w"))
 devs(); pc.main()
 check("first run asks the phone for its app list", enq == ["u1"])
 pc.main()
-check("next run does NOT stack another request while the phone has not answered", enq == ["u1"])
+check("next run does NOT queue another command while the phone has not answered (it wakes the phone with a push instead)", enq == ["u1"] and pc_push == ["u1"], f"{enq} {pc_push}")
 now_ = datetime.now(timezone.utc)
 devs(last_apps_at=(now_ + timedelta(seconds=5)).isoformat()); pc.main()
 check("once the phone answered, the next run asks again", enq == ["u1", "u1"])
@@ -171,7 +171,7 @@ import threading
 lt = tempfile.mkdtemp(); rec = Path(lt) / "sender.rec"
 fake = Path(lt) / "fake-sender.sh"; fake.write_text(f'#!/bin/sh\nprintf "%s\\n" "$1" >> {rec}\necho delivered\nexit 0\n'); fake.chmod(0o755)
 pw = load_module(str(ROOT / "g11/mdm/poll.py"), "poll_w", {"MDM_STATE": lt, "MDM_SENDER": str(fake), "MDM_LOG": str(Path(lt) / "log"), "MDM_ANSWER_WAIT": "3"})
-pw.api_key = lambda: "k"
+pw.api_key = lambda: "k"; pw.enqueue_command = lambda *a, **k: "cid"
 def put_dev(**kw): json.dump({"u1": dict({"enrolled": True, "name": "d"}, **kw)}, open(Path(lt) / "devices.json", "w"))
 asked_n = []
 def make_enqueue(delay):
@@ -208,10 +208,12 @@ json.dump({"u1": json.load(open(Path(lt) / "devices.json"))["u1"]}, open(Path(lt
 pw.main()
 check("...and is NOT mistaken for 'no answer yet': the next run asks again", asked_n.count("u1") == 2, str(asked_n))
 
+pw_push = []; pw.push = lambda u, k: pw_push.append(u) or 200
 put_dev(); reset_run(); asked_n.clear(); pw.enqueue = make_enqueue(None)
 json.dump({"u1": {"last_enqueue_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat()}}, open(Path(lt) / "poll-state.json", "w"))
 t0 = time.time(); pw.main(); dt = time.time() - t0
-check("when a request is still outstanding (skipped, nothing asked) the run does not wait at all", not asked_n and dt < 1.0, f"{dt:.1f}s asked={asked_n}")
+check("an outstanding request is NOT re-queued; the phone is woken again with a push instead", not asked_n and pw_push == ["u1"], f"asked={asked_n} pushes={pw_push}")
+check("...and the run waits only the bounded time for an answer", dt < 5.5, f"{dt:.1f}s")
 check("the production wait is 25 seconds", load_module(str(ROOT / "g11/mdm/poll.py"), "poll_w2", {"MDM_ANSWER_WAIT": "25"}).ANSWER_WAIT == 25)
 
 print("A2d. state survives a full disk (this is what destroyed devices.json on 2026-10-07)")
@@ -254,10 +256,90 @@ check("the heartbeat built from the recovered state still counts the enrolled ph
 Path(str(dev) + ".bak").unlink()
 check("empty file and no good copy: falls back to nothing, loudly (ERROR in the log), never a crash",
       pd.load("devices.json", {"d": 1}) == {"d": 1} and "is empty or corrupt" in (Path(sd) / "log").read_text())
+pd.save("gone.json", {"v": 1}); pd.save("gone.json", {"v": 2}); (Path(sd) / "gone.json").unlink()
+check("a DELETED state file is the default even though a .bak exists (deleting it resets it; the old copy is not resurrected)",
+      pd.load("gone.json", {"fresh": True}) == {"fresh": True} and (Path(sd) / "gone.json.bak").exists())
 check("a state file that never existed is just the default (first run is not an error)", pd.load("never.json", {"fresh": True}) == {"fresh": True})
 hd = tempfile.mkdtemp(); hk = load_module(str(ROOT / "g11/mdm/hook.py"), "hook_d", {"HOOK_STATE": hd})
 hk.save("devices.json", good); hk.save("devices.json", {"u1": {"enrolled": True, "v": 2}}); (Path(hd) / "devices.json").write_text("")
 check("the hook also recovers an empty devices.json from its last good copy", hk.load("devices.json", {}) == good)
+hk.save("hgone.json", {"v": 1}); hk.save("hgone.json", {"v": 2}); (Path(hd) / "hgone.json").unlink()
+check("same for the hook", hk.load("hgone.json", {"fresh": True}) == {"fresh": True})
+
+print("A2e. one missed push must not become a false 'unreachable' alert (2026-10-09/10 incident)")
+et = tempfile.mkdtemp(); erec = Path(et) / "sender.rec"
+efake = Path(et) / "fake-sender.sh"; efake.write_text(f'#!/bin/sh\nprintf "%s\\n" "$1" >> {erec}\necho delivered\nexit 0\n'); efake.chmod(0o755)
+pe = load_module(str(ROOT / "g11/mdm/poll.py"), "poll_e2", {"MDM_STATE": et, "MDM_SENDER": str(efake), "MDM_LOG": str(Path(et) / "log"), "MDM_ANSWER_WAIT": "2"})
+pe.api_key = lambda: "k"; pe.enqueue_command = lambda *a, **k: "cid"
+E_enq, E_push, E_mode = [], [], {"answer_on_push": True, "push_raises": False}
+def e_answer():
+    ob = Path(et) / "outbox"; ob.mkdir(exist_ok=True)
+    (ob / f"{int(time.time()*1000)}-ee.json").write_text(json.dumps({"type": "app_snapshot", "detected_at": "x", "apps": [{"bundle_id": "com.a"}]}))
+    d = json.load(open(Path(et) / "devices.json")); d["u1"]["last_apps_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    json.dump(d, open(Path(et) / "devices.json", "w"))
+def e_enqueue(u, k): E_enq.append(u); return 200
+def e_push(u, k):
+    E_push.append(u)
+    if E_mode["push_raises"]: raise OSError("push failed")
+    if E_mode["answer_on_push"]: threading.Timer(0.3, e_answer).start()
+    return 200
+pe.enqueue, pe.push = e_enqueue, e_push
+def utcnow(): return datetime.now(timezone.utc)
+def e_state(answer_min_ago=None, sent_min_ago=None, run_min_ago=5):
+    dev = {"enrolled": True, "name": "d"}
+    if answer_min_ago is not None: dev["last_apps_at"] = (utcnow() - timedelta(minutes=answer_min_ago)).replace(microsecond=0).isoformat()
+    json.dump({"u1": dev}, open(Path(et) / "devices.json", "w"))
+    ps = {} if sent_min_ago is None else {"u1": {"last_enqueue_at": (utcnow() - timedelta(minutes=sent_min_ago)).replace(microsecond=0).isoformat()}}
+    json.dump(ps, open(Path(et) / "poll-state.json", "w"))
+    if run_min_ago is None: (Path(et) / "poller-run.json").unlink(missing_ok=True)
+    else: json.dump({"last_run_at": (utcnow() - timedelta(minutes=run_min_ago)).isoformat()}, open(Path(et) / "poller-run.json", "w"))
+    for sub in ("outbox", "sent"):
+        for f in (Path(et) / sub).glob("*.json"): f.unlink()
+    E_enq.clear(); E_push.clear()
+    if erec.exists(): erec.unlink()
+def e_types():
+    out = []
+    for sub in ("outbox", "sent"):
+        for f in (Path(et) / sub).glob("*.json"):
+            try: out.append(json.load(open(f))["type"])
+            except Exception: pass
+    return out
+def e_delivered(): return [l for l in (erec.read_text().splitlines() if erec.exists() else []) if l.startswith("{")]
+
+E_mode.update(answer_on_push=True, push_raises=False)
+e_state(answer_min_ago=10, sent_min_ago=6); pe.main()
+check("a request unanswered for 6 min: the poller WAKES the phone (push), queues no second command", E_push == ["u1"] and not E_enq, f"push={E_push} enq={E_enq}")
+check("the phone answers the push and its snapshot is delivered in that same run", len(e_delivered()) == 1)
+check("...and NO unreachable alert (the phone was never silent for 30 minutes)", "device_unreachable" not in e_types())
+
+# the real incident: previously the poller said nothing for 30 min after one missed push, then declared 'unreachable'
+e_state(answer_min_ago=11, sent_min_ago=6); pe.main()
+check("replay of the incident: one missed push, answered on the very next run -> no alert", "device_unreachable" not in e_types() and E_push == ["u1"])
+
+E_mode.update(answer_on_push=False)
+e_state(answer_min_ago=31, sent_min_ago=25); pe.main()
+check("a phone that really never answers (31 min of silence, pushes ignored) IS still reported unreachable", "device_unreachable" in e_types(), str(e_types()))
+e_state(answer_min_ago=20, sent_min_ago=31); pe.main()
+check("a request outstanding for over 30 min is queued AGAIN (the first command may be lost), not just pushed", E_enq == ["u1"] and not E_push, f"enq={E_enq} push={E_push}")
+
+E_mode.update(answer_on_push=True, push_raises=True)
+e_state(answer_min_ago=10, sent_min_ago=6)
+try: pe.main(); ok = True
+except Exception as e: ok = False
+check("a failing push does not crash the run", ok)
+E_mode.update(push_raises=False)
+
+print("   the poller's own downtime is not the phone's fault")
+E_mode.update(answer_on_push=False)
+e_state(answer_min_ago=180, sent_min_ago=None, run_min_ago=170); pe.main()
+check("G11/poller was down for ~3 h: the phone is NOT blamed on the first run back (it is asked first)",
+      "device_unreachable" not in e_types() and "not judging the phone" in (Path(et) / "log").read_text(), str(e_types()))
+pe.main()
+check("...but if the phone STILL does not answer on the next normal run, it IS reported (detection is delayed one run, not removed)", "device_unreachable" in e_types(), str(e_types()))
+e_state(answer_min_ago=40, sent_min_ago=None, run_min_ago=5); pe.main()
+check("with the poller running normally, 40 min of phone silence is reported straight away", "device_unreachable" in e_types())
+e_state(answer_min_ago=40, sent_min_ago=None, run_min_ago=None); pe.main()
+check("the very first run ever is not treated as 'poller was down'", "device_unreachable" in e_types())
 
 print("A3. eg_report.py --heartbeat")
 class H:
