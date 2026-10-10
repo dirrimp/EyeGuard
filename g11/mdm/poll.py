@@ -23,7 +23,9 @@ API = "https://mdm.orthanc.me/v1"
 UNREACHABLE_AFTER = timedelta(minutes=30)   # was 2 h; 6 missed 5-minute checks. The server also sends an all-clear when it answers again
 POLL_STATE = "poll-state.json"          # poller-owned (the hook owns devices.json: no write races)
 ANSWER_WAIT = float(os.environ.get("MDM_ANSWER_WAIT", "25"))   # seconds to wait for the phone's answer
-AWAIT_REPOLL = timedelta(minutes=30)    # don't stack commands for a phone that has not answered
+AWAIT_REPOLL = timedelta(minutes=30)    # re-QUEUE a command only after this (the first one may have been lost)
+POLLER_DOWN_AFTER = timedelta(minutes=12)   # no poller run for this long = the G11/poller was down, not the phone
+RUNMARK = "poller-run.json"    # don't stack commands for a phone that has not answered
 CMDS = "pending-cmds.json"          # commands this poller sent; hook records their outcome
 RESULTS = os.path.join(STATE, "results")
 BUNDLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
@@ -60,6 +62,17 @@ def enqueue(udid, key):
         return r.status
 
 
+def push(udid, key):
+    """Wake the phone with an APNs push WITHOUT queuing another command (NanoMDM: GET /v1/push/<id>).
+    APNs delivery is best-effort: a push can be missed. While a request is still unanswered we
+    wake the phone again every run instead of waiting silently; the command already queued is
+    delivered the moment the phone checks in."""
+    req = urllib.request.Request(f"{API}/push/{udid}", method="GET")
+    req.add_header("Authorization", "Basic " + base64.b64encode(f"nanomdm:{key}".encode()).decode())
+    with urllib.request.urlopen(req, timeout=30, context=ssl.create_default_context()) as r:
+        return r.status
+
+
 def _atomic_write(path, text):
     """Write the WHOLE file (flush + fsync) to a temp file, and only then swap it in. If anything
     fails (a full disk raises ENOSPC here), the temp file is removed, the existing file is left
@@ -82,8 +95,9 @@ def _atomic_write(path, text):
 
 
 def load(name, default):
-    """Read a state file. If it is unreadable (empty/corrupt), fall back to the last good copy
-    (.bak, kept by save) and say so loudly; only a file that never existed yields the default."""
+    """Read a state file. If it EXISTS but is unreadable (empty/corrupt), fall back to the last good
+    copy (.bak, kept by save) and say so loudly. A file that does not exist yields the default
+    (first run, or someone deleted it on purpose to reset); the .bak is NOT used then."""
     p = os.path.join(STATE, name)
     for cand in (p, p + ".bak"):
         try:
@@ -93,6 +107,8 @@ def load(name, default):
                 log(f"WARNING {name} was unreadable; using the last good copy ({os.path.basename(cand)})")
             return data
         except FileNotFoundError:
+            if cand == p:
+                return default      # missing = first run or a deliberate reset: never resurrect an old copy
             continue
         except (json.JSONDecodeError, UnicodeDecodeError):
             log(f"ERROR {os.path.basename(cand)} is empty or corrupt")
@@ -287,6 +303,15 @@ def prune_sent(days=2):
                 os.remove(p)
 
 
+def poller_was_down(now):
+    """Record this run and say whether the PREVIOUS run was long ago. If the G11 itself was off or
+    the poller stopped, the phone could not have been asked, so its silence is not evidence about
+    the phone (the server's heartbeat alert already covers the G11 being down)."""
+    prev = load(RUNMARK, {}).get("last_run_at")
+    save(RUNMARK, {"last_run_at": now.isoformat()})
+    return bool(prev) and now - datetime.fromisoformat(prev) > POLLER_DOWN_AFTER
+
+
 def wait_for_answers(asked):
     """The phone normally answers within a couple of seconds, and the hook turns the answer
     into a snapshot in the outbox. Without this wait, that snapshot sat there until the NEXT
@@ -311,6 +336,9 @@ def main():
     devices = load("devices.json", {})
     now = datetime.now(timezone.utc)
     asked = {}                              # udid -> when we asked (whole seconds, like the hook's clock)
+    was_down = poller_was_down(now)
+    if was_down:
+        log("the poller itself had not run for over 12 minutes; not judging the phone's silence this run")
     for udid, d in devices.items():
         if not d.get("enrolled"):
             continue
@@ -323,7 +351,15 @@ def main():
         awaiting = bool(sent_at) and now - datetime.fromisoformat(sent_at) < AWAIT_REPOLL and (
             not answered or datetime.fromisoformat(answered) < datetime.fromisoformat(sent_at))
         if awaiting:
-            log(f"enqueue {udid[:8]}… skipped: previous request not answered yet")
+            # A request is already queued and unanswered. Do NOT queue another, but do NOT go quiet
+            # either: wake the phone again now. (Staying silent for the whole 30 minutes made one
+            # missed push look like 30 minutes of "unreachable", a false alert, when the phone
+            # answered within seconds of the next ask.)
+            try:
+                log(f"push {udid[:8]}… -> {push(udid, key)} (previous request still unanswered)")
+                asked[udid] = datetime.fromisoformat(sent_at)
+            except Exception as e:
+                log(f"push {udid[:8]}… FAILED {e}")
         else:
             try:
                 log(f"enqueue {udid[:8]}… -> {enqueue(udid, key)}")
@@ -336,7 +372,7 @@ def main():
                 log(f"enqueue {udid[:8]}… FAILED {e}")
         last = d.get("last_apps_at") or d.get("last_seen")
         if last and not d.get("unreachable_reported"):
-            if now - datetime.fromisoformat(last) > UNREACHABLE_AFTER:
+            if now - datetime.fromisoformat(last) > UNREACHABLE_AFTER and not was_down:
                 emit({"type": "device_unreachable", "detected_at": now.replace(microsecond=0).isoformat(),
                       "window_start": last, "device": d.get("name", "Jonah iPhone"),
                       "reason": f"no app list received since {last}"})

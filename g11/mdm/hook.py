@@ -33,6 +33,8 @@ def load(name, default):
                 print(f"[hook] WARNING {name} was unreadable; using the last good copy", flush=True)
             return data
         except FileNotFoundError:
+            if cand == p:
+                return default      # missing = first run or a deliberate reset: never resurrect an old copy
             continue
         except json.JSONDecodeError:
             print(f"[hook] ERROR {os.path.basename(cand)} is empty or corrupt", flush=True)
