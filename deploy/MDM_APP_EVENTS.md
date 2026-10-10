@@ -131,6 +131,24 @@ the list in the dashboard (approved list, Revoke) right after the first snapshot
    is enrolled nothing is being watched; the "no iPhone is being watched" email
    fires after 2 h of heartbeats with `enrolled = 0` and will keep that visible.
 
+## One sender for every alert email (2026-10-09)
+Every EyeGuard email goes through exactly three SQL functions (`eg_send_email`, `eg_send_email_jada`,
+`eg_send_email_mdm`); no Python or shell code sends mail. Each used to carry its own hand-typed `From`,
+they drifted apart, and when `orthanc.me` was not yet verified in Resend every alert was refused (HTTP 403)
+with nobody told.
+
+- `supabase/central_mail_sender.sql` puts the sender in ONE row (`eg_mail_config`), pinned by a CHECK
+  constraint to `Name <...@orthanc.me>`, and points all three functions at it. Change it later with one
+  statement (Dad only); nothing can be pointed at another domain by accident.
+- `tests/test_mail_sender_guard.py` runs in the `guardrail` CI check and fails any PR that adds another
+  Resend call, hand-types another sender, mentions another `alerts@` domain, or adds mail-sending code.
+- Run order: verify `orthanc.me` in Resend (records at deSEC, NOT Hostinger: Hostinger is only the
+  registrar, the zone is served by `ns1.desec.io` / `ns2.desec.org`), confirm a test returns `200` in
+  `net._http_response`, then run `central_mail_sender.sql`.
+- Also check, in Dad's Supabase dashboard: **Authentication > SMTP / Emails**. The partner dashboard's
+  magic-link login emails are sent by Supabase Auth, not by these functions; if custom SMTP is configured
+  there with an unverified sender, partners cannot log in.
+
 ## Removing the MDM profile (what is and is not possible)
 - **The enrollment profile cannot be made non-removable.** iOS refuses to install an MDM profile
   marked `PayloadRemovalDisallowed` ("A profile containing an MDM payload must be removable"),

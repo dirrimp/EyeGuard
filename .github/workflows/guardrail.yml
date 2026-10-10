@@ -18,3 +18,4 @@ jobs:
           python-version: "3.12"
       - run: pip install pyyaml
       - run: python tests/test_guardrail.py
+      - run: python tests/test_mail_sender_guard.py   # every alert email goes through the 3 SQL senders, sender pinned to orthanc.me
