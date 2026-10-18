@@ -193,3 +193,13 @@ documented there with what it needs.
 3. Optional retry timer: cron `*/5 * * * * /opt/kev/mdm/eg-report.sh --flush` (the poller now flushes each run).
 Exit codes: 0 delivered or queued; 2 bad input (not recorded); 3 queued but a
 human must act (token rejected, or config missing / wrong mode).
+
+## Who receives alerts (2026-10-18)
+Both partners receive every alert, from every device and the Mac. The list lives in ONE place,
+`eg_mail_config.recipients` (checked: real-looking addresses, no `.invalid`), read by all three
+senders through `eg_mail_to()`. Install with `supabase/alerts_to_both_partners.sql` (after
+`central_mail_sender.sql`); it seeds the list from the union of the live senders so nobody who gets
+mail today stops getting it, and read its result table. It also makes `eg_on_red()` skip rows from
+Jada's phone (app = `Jada's iPhone`), which `eg_on_jada_flag()` already emails with correct wording;
+without that each of her events would arrive twice. To change recipients later:
+`update public.eg_mail_config set recipients = jsonb_build_array('a@x.com','b@y.com'), changed_at = now() where id = 1;`
