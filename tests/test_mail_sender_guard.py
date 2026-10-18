@@ -29,6 +29,12 @@ check("the config table is closed to every API role",
       "revoke all on public.eg_mail_config from public, anon, authenticated, service_role" in c
       and "revoke execute on function public.eg_mail_from() from public, anon, authenticated, service_role" in c)
 
+bp = ROOT / "supabase" / "alerts_to_both_partners.sql"
+t = bp.read_text() if bp.exists() else ""
+check("alerts_to_both_partners.sql gives all three senders ONE recipient list (eg_mail_to) and the list is validated",
+      bool(t) and all(n in t for n in ("eg_send_email(text,text)", "eg_send_email_jada(text,text)", "eg_send_email_mdm(text,text)"))
+      and "eg_recipients_ok" in t and "revoke execute on function public.eg_mail_to()" in t)
+
 stray = []
 for f in SQL:
     if f.name in LITERAL_OK: continue
