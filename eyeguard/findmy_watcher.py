@@ -254,6 +254,98 @@ def _save_credentials(cfg: dict, apple_id: str, password: str):
     path.chmod(0o600)
 
 
+def _needs_setup_path(cfg: dict) -> Path:
+    return _data_dir(cfg) / ".findmy_needs_setup"
+
+
+def _read_needs_setup(cfg: dict) -> str | None:
+    """Back-off marker (2026-10-18). Present = a previous unattended run found
+    the saved Apple session dead (expired / 2FA needed / token rejected).
+    While it exists, cron ticks make NO Apple network call at all -- they only
+    re-raise the (server-debounced) session-expired alert. Removed by a
+    successful --setup. Returns the recorded reason, or None if absent."""
+    try:
+        return json.loads(_needs_setup_path(cfg).read_text()).get("reason", "session_expired")
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return "session_expired"  # unreadable marker still means 'back off'
+
+
+def _write_needs_setup(cfg: dict, reason: str) -> None:
+    try:
+        _needs_setup_path(cfg).write_text(json.dumps(
+            {"reason": reason, "at": datetime.now().isoformat()}))
+    except Exception:
+        pass  # best-effort; worst case we retry token-only next tick (no password)
+
+
+def _clear_needs_setup(cfg: dict) -> None:
+    try:
+        _needs_setup_path(cfg).unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
+
+def _is_transient_api_error(e: Exception) -> bool:
+    """True for failures that say nothing about the session being dead: no
+    HTTP response at all (DNS/tunnel/timeout -- pyicloud wraps these as
+    PyiCloudAPIResponseException('Request failed to iCloud') with code None)
+    or a 5xx. These must NOT trigger the back-off marker or an alert."""
+    code = getattr(e, "code", None)
+    if code is None:
+        return True
+    try:
+        return int(code) >= 500
+    except (TypeError, ValueError):
+        return False
+
+
+class _TransientReauthError(Exception):
+    """Token re-auth failed for a network reason (not a dead session)."""
+
+
+def _token_only_reauth(api) -> None:
+    """Replacement for PyiCloudService._authenticate in unattended mode.
+
+    Find My's initClient returns 450 in every fresh process, because pyicloud
+    2.6.5 deliberately drops the persisted X-APPLE-WEBAUTH-FMIP cookie on
+    cookie-jar load (cookie_jar.py). Its recovery, authenticate(force_refresh)
+    -> _authenticate(), POSTs setup.icloud.com/accountLogin with the session
+    token; that response comes back hsaTrustedBrowser=False (even though
+    /validate says True) so pyicloud raises 2FA-required and falls into a full
+    SRP password sign-in -- the Apple "Sign In Requested" prompt, every run.
+    Verified live 2026-10-18 on a copy of the session: the SAME accountLogin
+    response sets the FMIP cookie and initClient/refreshClient then return all
+    devices, with no password involved. So: do exactly that accountLogin, and
+    do not treat the untrusted flag as fatal (dead sessions are caught by
+    /validate and by accountLogin's own error status). Never touches idmsa/SRP.
+    """
+    from pyicloud.exceptions import (PyiCloudAPIResponseException,
+                                      PyiCloudFailedLoginException)
+    d = api.session.data
+    if not d.get("session_token"):
+        raise PyiCloudFailedLoginException("No session token available")
+    try:
+        resp = api.session.post(
+            f"{api._setup_endpoint}/accountLogin",
+            json={"accountCountryCode": d.get("account_country"),
+                  "dsWebAuthToken": d.get("session_token"),
+                  "extended_login": True,
+                  "trustToken": d.get("trust_token", "")})
+        resp.raise_for_status()
+        api.data = resp.json()
+    except PyiCloudAPIResponseException as e:
+        if _is_transient_api_error(e):
+            raise _TransientReauthError(repr(e)) from e
+        raise PyiCloudFailedLoginException("Invalid authentication token.", e) from e
+    except OSError as e:  # requests' HTTPError/ConnectionError are OSErrors
+        raise _TransientReauthError(repr(e)) from e
+    api._update_state()
+
+
 def setup(cfg: dict):
     """Interactive one-time login. Must be run by Jonah himself in a real
     terminal -- the 2FA code is sent to his own trusted devices, nothing
@@ -294,6 +386,7 @@ def setup(cfg: dict):
                    for d in api.devices]
     print(f"Login succeeded. Devices visible in Find My: {devices}")
     _save_credentials(cfg, apple_id, password)
+    _clear_needs_setup(cfg)
     print(f"Saved to {_credentials_path(cfg)} (chmod 600). "
           "The background watcher will pick this up on its next cycle.")
 
@@ -354,86 +447,135 @@ class FindMyWatcher:
                   f"credentials -- run 'findmy_watcher.py --setup' once, "
                   f"interactively, as jonahdirrim", flush=True)
             return None
-        apple_id, password = creds
+        apple_id, _password = creds  # password deliberately NOT used here
+
+        # Back-off (2026-10-18): once an unattended run has found the session
+        # dead, do not touch Apple again until --setup is re-run. Alert only.
+        marker = _read_needs_setup(self.cfg)
+        if marker is not None:
+            print(f"[findmy_watcher] {datetime.now().isoformat()} backed "
+                  f"off -- saved session is dead ({marker}); no Apple "
+                  f"request made, re-alerting only. Run 'findmy_watcher.py "
+                  f"--setup' to resume", flush=True)
+            self._alert_session_expired("session_expired")
+            return None
 
         from pyicloud import PyiCloudService
-        from pyicloud.exceptions import (PyiCloudFailedLoginException,
+        from pyicloud.exceptions import (PyiCloudAPIResponseException,
+                                          PyiCloudFailedLoginException,
+                                          PyiCloud2FARequiredException,
+                                          PyiCloudAuthRequiredException,
                                           PyiCloudAcceptTermsException)
 
-        # See net.py's hardened_dns() docstring (2026-09-04): pyicloud
-        # manages its own requests.Session(), so this is the only way to
-        # give its calls the same tunnel-resilient DNS resolution every
-        # other HTTP call in this project already gets. Confirmed live: a
-        # real PyiCloudAPIResponseException("Request failed to iCloud")
-        # traced directly to idmsa.apple.com failing to resolve while on
-        # the AmneziaWG tunnel -- the exact failure mode this whole module
-        # exists to route around, just never wired up for this file.
+        def _dead(reason: str, why: str):
+            print(f"[findmy_watcher] {datetime.now().isoformat()} {why} -- "
+                  f"saved session unusable; backing off until 'findmy_watcher"
+                  f".py --setup' is re-run (no password sign-in attempted)",
+                  flush=True)
+            _write_needs_setup(self.cfg, reason)
+            self._alert_session_expired(reason)
+
+        # ROOT CAUSE of the 2026-10-18 "Apple Account Sign In Requested"
+        # prompts (read from the installed pyicloud 2.6.5, not guessed):
+        # PyiCloudService(apple_id, password) runs authenticate(), and ANY
+        # failure of its /validate probe -- including a transient DNS/tunnel
+        # error -- falls through to _authenticate() -> _srp_authentication(),
+        # a full password sign-in that Apple surfaces as a sign-in prompt.
+        # Separately, api.devices -> findmyiphone._refresh_client_with_reauth()
+        # calls authenticate(force_refresh=True) on a Find My 450, which skips
+        # /validate and goes straight to the same SRP path. Both are only
+        # reachable if pyicloud HOLDS the password. So unattended mode never
+        # gives it one (password=None, authenticate=False): SRP then raises
+        # 'No password set' locally, before any network request.
         with _hardened_dns():
             try:
-                api = PyiCloudService(apple_id, password,
-                                       cookie_directory=str(_cookie_dir(self.cfg)))
-            except PyiCloudFailedLoginException as e:
-                print(f"[findmy_watcher] {datetime.now().isoformat()} login "
-                      f"failed: {e} -- may need 'findmy_watcher.py --setup' "
-                      f"re-run (session expired or password changed)", flush=True)
-                self._alert_session_expired("session_expired")
-                return None
+                api = PyiCloudService(apple_id, None,
+                                       cookie_directory=str(_cookie_dir(self.cfg)),
+                                       authenticate=False)
+                if not (api.session.data.get("session_token")
+                        and api.session.cookies.get("X-APPLE-WEBAUTH-TOKEN")):
+                    _dead("session_expired", "no saved session token")
+                    return None
+                try:
+                    api.data = api._validate_token()
+                except PyiCloudAPIResponseException as e:
+                    if _is_transient_api_error(e):
+                        # Network blip: say nothing, change nothing, retry
+                        # next tick. (Before: this escalated to a password
+                        # sign-in.)
+                        print(f"[findmy_watcher] {datetime.now().isoformat()} "
+                              f"session validate hit a transient error "
+                              f"({e!r}) -- skipping this cycle, no sign-in",
+                              flush=True)
+                        return None
+                    _dead("session_expired", f"session validate rejected ({e!r})")
+                    return None
+                api._update_state()
+                # Token-only re-auth for Find My's 450 (see helper docstring);
+                # with no password held, SRP is unreachable regardless.
+                api._authenticate = lambda: _token_only_reauth(api)
+
+                if api.requires_2fa or api.requires_2sa or not api.is_trusted_session:
+                    # Prints the original message so existing log greps work.
+                    print(f"[findmy_watcher] {datetime.now().isoformat()} "
+                          f"session needs a fresh 2FA challenge -- run "
+                          f"'findmy_watcher.py --setup' again", flush=True)
+                    _dead("session_expired", "2FA required")
+                    return None
+
+                candidates: list[tuple[float, str]] = []
+                for device in api.devices:
+                    name = (device.status().get("name") or "") + " " + \
+                           (device.status().get("deviceDisplayName") or "")
+                    if self.device_name_contains in name.lower():
+                        loc = device.location
+                        if loc and "timeStamp" in loc:
+                            candidates.append((loc["timeStamp"], name))
             except PyiCloudAcceptTermsException as e:
-                # Added 2026-09-14. Confirmed live: NOT a subclass of
-                # PyiCloudFailedLoginException, so before this it fell
-                # through to check_once()'s generic except -- logged locally
-                # every cycle, no alert ever sent, for as long as the prompt
-                # sat unaccepted (observed: ~13 hours across an Apple ToS
-                # update on 2026-09-13). Unlike an expired session, this
-                # needs NO --setup re-run and NO 2FA -- just accepting the
-                # prompt at icloud.com -- so it gets its own reason string
-                # for eg_report_findmy_session_expired() to give the right
-                # instructions instead of the misleading "run --setup".
                 print(f"[findmy_watcher] {datetime.now().isoformat()} {e} "
                       f"-- accept the updated terms at icloud.com, no "
                       f"--setup or 2FA needed", flush=True)
                 self._alert_session_expired("accept_terms")
                 return None
-
-            if api.requires_2fa:
-                # The saved session's trust expired -- nothing this
-                # unattended loop can do (2FA needs Jonah's own device),
-                # surface it clearly and wait for a manual --setup re-run
-                # rather than looping forever on the same dead session.
-                print(f"[findmy_watcher] {datetime.now().isoformat()} "
-                      f"session needs a fresh 2FA challenge -- run "
-                      f"'findmy_watcher.py --setup' again", flush=True)
+            except _TransientReauthError as e:
+                print(f"[findmy_watcher] {datetime.now().isoformat()} Find My "
+                      f"token re-auth hit a transient error ({e}) -- "
+                      f"skipping this cycle, no sign-in", flush=True)
+                return None
+            except PyiCloudAuthRequiredException as e:
+                # Token re-auth succeeded but Find My still wants more. No
+                # password path exists, so retrying each tick is harmless
+                # (and self-heals); alert, but no back-off marker.
+                print(f"[findmy_watcher] {datetime.now().isoformat()} Find My "
+                      f"still demands re-auth after token login ({e}) -- "
+                      f"alerting, will retry token-only next tick", flush=True)
                 self._alert_session_expired("session_expired")
                 return None
-
-            # Confirmed live (2026-09-02): this Apple ID has visibility into
-            # a large shared/family group -- device_name_contains alone is
-            # NOT enough to identify the right phone. Two real hazards
-            # found: (1) several OTHER family members' devices also contain
-            # "iPhone" in their name, so a broad match string can pick a
-            # stranger's phone, not just Jonah's own; (2) Jonah's own Find
-            # My history has FOUR old iPhones still listed (previously-owned
-            # devices never fully expire from this list) alongside the
-            # current one -- taking the FIRST name match, as this used to,
-            # depended entirely on API ordering luck (confirmed: the current
-            # phone happened to sort first, but nothing guarantees that
-            # stays true). Fixed to collect EVERY device matching
-            # device_name_contains that has ANY live location data (retired
-            # devices report loc=None, naturally excluding them), then pick
-            # whichever has the MOST RECENT timestamp -- the genuinely-in-
-            # use phone, not whichever the API happened to list first. Still
-            # depends on device_name_contains being scoped tightly enough to
-            # exclude other family members (e.g. "Jonah's iPhone", not a
-            # bare "iPhone") -- this fixes the ordering hazard, not the
-            # scoping one, which is a config.yaml concern.
-            candidates: list[tuple[float, str]] = []
-            for device in api.devices:
-                name = (device.status().get("name") or "") + " " + \
-                       (device.status().get("deviceDisplayName") or "")
-                if self.device_name_contains in name.lower():
-                    loc = device.location
-                    if loc and "timeStamp" in loc:
-                        candidates.append((loc["timeStamp"], name))
+            except (PyiCloudFailedLoginException,
+                    PyiCloud2FARequiredException) as e:
+                # accountLogin rejected the session token (really expired).
+                _dead("session_expired", f"token re-auth rejected ({e!r})")
+                return None
+        # Confirmed live (2026-09-02): this Apple ID has visibility into
+        # a large shared/family group -- device_name_contains alone is
+        # NOT enough to identify the right phone. Two real hazards
+        # found: (1) several OTHER family members' devices also contain
+        # "iPhone" in their name, so a broad match string can pick a
+        # stranger's phone, not just Jonah's own; (2) Jonah's own Find
+        # My history has FOUR old iPhones still listed (previously-owned
+        # devices never fully expire from this list) alongside the
+        # current one -- taking the FIRST name match, as this used to,
+        # depended entirely on API ordering luck (confirmed: the current
+        # phone happened to sort first, but nothing guarantees that
+        # stays true). Fixed to collect EVERY device matching
+        # device_name_contains that has ANY live location data (retired
+        # devices report loc=None, naturally excluding them), then pick
+        # whichever has the MOST RECENT timestamp -- the genuinely-in-
+        # use phone, not whichever the API happened to list first. Still
+        # depends on device_name_contains being scoped tightly enough to
+        # exclude other family members (e.g. "Jonah's iPhone", not a
+        # bare "iPhone") -- this fixes the ordering hazard, not the
+        # scoping one, which is a config.yaml concern.
         if candidates:
             candidates.sort(key=lambda c: c[0], reverse=True)
             ts_ms, matched_name = candidates[0]
