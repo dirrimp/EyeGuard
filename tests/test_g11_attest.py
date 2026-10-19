@@ -22,8 +22,9 @@ sha = lambda b: "sha256:" + hashlib.sha256(b).hexdigest()
 print("A1. generator, installer and the G11 report agree (a mismatch = false drift on every deploy)")
 gen = load_module(str(ROOT / "deploy/gen_g11_manifest.py"), "gen_m")
 man = gen.build("deadbeef")
-check("manifest covers the four installed files and the poller cron line",
-      set(man["items"]) == {"file:eg_report.py", "file:eg-report.sh", "file:poll.py", "file:hook.py", "cron:poller"})
+check("manifest covers the five installed files and both cron lines",
+      set(man["items"]) == {"file:eg_report.py", "file:eg-report.sh", "file:poll.py", "file:hook.py", "file:poke_listener.py",
+                            "cron:poller", "cron:poke"})
 check("file hashes are the repo files' sha256", man["items"]["file:poll.py"] == sha((ROOT / "g11/mdm/poll.py").read_bytes()))
 
 t = Path(tempfile.mkdtemp()); mdm = t / "mdm"; hook = t / "hook"; mdm.mkdir(); hook.mkdir()
@@ -62,8 +63,19 @@ store.write_text("\n".join(l for l in good.splitlines() if "poll.py" not in l) +
 check("removing the poller cron line changes the cron hash", pl.attestation()["items"]["cron:poller"] != base["cron:poller"])
 store.write_text(good.replace("poll.py", "poll.py").replace("*/5", "#*/5"))
 check("COMMENTING OUT the cron line (still textually present) is treated as removed", pl.attestation()["items"]["cron:poller"] != base["cron:poller"])
-store.write_text(good + good.splitlines()[-1] + "\n")
+poller_line = [l for l in good.splitlines() if "poll.py" in l][0]
+store.write_text(good + poller_line + "\n")
 check("a duplicate poller cron line changes the cron hash", pl.attestation()["items"]["cron:poller"] != base["cron:poller"])
+poke_line = [l for l in good.splitlines() if "poke_listener.py" in l][0]
+check("the installer wrote exactly one poke cron line, and it hashes to the manifest's cron:poke (production path)",
+      sha(poke_line.replace(str(mdm), "/opt/kev/mdm").encode()) == man["items"]["cron:poke"] and base["file:poke_listener.py"] == man["items"]["file:poke_listener.py"])
+store.write_text(good + poke_line + "\n")
+check("a duplicate poke cron line changes ITS hash", pl.attestation()["items"]["cron:poke"] != base["cron:poke"])
+store.write_text("\n".join(l for l in good.splitlines() if "poke_listener.py" not in l) + "\n")
+check("removing the poke cron line changes ITS hash", pl.attestation()["items"]["cron:poke"] != base["cron:poke"])
+(mdm / "poke_listener.py").write_text("# edited\n")
+check("editing the listener changes its hash", pl.attestation()["items"]["file:poke_listener.py"] != base["file:poke_listener.py"])
+shutil.copy(ROOT / "g11/mdm/poke_listener.py", mdm / "poke_listener.py")
 store.write_text(good)
 check("restoring everything returns to the manifest values", pl.attestation()["items"] == base)
 check("the report carries hashes only (no file content, no paths, no token)",

@@ -90,6 +90,17 @@ GREEN_THROTTLE = int(CONF.get("green_repeat_seconds", 900))
 # Mac side. Optional: the listener never starts if unset.
 SLEEP_RELAY_TOKEN = CONF.get("sleep_relay_token", "")
 SLEEP_RELAY_PORT = int(CONF.get("sleep_relay_port", 51900))
+# MDM wake poke (2026-10-18) -- see _should_poke() / send_mdm_poke(). When the
+# phone has been silent this long (well BEFORE the dark threshold), ask the G11
+# to send it an MDM push so a merely-idle iPhone wakes and talks over the
+# tunnel. Detection is untouched: a dead phone ignores the push and the dark
+# flag fires at exactly the same moment as without it. Off unless host+token set.
+MDM_POKE_HOST = CONF.get("mdm_poke_host", "")
+MDM_POKE_PORT = int(CONF.get("mdm_poke_port", 51902))
+MDM_POKE_TOKEN = CONF.get("mdm_poke_token", "")
+MDM_POKE_AFTER = int(CONF.get("mdm_poke_after_seconds", 75))
+MDM_POKE_EVERY = int(CONF.get("mdm_poke_every_seconds", 45))
+MDM_POKE_ENABLED = bool(MDM_POKE_HOST and MDM_POKE_TOKEN) and not SECONDARY
 HEARTBEAT_SECONDS = int(CONF.get("heartbeat_seconds", 20))
 # How often the LOCAL 20s poll above actually REPORTS to Supabase (2026-09-14).
 # These were the same number until an audit found phone_status had taken
@@ -146,7 +157,9 @@ _STATE = {"last_activity": time.time(), "last_rx": -1, "dark_alerted": False,
           # (a tie, not "home more recent"), so a fresh start/restart grants
           # no transition grace it can't actually justify yet.
           "last_home_seen": time.time(), "last_wg_seen": time.time(),
-          "transition_grace_logged": False}
+          "transition_grace_logged": False,
+          # MDM wake poke bookkeeping (see _should_poke / _poke_followup)
+          "last_poke": 0.0, "poked_at": 0.0}
 # Last heartbeat actually SENT to Supabase -- see REPORT_SECONDS. active=None
 # forces a report on the very first loop iteration, so a fresh start (or a
 # service restart) always checks in immediately rather than waiting.
@@ -780,6 +793,69 @@ def _evaluate_liveness(state, now, ping_ok, rx, dark, grace):
     return fire_dark, dark_secs, active, log_line
 
 
+def _should_poke(state, now, dark_secs, after, every):
+    """Pure decision: should we ask the G11 to wake the phone right now?
+
+    Evidence (2026-10-18): the phone's tunnel went silent 150-200 s at a time
+    while the phone was fine -- iOS suspends the WireGuard extension on a locked
+    phone, so Persistent Keepalive (confirmed 25 on the phone) does not fire.
+    The same phone answers MDM pushes, and its MDM check-ins ride the tunnel,
+    so the router's own rx counter sees them. A poke before the dark threshold
+    therefore turns most false darks into traffic, and NEVER delays a real one:
+    this function only decides to SEND a wake; it does not touch last_activity,
+    the threshold or dark_alerted.
+
+    No poke once a dark flag has fired (the event is already reported), none
+    below `after` seconds of silence, at most one per `every` seconds."""
+    if state.get("dark_alerted"):
+        return False
+    if dark_secs < after:
+        return False
+    if now - state.get("last_poke", 0.0) < every:
+        return False
+    state["last_poke"] = now
+    state["poked_at"] = now
+    return True
+
+
+def _poke_followup(state, now):
+    """Log line (once per poke) saying whether the phone talked after it, so
+    the effect is measurable rather than assumed. Pure: mutates `state` only."""
+    poked = state.get("poked_at", 0.0)
+    if not poked:
+        return None
+    if state["last_activity"] > poked:
+        state["poked_at"] = 0.0
+        return (f"[eyeguard-phone] {now_iso()} mdm wake poke ANSWERED: phone "
+                f"active {int(state['last_activity'] - poked)}s after the poke")
+    if now - poked > 120:
+        state["poked_at"] = 0.0
+        return (f"[eyeguard-phone] {now_iso()} mdm wake poke NOT answered "
+                f"within 120s")
+    return None
+
+
+def send_mdm_poke(dark_secs):
+    """One UDP datagram to the G11's poke listener (g11/mdm/poke_listener.py).
+    Fire-and-forget, never raises, never blocks: the wake is best-effort and
+    must not be able to stall the liveness loop."""
+    import socket as _socket
+    try:
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        try:
+            sock.settimeout(1.0)
+            sock.sendto(json.dumps({"token": MDM_POKE_TOKEN,
+                                    "silent": int(dark_secs)}).encode(),
+                        (MDM_POKE_HOST, MDM_POKE_PORT))
+        finally:
+            sock.close()
+        print(f"[eyeguard-phone] {now_iso()} mdm wake poke sent "
+              f"(silent {int(dark_secs)}s)", flush=True)
+    except Exception as e:
+        print(f"[eyeguard-phone] {now_iso()} mdm wake poke failed: {e!r}",
+              flush=True)
+
+
 def heartbeat_loop():
     """phone liveness = ANY of three signals, whichever is fresher:
       (a) DNS packets seen on the home interface -> covers active browsing
@@ -843,12 +919,23 @@ def heartbeat_loop():
     while True:
         rx = wg_rx_bytes()
         ping_ok = home_ping_alive()
+        poke = False
+        poke_line = None
         with _LOCK:
+            tick = time.time()
             fire_dark, dark_secs, active, log_line = _evaluate_liveness(
-                _STATE, time.time(), ping_ok, rx, DARK, TRANSITION_GRACE)
+                _STATE, tick, ping_ok, rx, DARK, TRANSITION_GRACE)
+            if MDM_POKE_ENABLED:
+                poke_line = _poke_followup(_STATE, tick)
+                poke = _should_poke(_STATE, tick, dark_secs,
+                                    MDM_POKE_AFTER, MDM_POKE_EVERY)
 
         if log_line:
             print(log_line, flush=True)
+        if poke_line:
+            print(poke_line, flush=True)
+        if poke:
+            send_mdm_poke(dark_secs)
 
         if fire_dark:
             sb_post("/rest/v1/flags", {

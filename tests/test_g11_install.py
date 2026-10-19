@@ -28,10 +28,12 @@ check("dry run changes nothing", store.read_text() == before and not (mdm / "pol
 r = run(env)
 check("install succeeds", r.returncode == 0, r.stdout + r.stderr)
 for f, dest, mode in (("g11/eg_report.py", mdm / "eg_report.py", 0o755), ("g11/eg-report.sh", mdm / "eg-report.sh", 0o755),
-                      ("g11/mdm/poll.py", mdm / "poll.py", 0o755), ("g11/mdm/hook.py", hook / "hook.py", 0o644)):
+                      ("g11/mdm/poll.py", mdm / "poll.py", 0o755), ("g11/mdm/hook.py", hook / "hook.py", 0o644),
+                      ("g11/mdm/poke_listener.py", mdm / "poke_listener.py", 0o755)):
     check(f"{f} installed byte-identical with mode {oct(mode)}", dest.read_bytes() == (ROOT / f).read_bytes() and stat.S_IMODE(dest.stat().st_mode) == mode)
 cron = store.read_text()
 check("poller cron line is every 5 minutes, exactly once", cron.count("poll.py") == 1 and "*/5 * * * *" in cron and "*/15" not in cron, cron)
+check("poke listener keep-alive line: every minute, exactly once", cron.count("poke_listener.py") == 1 and "* * * * * /usr/bin/python3" in cron, cron)
 check("other cron lines are untouched", "MAILTO=x" in cron and "0 3 * * * /usr/bin/backup.sh" in cron)
 check("hook container restarted (hook.py was new)", "restart mdm-hook" in (t / "docker.log").read_text())
 check("a backup directory was created", any(p.name.startswith("backup-") for p in mdm.iterdir()))

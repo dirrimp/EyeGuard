@@ -1,0 +1,1 @@
+* * * * * /usr/bin/python3 @MDM_DIR@/poke_listener.py >/dev/null 2>&1  # MDM wake-poke listener (cron only keeps it alive; a lock allows one copy)

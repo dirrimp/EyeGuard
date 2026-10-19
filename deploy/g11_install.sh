@@ -8,9 +8,10 @@
 #   deploy/g11_install.sh             back up, copy, fix the cron line, restart the hook if it changed
 #
 # What it installs (and nothing else):
-#   g11/eg_report.py, g11/eg-report.sh, g11/mdm/poll.py -> $MDM_DIR   (default /opt/kev/mdm)
+#   g11/eg_report.py, g11/eg-report.sh, g11/mdm/poll.py, g11/mdm/poke_listener.py -> $MDM_DIR   (default /opt/kev/mdm)
 #   g11/mdm/hook.py                                       -> $HOOK_DIR (default /opt/stack/mdm/hook)
-#   cron: the poller runs every 5 minutes (a single line; other cron lines are untouched)
+#   cron: the poller runs every 5 minutes; the wake-poke listener is kept alive by one
+#         every-minute line (two lines in all; other cron lines are untouched)
 # It refuses to run if the credential file is missing, not mode 0600, or still holds
 # the placeholder / a token that is not 64 hex characters. It never prints the token.
 set -euo pipefail
@@ -22,6 +23,7 @@ HOOK_DIR="${HOOK_DIR:-/opt/stack/mdm/hook}"
 CRONTAB_CMD="${CRONTAB_CMD:-crontab}"
 DOCKER_CMD="${DOCKER_CMD:-docker}"
 CRON_TEMPLATE="$REPO/deploy/g11-poller.cron"   # single source: the manifest generator hashes the same line
+POKE_TEMPLATE="$REPO/deploy/g11-poke.cron"
 TS="$(date +%Y%m%dT%H%M%S)"
 say() { printf '%s\n' "$*"; }
 die() { printf 'g11_install: %s\n' "$*" >&2; exit 1; }
@@ -38,19 +40,22 @@ if not re.fullmatch(r"[0-9a-f]{64}", t):
     sys.exit("g11_install: device_token is not 64 hex characters (placeholder, extra characters, or wrong value)")
 PY
 [ -f "$CRON_TEMPLATE" ] || die "deploy/g11-poller.cron not found"
+[ -f "$POKE_TEMPLATE" ] || die "deploy/g11-poke.cron not found"
 CRON_LINE="$(sed "s|@MDM_DIR@|$MDM_DIR|g" "$CRON_TEMPLATE" | sed '/^$/d' | head -n1)"
-for f in g11/eg_report.py g11/eg-report.sh g11/mdm/poll.py g11/mdm/hook.py; do
+POKE_LINE="$(sed "s|@MDM_DIR@|$MDM_DIR|g" "$POKE_TEMPLATE" | sed '/^$/d' | head -n1)"
+for f in g11/eg_report.py g11/eg-report.sh g11/mdm/poll.py g11/mdm/hook.py g11/mdm/poke_listener.py; do
   [ -f "$REPO/$f" ] || die "$f not found in $REPO (run from a full checkout)"
 done
 
 # ---- plan ----
-changed=(); hook_changed=0
+changed=(); hook_changed=0; poke_changed=0
 plan() {   # src dest mode
   local src="$REPO/$1" dest="$2" mode="$3" what=""
   if [ ! -f "$dest" ]; then what=NEW; elif ! cmp -s "$src" "$dest"; then what=CHANGED; fi
   if [ -n "$what" ]; then
     printf '  %-8s %s\n' "$what" "$dest"; changed+=("$src|$dest|$mode")
     if [ "$dest" = "$HOOK_DIR/hook.py" ]; then hook_changed=1; fi
+    if [ "$dest" = "$MDM_DIR/poke_listener.py" ]; then poke_changed=1; fi
   else printf '  %-8s %s\n' same "$dest"; fi
 }
 say "Files:"
@@ -58,15 +63,17 @@ plan g11/eg_report.py  "$MDM_DIR/eg_report.py"  0755
 plan g11/eg-report.sh  "$MDM_DIR/eg-report.sh"  0755
 plan g11/mdm/poll.py   "$MDM_DIR/poll.py"       0755
 plan g11/mdm/hook.py   "$HOOK_DIR/hook.py"      0644
+plan g11/mdm/poke_listener.py "$MDM_DIR/poke_listener.py" 0755
 
 CUR="$($CRONTAB_CMD -l 2>/dev/null || true)"
-NEWCRON="$(printf '%s\n' "$CUR" | grep -v "$MDM_DIR/poll.py" | sed '/^$/d' || true)"
-NEWCRON="$(printf '%s\n%s\n' "$NEWCRON" "$CRON_LINE" | sed '/^$/d')"
+NEWCRON="$(printf '%s\n' "$CUR" | grep -v -e "$MDM_DIR/poll.py" -e "$MDM_DIR/poke_listener.py" | sed '/^$/d' || true)"
+NEWCRON="$(printf '%s\n%s\n%s\n' "$NEWCRON" "$CRON_LINE" "$POKE_LINE" | sed '/^$/d')"
 say "Cron:"
 if [ "$(printf '%s\n' "$CUR" | sed '/^$/d')" = "$NEWCRON" ]; then say "  same     poller every 5 minutes"
-else say "  CHANGE   poller line -> every 5 minutes"; printf '%s\n' "$CUR" | grep "$MDM_DIR/poll.py" | sed 's/^/             was: /' || true; fi
+else say "  CHANGE   poller line -> every 5 minutes; wake-poke listener keep-alive -> every minute"; printf '%s\n' "$CUR" | grep -e "$MDM_DIR/poll.py" -e "$MDM_DIR/poke_listener.py" | sed 's/^/             was: /' || true; fi
 
 if [ "$hook_changed" = 1 ]; then say "Hook: will restart container mdm-hook"; else say "Hook: unchanged, no restart"; fi
+if [ "$poke_changed" = 1 ]; then say "Poke listener: will stop the running copy; cron restarts the new one within a minute"; fi
 
 if [ "$DRY" = 1 ]; then say "(dry run: nothing changed)"; exit 0; fi
 
@@ -82,4 +89,5 @@ if [ "${#changed[@]}" -gt 0 ]; then
 fi
 printf '%s\n' "$NEWCRON" | $CRONTAB_CMD -
 if [ "$hook_changed" = 1 ]; then $DOCKER_CMD restart mdm-hook >/dev/null && say "Restarted mdm-hook"; fi
+if [ "$poke_changed" = 1 ]; then pkill -f "$MDM_DIR/poke_listener.py" 2>/dev/null || true; say "Stopped any old poke listener (cron starts the new one within a minute)"; fi
 say "Done. Poller runs every 5 minutes; the server alerts after 15 minutes of silence."
