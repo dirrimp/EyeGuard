@@ -500,6 +500,47 @@ class SleepWatcher:
         _CF.CFRunLoopRun()
 
 
+# ---- boot-time reconciliation (2026-10-18) -------------------------------------------------
+# After a both-dark alert the server wants two facts from the Mac so it can tell a REBOOT from a
+# KILLED watcher (supabase/boot_reconcile.sql): when the Mac booted, and whether the shutdown before
+# that boot was clean. Reported once per watcher start, BEFORE the first heartbeat, so the server
+# can still see the watcher's own last pre-gap heartbeat. Evidence, not proof: it is the Mac's word.
+_BOOTTIME_RE = re.compile(r"sec\s*=\s*(\d+)")
+
+
+def boot_time_utc(sysctl_out: str | None = None) -> str | None:
+    """ISO-8601 UTC boot time from `sysctl -n kern.boottime` (e.g. '{ sec = 1792374535, usec = 98 } ...')."""
+    try:
+        if sysctl_out is None:
+            sysctl_out = subprocess.run(["/usr/sbin/sysctl", "-n", "kern.boottime"],
+                                        capture_output=True, text=True, timeout=10).stdout
+        m = _BOOTTIME_RE.search(sysctl_out)
+        if not m:
+            return None
+        from datetime import timezone as _tz
+        return datetime.fromtimestamp(int(m.group(1)), tz=_tz.utc).isoformat()
+    except Exception:
+        return None
+
+
+def prev_shutdown_clean(last_out: str | None = None) -> bool | None:
+    """Was the shutdown before the CURRENT boot recorded? Reads `last reboot shutdown` (newest first):
+    the current boot is the first 'reboot' row; a 'shutdown' row right after it means the Mac went
+    down cleanly. Another 'reboot' row instead means no shutdown record = power loss / forced
+    power-off / crash. None when it cannot tell (no output, or only one row)."""
+    try:
+        if last_out is None:
+            last_out = subprocess.run(["/usr/bin/last", "reboot", "shutdown"],
+                                      capture_output=True, text=True, timeout=15).stdout
+        kinds = [ln.split()[0] for ln in last_out.splitlines()
+                 if ln.strip() and ln.split()[0] in ("reboot", "shutdown")]
+        if len(kinds) < 2 or kinds[0] != "reboot":
+            return None
+        return kinds[1] == "shutdown"
+    except Exception:
+        return None
+
+
 class SessionWatcher:
     def __init__(self, url: str, api_key: str, expected_user: str,
                  check_seconds: int = 120, sleep_relay_router_ip: str = "",
@@ -519,6 +560,36 @@ class SessionWatcher:
         self.sleep_relay_token = sleep_relay_token
         self._rpc_lock = threading.Lock()  # serializes _rpc() calls -- see
         # _rpc()'s own docstring for the real race this closes
+
+    _boot_reported = False
+
+    def _maybe_report_boot(self):
+        """Report boot time once per start. Best-effort: a failure is logged and retried on the next
+        cycle; it can never block or delay a heartbeat (the server then records a 'late_report')."""
+        if self._boot_reported:
+            return
+        boot = boot_time_utc()
+        if boot is None:
+            self._boot_reported = True        # nothing to report on this platform; do not retry forever
+            return
+        try:
+            self._rpc("eg_report_boot", {"p_boot_at": boot,
+                                         "p_prev_shutdown_clean": prev_shutdown_clean()})
+            self._boot_reported = True
+            print(f"[session_watcher] {datetime.now().isoformat()} boot time reported ({boot})", flush=True)
+        except urllib.error.HTTPError as e:
+            if e.code < 500:
+                # 4xx (404 = the SQL has not been run yet): retrying every 2 minutes cannot fix it and
+                # only fills the log. Give up for this start; the next start reports again.
+                self._boot_reported = True
+                print(f"[session_watcher] {datetime.now().isoformat()} boot report rejected by the server "
+                      f"(HTTP {e.code}) -- not retrying this start", flush=True)
+            else:
+                print(f"[session_watcher] {datetime.now().isoformat()} boot report failed: {e!r} "
+                      f"-- will retry next cycle", flush=True)
+        except Exception as e:
+            print(f"[session_watcher] {datetime.now().isoformat()} boot report failed: {e!r} "
+                  f"-- will retry next cycle", flush=True)
 
     def _rpc(self, name: str, params: dict, timeout: int = 15):
         # Bound to the physical interface (see eyeguard/net.py) -- this call
@@ -661,6 +732,7 @@ class SessionWatcher:
         lets eg_watcher_heartbeat() stamp a separate,
         DarkWake-blip-immune watcher_confirmed_awake_at -- see that RPC's
         SQL definition (fix_darkwake_heartbeat_drift.sql) for how it's used."""
+        self._maybe_report_boot()          # first call of a start-up goes BEFORE the first heartbeat
         try:
             (new_account, wrong_user, untrusted_library, debugger_attached,
              agent_unhardened) = self._check_once()
