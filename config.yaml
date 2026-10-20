@@ -766,6 +766,11 @@ findmy:
   # --once every 10 minutes (deploy/findmy-cron.txt) -- 120s leaves large
   # margin below that cadence.
   check_timeout_seconds: 120
+  # Proactive heads-up (2026-10-18): once the saved Find My session is this
+  # many days past its last `--setup`, raise one yellow dashboard row per day
+  # (until --setup is re-run). Apple's 2FA trust lifetime is undocumented;
+  # the one measured lifetime was ~30 days, so 21 leaves ~9 days to act.
+  setup_warn_days: 21
   # Substring match against the device name in Find My (Settings -> [name] ->
   # Find My -> the list under "My Devices"), NOT the AmneziaWG peer name --
   # different system, matched by whatever the phone is actually named there.

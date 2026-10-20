@@ -289,6 +289,56 @@ def _clear_needs_setup(cfg: dict) -> None:
         pass
 
 
+# --- Session-age heads-up (2026-10-18) -------------------------------------
+# Apple's 2FA trust cannot be refreshed silently, and its lifetime is
+# undocumented. Measured here: --setup 2026-09-17 ~20:45 -> trust dead
+# 2026-10-18 05:02 = ~30.3 days (one sample; see the PR). So warn BEFORE that:
+# a yellow dashboard row once the saved session is older than
+# findmy.setup_warn_days (default 21), at most once per 24 h, until --setup is
+# re-run. Pure bookkeeping: it makes no Apple call and never skips one.
+_DEFAULT_SETUP_WARN_DAYS = 21
+_WARN_REPEAT_SECONDS = 24 * 3600
+SESSION_AGE_REASON_PREFIX = "findmy: session aging"
+
+
+def _setup_info_path(cfg: dict) -> Path:
+    # Beside (not inside) the session dir; holds timestamps only -- no
+    # credential or session contents.
+    return _data_dir(cfg) / ".findmy_setup_info.json"
+
+
+def _read_setup_info(cfg: dict) -> dict | None:
+    try:
+        d = json.loads(_setup_info_path(cfg).read_text())
+        datetime.fromisoformat(d["setup_at"])
+        return d
+    except Exception:
+        return None  # missing or unreadable == unknown age
+
+
+def _write_setup_info(cfg: dict, info: dict) -> bool:
+    try:
+        _setup_info_path(cfg).write_text(json.dumps(info))
+        return True
+    except Exception:
+        return False
+
+
+def _record_setup(cfg: dict, now: datetime | None = None) -> None:
+    """Called by a successful --setup: the clock restarts, warning state resets."""
+    _write_setup_info(cfg, {"setup_at": (now or datetime.now()).isoformat(),
+                            "assumed": False, "warned_at": None})
+
+
+def _setup_warn_days(cfg: dict) -> float:
+    try:
+        v = float((cfg.get("findmy") or {}).get("setup_warn_days",
+                                                _DEFAULT_SETUP_WARN_DAYS))
+        return v if v > 0 else _DEFAULT_SETUP_WARN_DAYS
+    except Exception:
+        return _DEFAULT_SETUP_WARN_DAYS
+
+
 def _is_transient_api_error(e: Exception) -> bool:
     """True for failures that say nothing about the session being dead: no
     HTTP response at all (DNS/tunnel/timeout -- pyicloud wraps these as
@@ -387,6 +437,7 @@ def setup(cfg: dict):
     print(f"Login succeeded. Devices visible in Find My: {devices}")
     _save_credentials(cfg, apple_id, password)
     _clear_needs_setup(cfg)
+    _record_setup(cfg)
     print(f"Saved to {_credentials_path(cfg)} (chmod 600). "
           "The background watcher will pick this up on its next cycle.")
 
@@ -412,6 +463,74 @@ class FindMyWatcher:
                      "Content-Type": "application/json"})
         with _opener.open(req, timeout=15) as r:
             r.read()
+
+    def _post_flag(self, row: dict) -> None:
+        import urllib.request
+        req = urllib.request.Request(
+            f"{self.base}/rest/v1/flags",
+            data=json.dumps(row).encode(), method="POST",
+            headers={"apikey": self.api_key,
+                     "Authorization": f"Bearer {self.api_key}",
+                     "Content-Type": "application/json",
+                     "Prefer": "return=minimal"})
+        with _opener.open(req, timeout=15) as r:
+            r.read()
+
+    def _session_age_heads_up(self, now: datetime | None = None) -> str | None:
+        """Raise ONE yellow ('alert') heads-up once the saved Find My session
+        is older than findmy.setup_warn_days, at most once per 24 h, until
+        --setup is re-run. Local bookkeeping only: no Apple call, never
+        raises. Returns a short status string (for tests/logs).
+        - no credentials / back-off marker present: None (the session-expired
+          path owns those cases)
+        - no setup timestamp (session predates this feature): the clock starts
+          now, flagged 'assumed'; NO alert this run."""
+        try:
+            now = now or datetime.now()
+            if _load_credentials(self.cfg) is None or _read_needs_setup(self.cfg) is not None:
+                return None
+            info = _read_setup_info(self.cfg)
+            if info is None:
+                _write_setup_info(self.cfg, {"setup_at": now.isoformat(),
+                                             "assumed": True, "warned_at": None})
+                print(f"[findmy_watcher] {now.isoformat()} no --setup timestamp "
+                      f"on record (session predates age tracking) -- starting "
+                      f"the session-age clock now; no alert", flush=True)
+                return "clock_started"
+            age = max((now - datetime.fromisoformat(info["setup_at"])).total_seconds(), 0) / 86400
+            limit = _setup_warn_days(self.cfg)
+            if age < limit:
+                return "fresh"
+            warned = info.get("warned_at")
+            if warned:
+                try:
+                    if (now - datetime.fromisoformat(warned)).total_seconds() < _WARN_REPEAT_SECONDS:
+                        return "debounced"
+                except Exception:
+                    pass  # unreadable warned_at: treat as never warned
+            days = int(age)
+            basis = ("clock started at first run after age tracking was added; "
+                     "real --setup date unknown, so age is a minimum"
+                     if info.get("assumed") else "days since last --setup")
+            self._post_flag({
+                "flagged_at": datetime.now(timezone.utc).isoformat(),
+                "verdict": "alert",
+                "reason": (f"{SESSION_AGE_REASON_PREFIX}: {days} days ({basis}); "
+                           f"heads-up at {limit:g}. Re-run findmy_watcher.py "
+                           f"--setup (needs a 2FA code) before Apple expires "
+                           f"it (last one lasted ~30 days)"),
+                "app": "Find My", "url": None,
+                "window_title": "Find My session aging",
+                "grade": "Possible", "risk": "neutral", "is_nudity": False})
+            info["warned_at"] = now.isoformat()
+            _write_setup_info(self.cfg, info)
+            print(f"[findmy_watcher] {now.isoformat()} session is {days} days "
+                  f"old (threshold {limit:g}) -- raised yellow heads-up", flush=True)
+            return "warned"
+        except Exception as e:
+            print(f"[findmy_watcher] {datetime.now().isoformat()} session-age "
+                  f"check failed ({e!r}) -- ignored", flush=True)
+            return "error"
 
     def _alert_session_expired(self, reason: str):
         """Called the moment login fails, a fresh 2FA challenge is needed, or
@@ -620,6 +739,7 @@ class FindMyWatcher:
         and never reaching it at all."""
         try:
             with _hard_timeout(self.check_timeout_seconds):
+                self._session_age_heads_up()  # local-only; before, never instead of, the Apple check
                 last_seen = self._find_my_last_seen()
                 if last_seen is not None:
                     self._rpc("eg_report_findmy_status",
