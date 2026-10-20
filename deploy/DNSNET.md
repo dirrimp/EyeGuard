@@ -84,6 +84,24 @@ is visible); DoH to an unlisted private server; IPv6 (disabled today, tripwire a
 Jada knows). Nobody is excluded by default. Exclusion exists only as an explicit config choice
 (`dnsnet_excluded_ips` / `dnsnet_excluded_macs`). Alerts reach both partners through the existing sender.
 
+## Will it spam? (traffic simulation)
+
+`python3 tests/sim_dnsnet_traffic.py --days 7` replays a week of simulated household traffic (5 devices,
+~320,000 events) through the real rule code on a simulated clock, with real public inputs: the Tranco
+top-sites list, the real server IPs of those sites, the public VPN ranges and Tor guard list, and the
+live rule config. It also replays what the live network was measured doing (Apple devices looking up
+`mask.icloud.com` ~1,300 times a day; the Mac's Proton VPN app polling its API). Everything the
+households do is innocent; known-bad events are injected, so any other alert is a false alarm.
+Result: **0 false alarms in 7 days (three seeds) and in 30 days; all injected bad events alerted**
+(explicit domain, explicit TLS name, Tor guard, DoT, WireGuard handshake, VPN server, Private Relay
+connection). `--worst-case` adds a misbehaving TV hitting a DoH address every 5 minutes: about 1.4
+emails/day in total (it was 47/day before repeat back-off). Running it also caught that lookup-based
+VPN/Tor/Private-Relay alerts would have spammed (now observe-only).
+
+Known limits of the test: synthetic devices, not your real traffic; a connection to an *arbitrary* IP
+lands in the VPN list 0.085% of the time (only matters for P2P or odd hosts); one top-1500 site
+(`ueiwsp.com`) resolves to `1.1.1.1`, so visiting it trips `doh-ip` by design.
+
 ## Install, test, tune
 
 Order: merge, Dad publishes the router manifest (`deploy/publish_router_manifest.sh <version>`),
