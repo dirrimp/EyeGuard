@@ -261,6 +261,11 @@ check("a TLS connection to a VPN provider's website/API (the Proton app polling 
 reset(); dn._RECENT_DNS.clear()
 check("a REAL TLS connection to iCloud Private Relay alerts (that is masking, unlike a lookup)",
       dn.on_sni("192.168.8.150", "17.253.1.1", "mask.icloud.com", False, False, LOCAL) == ["alerted"] and "connection to iCloud Private Relay" in POSTED[0]["reason"], str(POSTED))
+reset()
+check("a TLS connection to Apple's Private Relay API (iOS does this with Relay OFF) is OBSERVED, never emailed",
+      dn.on_sni("192.168.8.113", "17.253.1.1", "mask-api.icloud.com", False, False, LOCAL) == ["observed"]
+      and POSTED == [] and "private-relay-api" in dn._STATS["observed"], str(POSTED))
+check("...and its lookup stays observe-only", dn.on_dns("192.168.8.113", "192.168.8.1", "mask-api.icloud.com", LOCAL) == ["observed"] and POSTED == [])
 reset(); dn.on_dns("192.168.8.150", "192.168.8.1", "mask.icloud.com", LOCAL)
 check("...even when the device also looked the name up (the lookup was only observed)",
       dn.on_sni("192.168.8.150", "17.253.1.1", "mask-h2.icloud.com", False, False, LOCAL) == ["alerted"])

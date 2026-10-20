@@ -25,6 +25,7 @@ destination IPs, never payload or screens.
 | `ipv6-enabled` | IPv6 switched on for a client segment (the capture is IPv4-only) | alert |
 | `explicit-sni` | the same explicit-site rule applied to the **TLS server name** of a new HTTPS connection, only when that device did NOT just look the name up in DNS (cached, encrypted or bypassed DNS) | alert |
 | `vpn-ip` | a connection to a known VPN server address (public list, ~7,000 ranges, refreshed daily) | alert |
+| `private-relay-api` | a TLS connection to `mask-api.icloud.com`, Apple's Private Relay configuration API. iOS contacts it even with Private Relay OFF (two false RED emails on 2026-10-20), so it is counted, not emailed. The relay itself (`mask.icloud.com`, `mask-h2.icloud.com`) still alerts. | observe |
 | `vpn-domain` / `tor-domain` / `private-relay-lookup` | a DNS **lookup** of a VPN/proxy provider, a Tor Project name, or `mask.icloud.com`. Lookups are not use: on this network Apple devices look up `mask.icloud.com` ~1,300 times a day (AdGuard blocks it and they keep retrying), the Mac's Proton VPN app polls its account API all day, and EyeGuard's own tooling reads torproject.org. Real use is caught by the connection-based classes above. | observe |
 | `dns-bypass` | plain DNS sent to a resolver other than the router/G11 | observe |
 | `doh-host` | lookup of a public DoH hostname | observe |
