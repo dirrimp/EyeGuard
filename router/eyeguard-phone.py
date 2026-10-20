@@ -23,6 +23,7 @@ for logic. Config: /etc/eyeguard/phone.json (see phone.config.example).
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -429,6 +430,70 @@ def classify(raw_name):
     return ("clear", f"phone: {label}", label)
 
 
+# ---- tcpdump children must not outlive this process -------------------------
+#
+# procd stops this service by signalling the python process only, so before this
+# every stop/restart left one tcpdump per capture re-parented to init (pid 1):
+# they ran on, and on a quiet interface (wgserver) for a very long time, because a
+# tcpdump only notices its dead reader when it next tries to write. Two layers:
+#   1. SIGTERM (what procd and `service stop` send): terminate every child, exit.
+#   2. At start-up, reap leftovers that layer 1 cannot catch (SIGKILL, crash,
+#      power loss): tcpdump processes whose parent is init AND whose command line is
+#      one of this script's own capture shapes. A tcpdump started by anything else
+#      is never touched. (No ctypes/prctl on this router's python3-light.)
+_CHILDREN = set()
+_CAPTURE_SHAPES = ("udp src port 53 and dst host", "udp dst port 53 and src host",
+                   "tcp and src host")
+
+
+def _spawn_tcpdump(iface, filt):
+    proc = subprocess.Popen(["tcpdump", "-i", iface, "-l", "-nn", filt],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            text=True, bufsize=1)
+    with _LOCK:
+        _CHILDREN.add(proc)
+        for dead in [c for c in _CHILDREN if c.poll() is not None]:
+            _CHILDREN.discard(dead)
+    return proc
+
+
+def _terminate_children(signum=None, frame=None):
+    with _LOCK:
+        kids = list(_CHILDREN)
+    for k in kids:
+        try:
+            k.terminate()
+        except Exception:
+            pass
+    os._exit(0)
+
+
+def reap_orphan_captures(proc_root="/proc", kill=os.kill):
+    """Kill leftover tcpdump captures of this script (parent = init). -> pids killed."""
+    killed = []
+    try:
+        pids = [d for d in os.listdir(proc_root) if d.isdigit()]
+    except OSError:
+        return killed
+    for pid in pids:
+        try:
+            stat = open(f"{proc_root}/{pid}/stat").read()
+            ppid = int(stat.rsplit(")", 1)[1].split()[1])
+            cmd = open(f"{proc_root}/{pid}/cmdline").read().split("\0")
+        except (OSError, ValueError, IndexError):
+            continue
+        if ppid != 1 or not cmd or os.path.basename(cmd[0]) != "tcpdump":
+            continue
+        line = " ".join(cmd)
+        if " -l -nn " in line and any(shape in line for shape in _CAPTURE_SHAPES):
+            try:
+                kill(int(pid), signal.SIGTERM)
+                killed.append(int(pid))
+            except OSError:
+                pass
+    return killed
+
+
 # ---- capture ---------------------------------------------------------------
 
 def _mark_alive(source):
@@ -496,10 +561,7 @@ def capture_loop(iface, host_ip, source):
     filt = f"udp dst port 53 and src host {host_ip}"
     while True:
         try:
-            proc = subprocess.Popen(
-                ["tcpdump", "-i", iface, "-l", "-nn", filt],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                text=True, bufsize=1)
+            proc = _spawn_tcpdump(iface, filt)
             for line in proc.stdout:
                 _mark_alive(source)  # any packet at all proves the phone/tunnel is up
                 m = QUERY_RE.search(line)
@@ -576,10 +638,7 @@ def doh_syn_loop(iface, host_ip):
     filt = _doh_filter(host_ip)
     while True:
         try:
-            proc = subprocess.Popen(
-                ["tcpdump", "-i", iface, "-l", "-nn", filt],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                text=True, bufsize=1)
+            proc = _spawn_tcpdump(iface, filt)
             for line in proc.stdout:
                 m = SYN_DST_RE.search(line)
                 if m:
@@ -710,10 +769,7 @@ def tor_syn_loop(iface, host_ip):
     filt = _tor_syn_filter(host_ip)
     while True:
         try:
-            proc = subprocess.Popen(
-                ["tcpdump", "-i", iface, "-l", "-nn", filt],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                text=True, bufsize=1)
+            proc = _spawn_tcpdump(iface, filt)
             for line in proc.stdout:
                 m = SYN_DST_RE.search(line)
                 if not m:
@@ -1591,9 +1647,7 @@ def wire_answers_loop(iface, host_ip):
     filt = f"udp src port 53 and dst host {host_ip}"
     while True:
         try:
-            proc = subprocess.Popen(["tcpdump", "-i", iface, "-l", "-nn", filt],
-                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                    text=True, bufsize=1)
+            proc = _spawn_tcpdump(iface, filt)
             for line in proc.stdout:
                 now = time.time()
                 for aip in parse_wire_answers(line):
@@ -1704,6 +1758,11 @@ def sleep_relay_loop():
 
 
 def main():
+    signal.signal(signal.SIGTERM, _terminate_children)
+    n = reap_orphan_captures()
+    if n:
+        print(f"[eyeguard-phone] reaped {len(n)} orphaned tcpdump capture(s) from a previous run: {n}",
+              flush=True)
     # A secondary instance (another device's config) skips the two ROUTER-level
     # loops: the primary already runs them, and running them twice would bind
     # the relay port twice and double every router-tamper alert. Everything
