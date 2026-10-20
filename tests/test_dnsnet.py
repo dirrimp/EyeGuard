@@ -455,13 +455,19 @@ dn._LOCAL.update(ips={"127.0.0.1"}, at=t0)
 check("a configured tunnel hostname's resolved address is exempt (and kept for a day)", "203.0.113.77" in dn.local_ips(now=t0 + 3600) and "203.0.113.77" not in dn.local_ips(now=t0 + 90000))
 dn.TRUSTED_HOSTNAMES[:] = []; dn._REMEMBERED.clear(); dn._LOCAL.update(ips=set(), at=0.0)
 class _R:
-    def __call__(self, name): return (name, [], ["203.0.113.5"])
+    """Behaves like the router's python3-light: a str hostname raises the idna LookupError."""
+    def __call__(self, name):
+        if isinstance(name, str):
+            raise LookupError("unknown encoding: idna")
+        return (name.decode(), [], ["203.0.113.5"])
 dn.TRUSTED_HOSTNAMES[:] = ["home.example.net"]
 import threading as _th
 _t = _th.Thread(target=dn.trusted_names_loop, args=(_R(),), daemon=True); _t.start(); time.sleep(0.5)
-check("trusted_names_loop resolves configured names into the exempt set", "203.0.113.5" in dn._REMEMBERED)
+check("trusted_names_loop resolves configured names into the exempt set (names passed as bytes, as the router needs)", "203.0.113.5" in dn._REMEMBERED)
 dn.TRUSTED_HOSTNAMES[:] = []; dn._REMEMBERED.clear()
 check("trusted_names_loop is a no-op with no names configured", dn.trusted_names_loop is not None and not dn.TRUSTED_HOSTNAMES)
+
+check("default trusted hostname is the endpoint all four device profiles dial", "vpn.orthanc.me" in open(str(ROOT / "router" / "eyeguard-dnsnet.py")).read().split("TRUSTED_HOSTNAMES = list(")[1].split("\n")[0])
 
 print("-- only household devices are evaluated --")
 check("household ranges", all(dn.is_household_ip(i) for i in ("192.168.8.153", "192.168.9.60", "192.168.10.20", "10.1.0.3", "172.16.5.5", "100.64.1.1")))

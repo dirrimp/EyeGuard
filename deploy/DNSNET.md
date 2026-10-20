@@ -65,8 +65,9 @@ Devices away from home reach the router over AmneziaWG. The monitor reads the tu
 side (`wgserver`), never the encrypted packets, and it exempts everything addressed to the router or
 the G11 at any port, so a tunnel (away or at home, where the phone dials the router's own public
 address) cannot trip a rule. Because the ISP can change that public address and a phone with stale DNS
-keeps dialing the old one, every address the router held in the last 24 h stays exempt; tunnel
-hostnames can also be listed in `dnsnet_trusted_hostnames`. Only packets that come FROM a household
+keeps dialing the old one, every address the router held in the last 24 h stays exempt; the tunnel endpoint
+hostname the device profiles dial (`vpn.orthanc.me`, a self-hosted DDNS name that tracks the router's public
+address) is trusted by default and re-resolved every 5 minutes (`dnsnet_trusted_hostnames` overrides it). Only packets that come FROM a household
 address are evaluated, so inbound internet packets are never mistaken for a device. The monitor is
 passive (tcpdump); it cannot change or interrupt a tunnel, and tunnel-down detection stays with the
 phone monitors.
