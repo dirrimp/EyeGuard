@@ -12,7 +12,7 @@
    caught by the server, not trusted to this script. A run that crashes
    (e.g. missing API key) deliberately sends no heartbeat.
 """
-import base64, fcntl, hashlib, json, os, plistlib, re, shutil, ssl, subprocess, sys, time, urllib.request, uuid
+import base64, fcntl, hashlib, json, os, plistlib, re, shutil, ssl, subprocess, sys, time, urllib.parse, urllib.request, uuid
 from datetime import datetime, timezone, timedelta
 
 STATE = os.environ.get("MDM_STATE", "/opt/stack/mdm/hook-state")
@@ -31,6 +31,9 @@ RESULTS = os.path.join(STATE, "results")
 BUNDLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
 CMD_STALE = timedelta(minutes=20)    # an unanswered command is re-sent after this
 BLOCK_REFRESH = timedelta(hours=6)
+REMOVE_STATE = "remove-state.json"   # poller-owned: per denied app, how removal has gone so far
+STORE_IDS = "store-ids.json"         # bundle id -> App Store id (public data, looked up once)
+PLAIN_WINDOW = timedelta(hours=36)   # a plain removal already tried within this long -> take management first
 LOG = os.environ.get("MDM_LOG", "/opt/kev/mdm/poll.log")
 HOOK_PATH = os.environ.get("MDM_HOOK_PATH", "/opt/stack/mdm/hook/hook.py")
 CRONTAB_CMD = os.environ.get("MDM_CRONTAB", "crontab")
@@ -184,6 +187,47 @@ def block_profile(ids):
     return plistlib.dumps(outer)
 
 
+def store_id(bundle_id):
+    """App Store id for a bundle id (public iTunes lookup; only the bundle id leaves the G11). None if
+    the app is not on the store or the lookup fails. Successful lookups are cached."""
+    cache = load(STORE_IDS, {})
+    if isinstance(cache.get(bundle_id), int):
+        return cache[bundle_id]
+    try:
+        url = "https://itunes.apple.com/lookup?entity=software&bundleId=" + urllib.parse.quote(bundle_id, safe="")
+        with urllib.request.urlopen(url, timeout=20, context=ssl.create_default_context()) as r:
+            data = json.load(r)
+        hits = [x for x in data.get("results", []) if x.get("bundleId") == bundle_id and isinstance(x.get("trackId"), int)]
+        if not hits:
+            return None
+        cache[bundle_id] = hits[0]["trackId"]
+        save(STORE_IDS, cache)
+        return cache[bundle_id]
+    except Exception as e:
+        log(f"store id lookup for {bundle_id} FAILED {e!r}")
+        return None
+
+
+def take_request(sid):
+    """Make MDM the manager of an app the user installed himself. RemoveApplication only reliably
+    removes apps MDM manages; verified live 2026-10-18 on the supervised phone (Duolingo: a
+    take-management + removal removed it while the block profile was active)."""
+    return {"RequestType": "InstallApplication", "iTunesStoreID": sid,
+            "ChangeManagementState": "Managed", "ManagementFlags": 1}
+
+
+def _rstate(bundle_id, **kw):
+    st = load(REMOVE_STATE, {})
+    st[bundle_id] = dict(st.get(bundle_id, {}), **kw)
+    save(REMOVE_STATE, st)
+
+
+def queue_remove(udid, key, action_id, bundle_id, after_take):
+    cid = enqueue_command(udid, key, {"RequestType": "RemoveApplication", "Identifier": bundle_id})
+    track(cid, {"kind": "remove", "id": action_id, "bundle": bundle_id, "after_take": after_take})
+    return cid
+
+
 def report_results():
     """Send the phone's answers for earlier removals / block pushes to the server."""
     if not os.path.isdir(RESULTS):
@@ -202,7 +246,17 @@ def report_results():
             continue
         ok = res.get("status") == "Acknowledged"
         detail = res.get("error") or res.get("status") or ""
-        if info["kind"] == "remove":
+        if info["kind"] == "take":
+            if ok:
+                # accepted, not yet proof: the removal that follows is what gets reported
+                _rstate(info["bundle"], take_ok_at=datetime.now(timezone.utc).isoformat(),
+                        action_id=info["id"], followup_at=None)
+                rc, err = 0, ""
+            else:
+                rc, _, err = sender("--action-result", str(info["id"]), "fail", "take-management: " + detail)
+        elif info["kind"] == "remove":
+            if not info.get("after_take"):
+                _rstate(info["bundle"], plain_at=datetime.now(timezone.utc).isoformat()) if info.get("bundle") else None
             rc, _, err = sender("--action-result", str(info["id"]), "ok" if ok else "fail", detail)
         else:
             rc, _, err = sender("--block-result", "ok" if ok else "fail", str(info.get("count", 0)), detail)
@@ -246,13 +300,37 @@ def approvals(devices, key):
     except Exception as e:
         log(f"sync response unreadable: {e}")
         return
+    # follow-up: management was taken in an earlier run, so now remove the app
+    try:
+        for bid, rs in sorted(load(REMOVE_STATE, {}).items()):
+            if rs.get("take_ok_at") and not rs.get("followup_at") and rs.get("action_id") is not None \
+                    and not pending("remove", rs["action_id"]):
+                queue_remove(udid, key, rs["action_id"], bid, True)
+                _rstate(bid, followup_at=datetime.now(timezone.utc).isoformat())
+                log(f"removal after taking management queued for action {rs['action_id']}")
+    except Exception as e:
+        log(f"removal follow-up FAILED {e}")
     for a in actions:
-        if pending("remove", a["id"]):
+        if pending("remove", a["id"]) or pending("take", a["id"]):
             continue
         try:
-            cid = enqueue_command(udid, key, {"RequestType": "RemoveApplication", "Identifier": a["bundle_id"]})
-            track(cid, {"kind": "remove", "id": a["id"]})
-            log(f"remove queued for action {a['id']}")
+            bid = a["bundle_id"]
+            if bid.startswith("com.apple."):      # system apps: never ours to remove
+                sender("--action-result", str(a["id"]), "fail", "system app: MDM cannot remove it")
+                continue
+            rs = load(REMOVE_STATE, {}).get(bid, {})
+            plain_at = rs.get("plain_at")
+            plain_recent = bool(plain_at) and datetime.now(timezone.utc) - datetime.fromisoformat(plain_at) < PLAIN_WINDOW
+            sid = store_id(bid) if plain_recent else None
+            if plain_recent and sid is not None:
+                # a plain removal was already tried and the app is STILL installed (the server only asks
+                # again when it is): take management first, then remove on a later run
+                cid = enqueue_command(udid, key, take_request(sid))
+                track(cid, {"kind": "take", "id": a["id"], "bundle": bid})
+                log(f"take-management queued for action {a['id']}")
+            else:
+                queue_remove(udid, key, a["id"], bid, False)
+                log(f"remove queued for action {a['id']}")
         except Exception as e:
             log(f"remove action {a['id']} FAILED {e}")
     h = hashlib.sha256("\n".join(sorted(blocked)).encode()).hexdigest()
