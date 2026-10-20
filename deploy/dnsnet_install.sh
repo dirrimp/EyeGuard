@@ -104,7 +104,7 @@ PY
 cp $S/eyeguard-dnsnet.py /usr/bin/eyeguard-dnsnet.py && chmod 755 /usr/bin/eyeguard-dnsnet.py
 cp $S/eyeguard-dnsnet.init /etc/init.d/eyeguard-dnsnet && chmod 755 /etc/init.d/eyeguard-dnsnet
 cp $S/eyeguard-router-watcher.py /usr/bin/eyeguard-router-watcher.py && chmod 755 /usr/bin/eyeguard-router-watcher.py
-for f in /usr/bin/eyeguard-dnsnet.py /etc/init.d/eyeguard-dnsnet /usr/bin/eyeguard-router-watcher.py /etc/eyeguard/phone.json; do
+for f in /usr/bin/eyeguard-dnsnet.py /etc/init.d/eyeguard-dnsnet /usr/bin/eyeguard-router-watcher.py /etc/eyeguard/phone.json /etc/eyeguard/vpn_ranges.txt /etc/eyeguard/tor_bridges.json; do
   grep -qxF "$f" /etc/sysupgrade.conf || echo "$f" >> /etc/sysupgrade.conf
 done
 REMOTE
@@ -119,7 +119,7 @@ for i in 1 2 3 4 5 6 7 8; do          # first status write is within 60 s
   if [ -f /tmp/dnsnet-stats.json ] && [ $(( $(date +%s) - $(date -r /tmp/dnsnet-stats.json +%s) )) -lt 90 ]; then up=1; break; fi
 done
 CAP=$(python3 -c "import json;d=json.load(open('/tmp/dnsnet-stats.json'));print(d.get('captures'),'/',d.get('expected_captures'))" 2>/dev/null || echo "?")
-if [ $up = 0 ] || [ "$CAP" != "16 / 16" ]; then
+if [ $up = 0 ] || [ "$CAP" != "20 / 20" ]; then
   echo "FAIL: network monitor not healthy (status: up=$up captures=$CAP) -- STOPPING and DISABLING it."
   echo "      Phone monitors were not touched. Last log lines:"; logread | grep eyeguard-dnsnet | tail -8
   /etc/init.d/eyeguard-dnsnet stop; /etc/init.d/eyeguard-dnsnet disable

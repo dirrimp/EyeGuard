@@ -39,11 +39,14 @@ server.
 """
 from __future__ import annotations
 
+import bisect
 import json
+import math
 import os
 import queue
 import re
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -80,6 +83,17 @@ STATS_LOG_SECONDS = int(CONF.get("dnsnet_stats_log_seconds", 3600))
 STATS_SECONDS = int(CONF.get("dnsnet_stats_seconds", 60))
 TOR_CACHE = Path(CONF.get("tor_relay_cache_file", "/etc/eyeguard/tor_relays.json"))
 TOR_REFRESH = int(CONF.get("tor_refresh_seconds", 21600))
+# Public lists (curl, daily). Both are optional: a failed fetch keeps the last good copy.
+VPN_RANGES_PATH = Path(CONF.get("vpn_ranges_file", "/etc/eyeguard/vpn_ranges.txt"))
+VPN_RANGES_URL = CONF.get("vpn_ranges_url",
+    "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv4.txt")
+TOR_BRIDGES_PATH = Path(CONF.get("tor_bridges_file", "/etc/eyeguard/tor_bridges.json"))
+TOR_BRIDGES_URL = CONF.get("tor_bridges_url",
+    "https://gitlab.torproject.org/tpo/applications/tor-browser-build/-/raw/main/projects/tor-expert-bundle/pt_config.json")
+LISTS_REFRESH = int(CONF.get("dnsnet_lists_refresh_seconds", 86400))
+LISTS_RETRY = int(CONF.get("dnsnet_lists_retry_seconds", 600))   # until the first copy exists
+# Public names a site uses when it hides its real name with Encrypted Client Hello.
+ECH_PUBLIC_NAMES = ("cloudflare-ech.com", "encryptedsni.com")
 LEASES = CONF.get("dnsnet_leases_file", "/tmp/dhcp.leases")
 DHCP_CONFIG = CONF.get("dnsnet_dhcp_config", "/etc/config/dhcp")
 DEVICE_NAMES = {"10.1.0.2": "Jonahs-Mac", "10.1.0.3": "JJPWS-Phone",
@@ -100,11 +114,13 @@ ADDR_MEMORY = 86400                 # an address the router held (or a trusted n
 # A DNS LOOKUP of a VPN / Tor / Private Relay name is NOT use of one: on this network Apple devices
 # look up mask.icloud.com ~1,300 times a day (AdGuard blocks it and they keep retrying), the Mac's
 # Proton VPN app polls its account API all day, and EyeGuard's own tooling reads torproject.org.
-# So lookups are observe-only; alerts come from actual use (a connection to a VPN server, Tor relay
-# or bridge, a WireGuard handshake, a DoT/DoH attempt).
-ALERT_DEFAULT = ["explicit-dns", "tor-guard", "doh-ip", "dot-attempt",
-                 "vpn-port", "wg-handshake", "ipv6-enabled"]
+# So lookups (and TLS connections to a VPN/Tor provider's own website or API) are observe-only;
+# alerts come from actual use: a connection to a VPN server, a Tor relay or bridge, a WireGuard
+# handshake, a DoT/DoH attempt, or a real TLS connection to iCloud Private Relay.
+ALERT_DEFAULT = ["explicit-dns", "explicit-sni", "vpn-ip", "tor-guard", "doh-ip", "dot-attempt",
+                 "private-relay", "vpn-port", "wg-handshake", "ipv6-enabled"]
 OBSERVE_ONLY = ["dns-bypass", "doh-host", "ike-ipsec", "openvpn-udp", "proxy-port",
+                "tls-no-sni", "ech-hidden", "dns-tunnel",
                 "vpn-domain", "tor-domain", "private-relay-lookup"]
 ALERT_CLASSES = set(CONF.get("dnsnet_alert_classes", ALERT_DEFAULT))
 
@@ -202,17 +218,23 @@ def host_matches(name: str, suffixes) -> str | None:
 # so both are accepted. Class tokens like "A?" "AAAA?" "HTTPS?" "TYPE65?" all match.
 DNS_RE = re.compile(
     r"IP (\d+\.\d+\.\d+\.\d+)\.\d+ > (\d+\.\d+\.\d+\.\d+)\.53: "
-    r".*?(?<![\w.])\d+\+?\s+(?:\[[^\]]*\]\s+)*[A-Za-z0-9]+\?\s+(\S+?)\.?\s+\(\d+\)")
+    r".*?(?<![\w.])\d+\+?\s+(?:\[[^\]]*\]\s+)*([A-Za-z0-9]+)\?\s+(\S+?)\.?\s+\(\d+\)")
 FLOW_RE = re.compile(
     r"IP (\d+\.\d+\.\d+\.\d+)\.(\d+) > (\d+\.\d+\.\d+\.\d+)\.(\d+): (\S+)")
 
 
-def parse_dns_line(line: str):
-    """-> (client_ip, resolver_ip, qname) or None."""
+def parse_dns_query(line: str):
+    """-> (client_ip, resolver_ip, qname, qtype) or None."""
     m = DNS_RE.search(line)
     if not m:
         return None
-    return m.group(1), m.group(2), m.group(3).rstrip(".")
+    return m.group(1), m.group(2), m.group(4).rstrip("."), m.group(3).upper()
+
+
+def parse_dns_line(line: str):
+    """-> (client_ip, resolver_ip, qname) or None."""
+    q = parse_dns_query(line)
+    return q[:3] if q else None
 
 
 def parse_flow_line(line: str):
@@ -224,13 +246,282 @@ def parse_flow_line(line: str):
     return m.group(1), int(m.group(2)), m.group(3), int(m.group(4)), m.group(5)
 
 
+
+# ---- TLS ClientHello (server name) ------------------------------------------
+#
+# Every HTTPS connection announces its hostname in plaintext in the first packet
+# (SNI). Reading it applies the SAME explicit-site rule even when DNS was bypassed
+# (DoH to an unlisted server, a hardcoded IP, cached answers). Encrypted Client Hello
+# hides it; a site that hides behind a public ECH name is counted. QUIC/HTTP3 hides
+# the name and is not covered (blocking UDP/443 at the firewall would force TCP).
+
+HEXLINE_RE = re.compile(r"^\s+0x[0-9a-fA-F]+:\s+((?:[0-9a-fA-F]{2,4}\s?)+)")
+SNAP_IP = 1486          # bytes of IP packet kept by `-s 1500` on an ethernet segment
+_SNI_OK = re.compile(r"^[a-z0-9]([a-z0-9._-]{0,251}[a-z0-9])?$")
+
+
+def parse_client_hello(pkt: bytes):
+    """Pure. Raw IPv4 packet -> {src, dst, dport, sni, ech, cut} for a TLS ClientHello, else None.
+    `cut` = the extension block runs past the captured bytes (an absent SNI then means
+    'not seen', not 'not present')."""
+    try:
+        if len(pkt) < 40 or pkt[0] >> 4 != 4 or pkt[9] != 6:
+            return None
+        ihl = (pkt[0] & 0x0F) * 4
+        src, dst = ".".join(map(str, pkt[12:16])), ".".join(map(str, pkt[16:20]))
+        tcp = pkt[ihl:]
+        dport = struct.unpack(">H", tcp[2:4])[0]
+        p = tcp[(tcp[12] >> 4) * 4:]
+        if len(p) < 44 or p[0] != 0x16 or p[5] != 0x01:
+            return None
+        i = 43
+        i += 1 + p[i]                                   # session id
+        i += 2 + int.from_bytes(p[i:i + 2], "big")      # cipher suites
+        i += 1 + p[i]                                   # compression
+        ext_len = int.from_bytes(p[i:i + 2], "big")
+        i += 2
+        cut = i + ext_len > len(p)
+        end = min(len(p), i + ext_len)
+        sni, ech = None, False
+        while i + 4 <= end:
+            t = int.from_bytes(p[i:i + 2], "big")
+            n = int.from_bytes(p[i + 2:i + 4], "big")
+            body = p[i + 4:i + 4 + n]
+            i += 4 + n
+            if t == 0:
+                j = 2
+                while j + 3 <= len(body):
+                    nl = int.from_bytes(body[j + 1:j + 3], "big")
+                    if body[j] == 0:
+                        cand = body[j + 3:j + 3 + nl].decode("ascii", "ignore").lower().rstrip(".")
+                        sni = cand if _SNI_OK.match(cand) else None
+                        break
+                    j += 3 + nl
+            elif t == 0xFE0D:
+                ech = True
+        return {"src": src, "dst": dst, "dport": dport, "sni": sni, "ech": ech, "cut": cut}
+    except (IndexError, struct.error, ValueError):
+        return None
+
+
+class HexAssembler:
+    """Reassembles `tcpdump -x` output (header line, then indented hex lines) into packets,
+    emitting each as soon as its bytes are complete (so a quiet network is not delayed
+    until the NEXT packet arrives)."""
+
+    def __init__(self):
+        self.cur = bytearray()
+        self.want = None
+
+    def feed(self, line: str):
+        if line[:1] not in (" ", "\t"):             # a new packet header
+            out = bytes(self.cur) if self.cur else None
+            self.cur, self.want = bytearray(), None
+            return out
+        m = HEXLINE_RE.match(line)
+        if not m:
+            return None
+        self.cur += bytes.fromhex(m.group(1).replace(" ", ""))
+        if self.want is None and len(self.cur) >= 4:
+            self.want = min(struct.unpack(">H", bytes(self.cur[2:4]))[0], SNAP_IP)
+        if self.want is not None and len(self.cur) >= self.want:
+            out = bytes(self.cur)
+            self.cur, self.want = bytearray(), None
+            return out
+        return None
+
+
+# ---- DNS tunnelling -----------------------------------------------------------
+
+def entropy(text: str) -> float:
+    if not text:
+        return 0.0
+    counts = {}
+    for ch in text:
+        counts[ch] = counts.get(ch, 0) + 1
+    return -sum(c / len(text) * math.log2(c / len(text)) for c in counts.values())
+
+
+class TunnelDetector:
+    """Data smuggled through DNS (iodine, dnscat2...) looks like MANY distinct, long or
+    random-looking sub-names under one domain from one device in a short window, often as
+    TXT/NULL queries, or a single very long random label. Returns the base domain the
+    first time a pattern trips for a (device, domain) in the window."""
+
+    def __init__(self, window=60, min_unique=40, long_label=50):
+        self.window, self.min_unique, self.long_label = window, min_unique, long_label
+        self.m = {}
+
+    def observe(self, client, qname, qtype, now):
+        labels = qname.split(".")
+        if len(labels) < 3:
+            return None
+        base, sub = base_domain(qname), ".".join(labels[:-2])
+        e = self.m.get((client, base))
+        if e is None or now - e["t0"] > self.window:
+            if len(self.m) > 5000:
+                self.m = {k: v for k, v in self.m.items() if now - v["t0"] <= self.window}
+            e = self.m[(client, base)] = {"t0": now, "names": set(), "txt": 0, "flag": False}
+        e["names"].add(sub)
+        if qtype in ("TXT", "NULL", "CNAME", "MX"):
+            e["txt"] += 1
+        longest = max(labels[:-2], key=len)
+        single = len(longest) >= self.long_label and entropy(longest) >= 3.5
+        n = len(e["names"])
+        many = n >= self.min_unique and (
+            sum(len(x) for x in e["names"]) / n >= 16
+            or sum(entropy(x) for x in e["names"]) / n >= 3.3
+            or e["txt"] >= self.min_unique // 2)
+        if (single or many) and not e["flag"]:
+            e["flag"] = True
+            return base
+        return None
+
+
+TUNNELS = TunnelDetector()
+_RECENT_DNS = {}                      # (client, base domain) -> last time that device asked
+_RECENT_TTL = 3600
+
+
+def dns_seen_recently(client, name, now=None, ttl=_RECENT_TTL):
+    now = time.time() if now is None else now
+    t = _RECENT_DNS.get((client, base_domain(name)))
+    return t is not None and now - t <= ttl
+
+
+# ---- public lists: VPN server ranges, Tor default bridges -------------------------
+
+def _ip2int(s):
+    parts = s.split(".")
+    if len(parts) != 4:
+        raise ValueError("not an IPv4 address")
+    a, b, c, d = (int(x) for x in parts)
+    if not all(0 <= x <= 255 for x in (a, b, c, d)):
+        raise ValueError("octet out of range")
+    return (a << 24) | (b << 16) | (c << 8) | d
+
+
+def _is_global_int(n):
+    a = n >> 24
+    b = (n >> 16) & 255
+    if a in (0, 10, 127) or a >= 224:
+        return False
+    return not ((a == 172 and 16 <= b <= 31) or (a == 192 and b == 168) or (a == 169 and b == 254)
+                or (a == 100 and 64 <= b <= 127))
+
+
+def parse_ranges(text: str):
+    """Pure. One IPv4 CIDR or address per line -> (starts, ends) of MERGED, sorted,
+    global-only intervals. Private/reserved entries and junk are ignored."""
+    iv = []
+    for ln in text.splitlines():
+        ln = ln.strip().split("#")[0].strip()
+        if not ln:
+            continue
+        try:
+            ip, _, bits = ln.partition("/")
+            bits = int(bits) if bits else 32
+            base = _ip2int(ip)
+            if not 0 <= bits <= 32:
+                continue
+            size = 1 << (32 - bits)
+            start = base & ~(size - 1) & 0xFFFFFFFF
+            if _is_global_int(start) and _is_global_int(start + size - 1):
+                iv.append((start, start + size - 1))
+        except (ValueError, IndexError):
+            continue
+    iv.sort()
+    merged = []
+    for st, en in iv:
+        if merged and st <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], en))
+        else:
+            merged.append((st, en))
+    return [m[0] for m in merged], [m[1] for m in merged]
+
+
+_VPN = {"starts": [], "ends": [], "mtime": 0.0}
+
+
+def vpn_match(ip: str, tables=None) -> bool:
+    t = tables or _VPN
+    try:
+        n = _ip2int(ip)
+    except (ValueError, IndexError):
+        return False
+    i = bisect.bisect_right(t["starts"], n) - 1
+    return i >= 0 and n <= t["ends"][i]
+
+
+def parse_bridge_ips(text: str) -> set:
+    """Pure. Tor Browser's pt_config.json -> public IPv4 addresses of its built-in bridges
+    (documentation/placeholder addresses such as 192.0.2.x are ignored)."""
+    ips = set()
+    for m in re.finditer(r"\b(\d{1,3}(?:\.\d{1,3}){3}):\d{1,5}\b", text):
+        try:
+            if _is_global_int(_ip2int(m.group(1))) and not m.group(1).startswith(("192.0.2.", "198.51.100.", "203.0.113.")):
+                ips.add(m.group(1))
+        except ValueError:
+            continue
+    return ips
+
+
+def _fetch_text(url, timeout=60):
+    body, code = _curl(["-L", url], timeout=timeout)
+    return body if code is not None and 200 <= code < 300 and body else None
+
+
+def load_vpn_ranges():
+    try:
+        st = VPN_RANGES_PATH.stat()
+        if st.st_mtime != _VPN["mtime"]:
+            starts, ends = parse_ranges(VPN_RANGES_PATH.read_text())
+            with _LOCK:
+                _VPN.update(starts=starts, ends=ends, mtime=st.st_mtime)
+    except Exception:
+        pass
+
+
+def _file_age(path):
+    try:
+        return time.time() - path.stat().st_mtime
+    except Exception:
+        return None
+
+
+def lists_loop():
+    """Daily refresh of the VPN range list and Tor's default bridges. A failed fetch keeps
+    the last good copy; a copy that parses to nothing is never written."""
+    while True:
+        try:
+            load_vpn_ranges()
+            load_tor_bridges()
+            if (_file_age(VPN_RANGES_PATH) or 1e12) > LISTS_REFRESH:
+                txt = _fetch_text(VPN_RANGES_URL)
+                if txt and len(parse_ranges(txt)[0]) > 1000:
+                    VPN_RANGES_PATH.write_text(txt)
+                    load_vpn_ranges()
+                    print(f"[eyeguard-dnsnet] vpn ranges refreshed: {len(_VPN['starts'])} intervals", flush=True)
+            if (_file_age(TOR_BRIDGES_PATH) or 1e12) > LISTS_REFRESH:
+                txt = _fetch_text(TOR_BRIDGES_URL)
+                ips = parse_bridge_ips(txt) if txt else set()
+                if ips:
+                    TOR_BRIDGES_PATH.write_text(json.dumps({"ips": sorted(ips)}))
+                    load_tor_bridges()
+                    print(f"[eyeguard-dnsnet] tor default bridges refreshed: {len(ips)}", flush=True)
+        except Exception as ex:
+            # one bad refresh (full disk, odd response) must never end the refresh loop
+            print(f"[eyeguard-dnsnet] list refresh {type(ex).__name__}: {ex}", flush=True)
+        time.sleep(LISTS_RETRY if _file_age(VPN_RANGES_PATH) is None else 3600)
+
+
 # ---- state -----------------------------------------------------------------
 
 _LOCK = threading.Lock()
 _SEEN: dict = {}                       # (client, cls, target) -> last alert time
 _STATS = {"since": time.time(), "dns_queries": 0, "dns_classified": 0,
           "alerts": {}, "observed": {}, "suppressed_covered": 0, "excluded_skipped": 0}
-_TOR = {"ips": set(), "mtime": 0.0}
+_TOR = {"ips": set(), "mtime": 0.0, "bridges": set(), "all": set(), "bmtime": 0.0}
 _COVER = {"map": {}, "alive": {}, "checked": 0.0}
 
 
@@ -500,12 +791,18 @@ def covered_by_live_monitor(ip: str, cls: str, now: float | None = None) -> bool
 
 _TITLES = {
     "explicit-dns": "explicit domain",
-    "tor-guard": "Tor entry relay contacted",
+    "explicit-sni": "explicit site name in a TLS handshake (no DNS lookup seen: DNS was cached or bypassed)",
+    "vpn-ip": "known VPN server contacted",
+    "tls-no-sni": "TLS connection with no server name",
+    "ech-hidden": "site name hidden by Encrypted Client Hello",
+    "dns-tunnel": "possible DNS tunnelling",
+    "tor-guard": "Tor entry relay or default bridge contacted",
     "tor-domain": "Tor project lookup",
     "doh-ip": "DNS-over-HTTPS provider contacted",
     "dot-attempt": "DNS-over-TLS/QUIC attempt (port 853)",
     "vpn-domain": "VPN/proxy provider lookup",
     "private-relay-lookup": "iCloud Private Relay lookup (observe-only)",
+    "private-relay": "connection to iCloud Private Relay",
     "vpn-port": "VPN protocol traffic",
     "wg-handshake": "WireGuard tunnel handshake to the internet",
     "ipv6-enabled": "IPv6 enabled on a client network",
@@ -555,7 +852,7 @@ def raise_event(client: str, cls: str, target: str, now: float | None = None) ->
             for k in [k for k, v in _SEEN.items() if now - v[0] > 2 * THROTTLE_MAX]:
                 del _SEEN[k]
         _STATS["alerts"][cls] = _STATS["alerts"].get(cls, 0) + 1
-    explicit = cls == "explicit-dns"
+    explicit = cls in ("explicit-dns", "explicit-sni")
     who = device_label(client)
     prefix = "net-signal" if explicit else "net-bypass"
     _emit({
@@ -570,11 +867,19 @@ def raise_event(client: str, cls: str, target: str, now: float | None = None) ->
 # ---- decisions for each parsed packet (pure given state) ---------------------
 
 def on_dns(client: str, resolver: str, qname: str, local_ips: set,
-           now: float | None = None) -> list:
+           now: float | None = None, qtype: str | None = None) -> list:
     """Apply every DNS-derived rule to one query. Returns list of results."""
     out = []
+    t_now = time.time() if now is None else now
     with _LOCK:
         _STATS["dns_queries"] += 1
+        _RECENT_DNS[(client, base_domain(qname))] = t_now
+        if len(_RECENT_DNS) > 20000:
+            for k in [k for k, t in _RECENT_DNS.items() if t_now - t > _RECENT_TTL]:
+                del _RECENT_DNS[k]
+    tunnel = TUNNELS.observe(client, qname, qtype, t_now)
+    if tunnel and not is_noise(tunnel):
+        out.append(raise_event(client, "dns-tunnel", tunnel, now))
     if resolver not in local_ips and resolver not in TRUSTED_DESTS:
         out.append(raise_event(client, "dns-bypass", resolver, now))
     c = classify(qname)
@@ -600,6 +905,8 @@ def on_flow(src: str, dst: str, dport: int, proto: str, local_ips: set,
     if dst in local_ips or dst in TRUSTED_DESTS:
         return []          # traffic to the router/G11 is the household's own tunnel/DNS
     out = []
+    if vpn_match(dst):
+        out.append(raise_event(src, "vpn-ip", dst, now))
     if proto == "tcp":
         if dst in tor_ips:
             out.append(raise_event(src, "tor-guard", dst, now))
@@ -618,6 +925,43 @@ def on_flow(src: str, dst: str, dport: int, proto: str, local_ips: set,
             out.append(raise_event(src, "vpn-port", f"{VPN_UDP_PORTS[dport]} {dst}:{dport}", now))
         if dport in (500, 4500):
             out.append(raise_event(src, "ike-ipsec", f"{dst}:{dport}", now))
+    return out
+
+
+def on_sni(client: str, dst: str, sni: str | None, ech: bool, cut: bool, local_ips: set,
+           now: float | None = None) -> list:
+    """Rules for the server name in a TLS ClientHello. A name the device ALSO just looked up
+    in DNS is skipped (the DNS rule already spoke); what is left is DNS that was cached,
+    encrypted or bypassed."""
+    if dst in local_ips or dst in TRUSTED_DESTS:
+        return []
+    t_now = time.time() if now is None else now
+    with _LOCK:
+        _STATS["sni_seen"] = _STATS.get("sni_seen", 0) + 1
+    if sni is None:
+        if cut:
+            with _LOCK:
+                _STATS["sni_unparsed"] = _STATS.get("sni_unparsed", 0) + 1
+            return []
+        return [raise_event(client, "tls-no-sni", dst, now)]
+    out = []
+    if host_matches(sni, ECH_PUBLIC_NAMES):
+        out.append(raise_event(client, "ech-hidden", host_matches(sni, ECH_PUBLIC_NAMES), now))
+    relay = host_matches(sni, PRIVATE_RELAY)
+    if relay:      # a real TLS connection to the relay (its name resolved despite the block): masking, not a lookup
+        out.append(raise_event(client, "private-relay", relay, now))
+    if dns_seen_recently(client, sni, t_now):
+        with _LOCK:
+            _STATS["sni_dns_dup"] = _STATS.get("sni_dns_dup", 0) + 1
+        return out
+    c = classify(sni)
+    if c and c[0] == "flagged":
+        out.append(raise_event(client, "explicit-sni", base_domain(sni), now))
+    for suffixes, cls in ((VPN_DOMAINS, "vpn-domain"), (TOR_DOMAINS, "tor-domain"),
+                          (DOH_HOSTS, "doh-host")):
+        hit = host_matches(sni, suffixes)
+        if hit:
+            out.append(raise_event(client, cls, hit, now))
     return out
 
 
@@ -708,8 +1052,27 @@ def load_tor():
             with _LOCK:
                 _TOR["ips"] = set(data.get("ips", []))
                 _TOR["mtime"] = st.st_mtime
+                _TOR["all"] = _TOR["ips"] | _TOR["bridges"]
     except Exception:
         pass
+
+
+def load_tor_bridges():
+    try:
+        st = TOR_BRIDGES_PATH.stat()
+        if st.st_mtime != _TOR["bmtime"]:
+            data = json.loads(TOR_BRIDGES_PATH.read_text())
+            with _LOCK:
+                _TOR["bridges"] = set(data.get("ips", []))
+                _TOR["bmtime"] = st.st_mtime
+                _TOR["all"] = _TOR["ips"] | _TOR["bridges"]
+    except Exception:
+        pass
+
+
+def tor_all():
+    with _LOCK:
+        return _TOR["all"]
 
 
 def tor_age() -> float | None:
@@ -746,8 +1109,9 @@ def tor_refresh_loop():
 _CHILDREN: set = set()
 
 
-def _spawn(iface: str, filt: str):
-    proc = subprocess.Popen(["tcpdump", "-i", iface, "-l", "-nn", "-s", "256", filt],
+def _spawn(iface: str, filt: str, snaplen: int = 256, hexdump: bool = False):
+    proc = subprocess.Popen(["tcpdump", "-i", iface, "-l", "-nn"] + (["-x"] if hexdump else [])
+                            + ["-s", str(snaplen), filt],
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                             text=True, bufsize=1)
     with _LOCK:
@@ -774,7 +1138,7 @@ DNS_FILTER = "(udp or tcp) and dst port 53"
 SYN_FILTER = "tcp and tcp[tcpflags] & (tcp-syn|tcp-ack) == tcp-syn"
 
 
-CAPTURES_PER_IFACE = 4          # dns, new-connection, wireguard, vpn/doq ports
+CAPTURES_PER_IFACE = 5          # dns, new-connection, wireguard, vpn/doq ports, tls hello
 
 
 def dns_loop(iface: str):
@@ -784,9 +1148,9 @@ def dns_loop(iface: str):
             proc = _spawn(iface, filt)
             for line in proc.stdout:
                 local = local_ips()
-                p = parse_dns_line(line)
+                p = parse_dns_query(line)
                 if p and p[0] not in local and is_household_ip(p[0]):
-                    on_dns(p[0], p[1], p[2], local)
+                    on_dns(p[0], p[1], p[2], local, qtype=p[3])
             proc.wait()
         except Exception as ex:
             print(f"[eyeguard-dnsnet] dns({iface}) {type(ex).__name__}: {ex}", flush=True)
@@ -802,8 +1166,7 @@ def flow_loop(iface: str):
                 local = local_ips()
                 f = parse_flow_line(line)
                 if f and f[0] not in local and is_household_ip(f[0]):
-                    with _LOCK:
-                        tor = _TOR["ips"]
+                    tor = tor_all()
                     on_flow(f[0], f[2], f[3], "tcp", local, tor)
             proc.wait()
         except Exception as ex:
@@ -843,12 +1206,37 @@ def udp_loop(iface: str):
                 local = local_ips()
                 f = parse_flow_line(line)
                 if f and f[0] not in local and is_household_ip(f[0]):
-                    with _LOCK:
-                        tor = _TOR["ips"]
+                    tor = tor_all()
                     on_flow(f[0], f[2], f[3], "udp", local, tor)
             proc.wait()
         except Exception as ex:
             print(f"[eyeguard-dnsnet] udp({iface}) {type(ex).__name__}: {ex}", flush=True)
+        time.sleep(5)
+
+
+# TLS ClientHello: a TCP segment to :443 whose payload starts 0x16 (handshake), with
+# handshake type 0x01 five bytes in. Handshakes only, so volume is small. Snaplen covers a
+# whole ClientHello (Chrome randomises extension order, so the SNI can sit late).
+SNI_SNAPLEN = 1500
+SNI_FILTER = ("tcp dst port 443 and tcp[((tcp[12] & 0xf0) >> 2)] = 0x16 "
+              "and tcp[((tcp[12] & 0xf0) >> 2) + 5] = 0x01")
+
+
+def sni_loop(iface: str):
+    while True:
+        try:
+            proc = _spawn(iface, SNI_FILTER, snaplen=SNI_SNAPLEN, hexdump=True)
+            asm = HexAssembler()
+            for line in proc.stdout:
+                pkt = asm.feed(line)
+                if pkt is None:
+                    continue
+                h = parse_client_hello(pkt)
+                if h and h["src"] not in local_ips() and is_household_ip(h["src"]):
+                    on_sni(h["src"], h["dst"], h["sni"], h["ech"], h["cut"], local_ips())
+            proc.wait()
+        except Exception as ex:
+            print(f"[eyeguard-dnsnet] sni({iface}) {type(ex).__name__}: {ex}", flush=True)
         time.sleep(5)
 
 
@@ -874,6 +1262,8 @@ def stats_loop():
             snap = json.loads(json.dumps(_STATS, default=str))
         snap["written_at"] = now_iso()
         snap["tor_guard_ips"] = len(_TOR["ips"])
+        snap["tor_default_bridges"] = len(_TOR["bridges"])
+        snap["vpn_intervals"] = len(_VPN["starts"])
         with _LOCK:
             for k in [k for k in _CHILDREN if k.poll() is not None]:
                 _CHILDREN.discard(k)
@@ -897,12 +1287,14 @@ def main():
     import signal
     signal.signal(signal.SIGTERM, _terminate)
     load_tor()
+    load_tor_bridges()
+    load_vpn_ranges()
     print(f"[eyeguard-dnsnet] active on {IFACES}; alert classes: "
           f"{sorted(ALERT_CLASSES)}; excluded: {sorted(EXCLUDED)} + macs {sorted(EXCLUDED_MACS)}", flush=True)
-    for fn in (tor_refresh_loop, invariants_loop, stats_loop, sender_loop, trusted_names_loop):
+    for fn in (tor_refresh_loop, invariants_loop, stats_loop, sender_loop, lists_loop, trusted_names_loop):
         threading.Thread(target=fn, daemon=True).start()
     for iface in IFACES:
-        for fn in (dns_loop, flow_loop, wg_loop, udp_loop):
+        for fn in (dns_loop, flow_loop, wg_loop, udp_loop, sni_loop):
             threading.Thread(target=fn, args=(iface,), daemon=True).start()
     while True:
         time.sleep(3600)
