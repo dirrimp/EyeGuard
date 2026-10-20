@@ -17,14 +17,12 @@ destination IPs, never payload or screens.
 | Class | Signal | Default |
 |---|---|---|
 | `tor-guard` | new TCP connection to a current Tor guard relay, any port (Onionoo list, shared cache) | alert |
-| `tor-domain` | lookup of torproject.org (updates, bridges, snowflake) | alert |
-| `vpn-domain` | lookup of a VPN / proxy / anti-censorship provider (suffix match; proton.me mail is NOT listed, only Proton VPN endpoints) | alert |
-| `private-relay` | lookup of `mask.icloud.com` / `mask-h2.icloud.com` (iCloud Private Relay) | alert |
 | `dot-attempt` | any TCP/UDP 853 (DNS-over-TLS / QUIC) to a non-household address | alert |
 | `doh-ip` | TCP 443 to a known DoH provider IP (same list as the firewall rules) | alert |
 | `vpn-port` | OpenVPN 1194, PPTP 1723, L2TP 1701, WireGuard 51820 | alert |
 | `wg-handshake` | a WireGuard handshake (148-byte, type 1) to a non-household address on ANY port | alert |
 | `ipv6-enabled` | IPv6 switched on for a client segment (the capture is IPv4-only) | alert |
+| `vpn-domain` / `tor-domain` / `private-relay-lookup` | a DNS **lookup** of a VPN/proxy provider, a Tor Project name, or `mask.icloud.com`. Lookups are not use: on this network Apple devices look up `mask.icloud.com` ~1,300 times a day (AdGuard blocks it and they keep retrying), the Mac's Proton VPN app polls its account API all day, and EyeGuard's own tooling reads torproject.org. Real use is caught by the connection-based classes above. | observe |
 | `dns-bypass` | plain DNS sent to a resolver other than the router/G11 | observe |
 | `doh-host` | lookup of a public DoH hostname | observe |
 | `ike-ipsec` | UDP 500/4500 (also Wi-Fi Calling) | observe |
