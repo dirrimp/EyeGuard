@@ -83,15 +83,56 @@ def enrolled_udid():
     return ids[0] if ids else None
 
 
-def do_poke(action, key):
+class QuietLog:
+    """One line per kind of failure per window (plus a recovery line), so a backend outage
+    that lasts hours is a few log lines, not one every 45 seconds."""
+
+    def __init__(self, window=600, log=None):
+        self.window, self.log = window, log or poll.log
+        self.last = {}       # kind -> last time logged
+        self.skipped = {}    # kind -> suppressed count
+        self.failing = set()
+
+    def fail(self, kind, detail, now):
+        self.failing.add(kind)
+        if now - self.last.get(kind, -1e9) >= self.window:
+            n = self.skipped.pop(kind, 0)
+            self.log(f"poke: {kind} FAILED {detail}" + (f" ({n} similar suppressed)" if n else ""))
+            self.last[kind] = now
+        else:
+            self.skipped[kind] = self.skipped.get(kind, 0) + 1
+
+    def ok(self, kind):
+        if kind in self.failing:
+            self.failing.discard(kind)
+            self.log(f"poke: {kind} recovered")
+            self.last.pop(kind, None)
+
+
+QUIET = QuietLog()
+
+
+def do_poke(action, key, now=None):
+    """The push IS the wake; the queued DeviceInformation command is only the cheapest thing for the
+    phone to answer. So a failed enqueue (e.g. the API answering 500 during an APNs outage) must
+    never stop the push, and a failed push is the only thing that raises."""
+    now = time.time() if now is None else now
     udid = enrolled_udid()
     if not udid:
         poll.log("poke: no enrolled phone")
         return False
     if action == "command+push":
-        # The cheapest real request: the phone must answer it, which is the traffic the router sees.
-        poll.enqueue_command(udid, key, {"RequestType": "DeviceInformation", "Queries": ["IsSupervised"]})
-    poll.push(udid, key)
+        try:
+            poll.enqueue_command(udid, key, {"RequestType": "DeviceInformation", "Queries": ["IsSupervised"]})
+            QUIET.ok("enqueue")
+        except Exception as e:
+            QUIET.fail("enqueue", repr(e), now)       # keep going: still push
+    try:
+        poll.push(udid, key)
+    except Exception as e:
+        QUIET.fail("push", repr(e), now)
+        raise
+    QUIET.ok("push")
     return True
 
 
@@ -116,10 +157,11 @@ def serve(conf, sock=None, poker=None, clock=time.time, poke=do_poke, keyfn=poll
         try:
             ok = poke(action, keyfn())
             poker.record(now, action)
+            QUIET.ok("poke")
             poll.log(f"poke: {action} from {addr[0]} ok={ok}")
         except Exception as e:
-            poker.record(now, "push")        # still rate-limit after a failure
-            poll.log(f"poke: {action} FAILED {e!r}")
+            poker.record(now, action)        # a failed attempt still counts toward the gaps and the hourly cap
+            QUIET.fail("poke", repr(e), now)
         if once:
             return action
 

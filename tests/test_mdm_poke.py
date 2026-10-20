@@ -144,6 +144,42 @@ check("refuses a token shorter than 16 characters", pk.load_conf(str(cf)) is Non
 check("missing config exits quietly (None)", pk.load_conf(str(Path(d) / "absent.json")) is None)
 check("do_poke with no enrolled phone does nothing and says so", pk.do_poke("push", "K") is False)
 
+print("H. API outage (enqueue/push answering 500): the wake still goes out, no hammering, no log spam")
+import urllib.error
+log_lines = []
+pk.QUIET = pk.QuietLog(window=600, log=log_lines.append)
+pk.enrolled_udid = lambda: "UDID"
+pushes, enq = [], []
+def http500(*a, **k): raise urllib.error.HTTPError("u", 500, "boom", {}, None)
+pk.poll.enqueue_command = lambda *a, **k: (enq.append(1), http500())[1]
+pk.poll.push = lambda udid, key: pushes.append(udid) or 200
+check("enqueue 500: the push is STILL sent (the push is the wake)", pk.do_poke("command+push", "K", now=100.0) is True and pushes == ["UDID"])
+check("...and the enqueue failure is logged once", len([l for l in log_lines if "enqueue FAILED" in l]) == 1)
+for t in (145.0, 190.0, 235.0, 280.0):
+    pk.do_poke("command+push", "K", now=t)
+check("repeated failures inside the window add NO log lines", len([l for l in log_lines if "enqueue FAILED" in l]) == 1, str(log_lines))
+pk.do_poke("command+push", "K", now=800.0)
+check("after the window one more line, with the suppressed count", len([l for l in log_lines if "enqueue FAILED" in l]) == 2 and "suppressed" in log_lines[-1])
+pk.poll.enqueue_command = lambda *a, **k: "cid"
+pk.do_poke("command+push", "K", now=900.0)
+check("recovery is logged once", any("enqueue recovered" in l for l in log_lines))
+pk.poll.push = lambda udid, key: http500()
+try:
+    pk.do_poke("push", "K", now=1000.0); raised = False
+except Exception:
+    raised = True
+check("a failed push raises (so the caller counts it)", raised)
+# the caller: a failed attempt must still count toward the 300 s command gap and the hourly cap
+srv2 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); srv2.bind(("127.0.0.1", 0)); port2 = srv2.getsockname()[1]
+cf2 = {"token": TOKEN, "bind": "127.0.0.1", "port": port2}
+pkr = pk.Poker(); acts = []
+def bad_poke(action, key): acts.append(action); raise RuntimeError("500")
+for i, t in enumerate((10000.0, 10045.0, 10090.0, 10135.0, 10320.0)):
+    c = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); c.sendto(json.dumps({"token": TOKEN}).encode(), ("127.0.0.1", port2)); c.close()
+    pk.serve(cf2, sock=srv2, poker=pkr, clock=lambda t=t: t, poke=bad_poke, keyfn=lambda: "K", once=True)
+check("while the API is failing, a fresh command is attempted at most every 300 s (not every 45 s)",
+      acts == ["command+push", "push", "push", "push", "command+push"], str(acts))
+
 print()
 if fails:
     print(f"FAILED {len(fails)}: " + "; ".join(fails)); sys.exit(1)
