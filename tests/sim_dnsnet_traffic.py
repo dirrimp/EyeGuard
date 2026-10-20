@@ -69,12 +69,18 @@ DEV = {  # name: (ip, kind)
     "Jadas-iPhone": ("192.168.8.113", "phone"), "g11": ("192.168.8.231", "server"),
     "Visitor-Galaxy": ("192.168.9.60", "phone"),
 }
+DEV.update({  # the always-on tunnels: every peer is away from home and reaches the router over AmneziaWG
+    "Jonahs-Mac-tunnel": ("10.1.0.2", "tunnel"), "JJPWS-Phone-tunnel": ("10.1.0.3", "tunnel"),
+    "Jonahs-Mac-Remote": ("10.1.0.4", "tunnel"), "Jadas-Phone-tunnel": ("10.1.0.5", "tunnel")})
 if args.worst_case:
     DEV["Living-room-TV"] = ("192.168.10.20", "tv")
 leases = Path(tempfile.mkdtemp()) / "leases"
 leases.write_text("".join(f"1 aa:00:00:00:00:{i:02x} {ip} {n} 01\n" for i, (n, (ip, _)) in enumerate(DEV.items())))
 dn.LEASES = str(leases); dn.DHCP_CONFIG = "/nonexistent"; dn._IDENT["at"] = 0.0
-LOCAL = {"127.0.0.1", "192.168.8.1", "192.168.9.1", "192.168.10.1", "10.1.0.1", "73.43.190.194"}
+WAN_A, WAN_B = "73.43.190.194", "98.7.6.5"          # the ISP changes the router's public address on day 3
+WAN_CHANGE = T0 + 3 * 86400
+BASE_LOCAL = {"127.0.0.1", "192.168.8.1", "192.168.9.1", "192.168.10.1", "10.1.0.1"}
+dn.router_local_ips = lambda: BASE_LOCAL | {WAN_A if SIM[0] < WAN_CHANGE else WAN_B}
 
 # ---------------------------------------------------------------- real IPs for real sites
 ipfile = D / "resolved.json"
@@ -148,9 +154,9 @@ events = []
 def add(t, kind, **kw): events.append((t, len(events), kind, kw))
 
 
-def device_day(name, ip, kind, day):
+def device_day(dev, ip, kind, day):
     base_t = T0 + day * 86400
-    n_dns = {"phone": 3500, "mac": 6000, "server": 1500, "tv": 1200}[kind]
+    n_dns = {"phone": 3500, "mac": 6000, "server": 1500, "tv": 1200, "tunnel": 3500}[kind]
     for _ in range(n_dns):
         hour = rnd.choices(range(24), HOUR_W if kind != "server" else [1] * 24)[0]
         t = base_t + hour * 3600 + rnd.random() * 3600
@@ -162,7 +168,7 @@ def device_day(name, ip, kind, day):
         else:
             d, ips = pick_site(); name = f"{rnd.choice(HOST_PREFIX)}.{d}"; dst_ips = ips
         add(t, "dns", ip=ip, name=name, qtype=rnd.choice(["A", "AAAA", "HTTPS", "A", "AAAA"]),
-            resolver="192.168.8.1" if kind != "tv" or not args.worst_case else "8.8.8.8")
+            resolver="10.1.0.1" if kind == "tunnel" else ("192.168.8.1" if kind != "tv" or not args.worst_case else "8.8.8.8"))
         if dst_ips and rnd.random() < .75:                                   # a connection follows the lookup
             add(t + .05, "syn", ip=ip, dst=rnd.choice(dst_ips), port=rnd.choices([443, 80, 993, 5223, 8443], [80, 8, 3, 6, 3])[0])
             if rnd.random() < .85:
@@ -170,9 +176,12 @@ def device_day(name, ip, kind, day):
         if rnd.random() < .04 and dst_ips:                                   # connection from cached DNS: hello with NO recent lookup
             d, ips = pick_site()
             add(t + 7200 + rnd.random() * 3600, "sni", ip=ip, name=f"{rnd.choice(HOST_PREFIX)}.{d}", dst=ips[0])
-    if kind in ("phone", "mac"):                                              # measured on the live network
-        for k in range(int(36 * 24 if kind == "phone" else 14 * 24)):          # Apple devices retry the blocked mask.icloud.com constantly
-            add(base_t + rnd.random() * 86400, "dns", ip=ip, name="mask.icloud.com", qtype="A", resolver="192.168.8.1")
+    if kind in ("phone", "mac", "tunnel"):                                    # measured on the live network
+        for k in range(int(36 * 24 if kind in ("phone", "tunnel") else 14 * 24)):          # Apple devices retry the blocked mask.icloud.com constantly
+            add(base_t + rnd.random() * 86400, "dns", ip=ip, name="mask.icloud.com", qtype="A", resolver="10.1.0.1" if kind == "tunnel" else "192.168.8.1")
+    if kind == "tunnel":                                                       # DoH to the router's own 8853, every ~10 minutes
+        for k in range(144):
+            add(base_t + k * 600 + rnd.random() * 60, "syn", ip=ip, dst="10.1.0.1", port=8853)
     if kind == "mac":
         for _ in range(32):                                                    # the Proton VPN app polls its account API
             add(base_t + rnd.random() * 86400, "dns", ip=ip, name=rnd.choice(["account.protonvpn.com", "vpn-api.proton.me", "protonvpn.com", "account-api.protonvpn.com"]), qtype="A", resolver="192.168.8.1")
@@ -186,6 +195,11 @@ def device_day(name, ip, kind, day):
             t0 = base_t + rnd.choice([12, 19, 20, 21]) * 3600 + rnd.random() * 3000
             for k in range(rnd.randint(30, 90)):
                 add(t0 + k * rnd.uniform(2, 9), "dns", ip=ip, name=f"rr{rnd.randint(1, 9)}---sn-{rl(8)}.googlevideo.com", qtype="A", resolver="192.168.8.1")
+    if dev == "Jonahs-iPhone":                                                # at home with the tunnel connected: dials the router's own public address
+        for k in range(4320):
+            t = base_t + k * 20
+            stale = WAN_CHANGE <= t < WAN_CHANGE + 6 * 3600                    # stale DNS for 6 h after the ISP change
+            add(t, "udp", ip=ip, dst=WAN_A if (t < WAN_CHANGE or stale) else WAN_B, port=51820)
     if kind == "phone":                                                        # Wi-Fi calling keeps an IPsec tunnel to the carrier
         for h in range(24):
             if rnd.random() < .5:
@@ -200,8 +214,8 @@ def device_day(name, ip, kind, day):
 
 
 for day in range(args.days):
-    for name, (ip, kind) in DEV.items():
-        device_day(name, ip, kind, day)
+    for dname, (ip, kind) in DEV.items():
+        device_day(dname, ip, kind, day)
 
 # injected, KNOWN-BAD events: the only alerts that should exist (per day)
 EXPECT = collections.Counter()
@@ -226,12 +240,13 @@ for day in range(args.days):
     inject(b + 2400, "syn", "vpn-ip", ip=mac, dst=".".join(str((vi >> s) & 255) for s in (24, 16, 8, 0)), port=443)
 
 events.sort()
-print(f"simulated {args.days} days, {len(events):,} events across {len(DEV)} devices "
+print(f"(router public address changes on day 3; the phone keeps dialing the old one for 6 h)\nsimulated {args.days} days, {len(events):,} events across {len(DEV)} devices "
       f"({'worst-case devices ON' if args.worst_case else 'baseline households'})")
 
 # ---------------------------------------------------------------- replay
 for t, _, kind, kw in events:
     SIM[0] = t
+    LOCAL = dn.local_ips(ttl=60, now=t)
     if kind == "dns":
         dn.on_dns(kw["ip"], kw["resolver"], kw["name"], LOCAL, now=t, qtype=kw["qtype"])
     elif kind == "sni":
