@@ -121,7 +121,7 @@ ALERT_DEFAULT = ["explicit-dns", "explicit-sni", "vpn-ip", "tor-guard", "doh-ip"
                  "private-relay", "vpn-port", "wg-handshake", "ipv6-enabled"]
 OBSERVE_ONLY = ["dns-bypass", "doh-host", "ike-ipsec", "openvpn-udp", "proxy-port",
                 "tls-no-sni", "ech-hidden", "dns-tunnel",
-                "vpn-domain", "tor-domain", "private-relay-lookup"]
+                "vpn-domain", "tor-domain", "private-relay-lookup", "private-relay-api"]
 ALERT_CLASSES = set(CONF.get("dnsnet_alert_classes", ALERT_DEFAULT))
 
 # ---- the same classification as eyeguard-phone.py (parity-tested) ----------
@@ -193,8 +193,11 @@ VPN_DOMAINS = (
 )
 TOR_DOMAINS = ("torproject.org", "onionoo.torproject.org", "bridges.torproject.org",
                "snowflake.torproject.net", "meek.azureedge.net")
-PRIVATE_RELAY = ("mask.icloud.com", "mask-h2.icloud.com", "mask-api.icloud.com",
-                 "mask.apple-dns.net")
+PRIVATE_RELAY = ("mask.icloud.com", "mask-h2.icloud.com", "mask.apple-dns.net")
+# Apple's Private Relay configuration / token API. iOS contacts it routinely even with Private Relay
+# switched OFF (seen live 2026-10-20: two RED emails for iPhones with Relay off), so a connection to
+# it is observe-only; the relay itself (PRIVATE_RELAY above) still alerts.
+PRIVATE_RELAY_API = ("mask-api.icloud.com",)
 DNS_BYPASS_PORTS = {853}
 VPN_TCP_PORTS = {1194: "OpenVPN", 1723: "PPTP"}
 VPN_UDP_PORTS = {1194: "OpenVPN", 51820: "WireGuard (default port)", 1701: "L2TP"}
@@ -802,6 +805,7 @@ _TITLES = {
     "dot-attempt": "DNS-over-TLS/QUIC attempt (port 853)",
     "vpn-domain": "VPN/proxy provider lookup",
     "private-relay-lookup": "iCloud Private Relay lookup (observe-only)",
+    "private-relay-api": "connection to Apple's Private Relay API (observe-only)",
     "private-relay": "connection to iCloud Private Relay",
     "vpn-port": "VPN protocol traffic",
     "wg-handshake": "WireGuard tunnel handshake to the internet",
@@ -892,8 +896,8 @@ def on_dns(client: str, resolver: str, qname: str, local_ips: set,
         out.append(raise_event(client, "vpn-domain", host_matches(qname, VPN_DOMAINS), now))
     if host_matches(qname, TOR_DOMAINS):
         out.append(raise_event(client, "tor-domain", host_matches(qname, TOR_DOMAINS), now))
-    if host_matches(qname, PRIVATE_RELAY):
-        out.append(raise_event(client, "private-relay-lookup", host_matches(qname, PRIVATE_RELAY), now))
+    if host_matches(qname, PRIVATE_RELAY + PRIVATE_RELAY_API):
+        out.append(raise_event(client, "private-relay-lookup", host_matches(qname, PRIVATE_RELAY + PRIVATE_RELAY_API), now))
     if host_matches(qname, DOH_HOSTS):
         out.append(raise_event(client, "doh-host", host_matches(qname, DOH_HOSTS), now))
     return out
@@ -950,6 +954,9 @@ def on_sni(client: str, dst: str, sni: str | None, ech: bool, cut: bool, local_i
     relay = host_matches(sni, PRIVATE_RELAY)
     if relay:      # a real TLS connection to the relay (its name resolved despite the block): masking, not a lookup
         out.append(raise_event(client, "private-relay", relay, now))
+    relay_api = host_matches(sni, PRIVATE_RELAY_API)
+    if relay_api:
+        out.append(raise_event(client, "private-relay-api", relay_api, now))
     if dns_seen_recently(client, sni, t_now):
         with _LOCK:
             _STATS["sni_dns_dup"] = _STATS.get("sni_dns_dup", 0) + 1
