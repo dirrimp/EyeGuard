@@ -15,6 +15,7 @@ on:
     paths:
       - "g11/**"
       - "deploy/g11-poller.cron"
+      - "deploy/g11-poke.cron"
       - "deploy/gen_g11_manifest.py"
       - "deploy/g11_install.sh"
 

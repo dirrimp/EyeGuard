@@ -454,15 +454,17 @@ def attestation():
     items = {"file:eg_report.py": file_hash(os.path.join(here, "eg_report.py")),
              "file:eg-report.sh": file_hash(os.path.join(here, "eg-report.sh")),
              "file:poll.py": file_hash(os.path.abspath(__file__)),
-             "file:hook.py": file_hash(HOOK_PATH)}
+             "file:hook.py": file_hash(HOOK_PATH),
+             "file:poke_listener.py": file_hash(os.path.join(here, "poke_listener.py"))}
     try:
         cur = subprocess.run([CRONTAB_CMD, "-l"], capture_output=True, text=True, timeout=20).stdout
     except Exception:
         cur = ""
-    lines = [l.strip() for l in cur.splitlines() if "poll.py" in l and not l.lstrip().startswith("#")]
-    # exactly one live poller line is expected; none, or extras, hash to something no manifest has
-    items["cron:poller"] = ("sha256:" + hashlib.sha256(lines[0].encode()).hexdigest()) if len(lines) == 1 else \
-        ("sha256:" + hashlib.sha256(("\n".join(sorted(lines)) + "\n#count=%d" % len(lines)).encode()).hexdigest())
+    for key, needle in (("cron:poller", "poll.py"), ("cron:poke", "poke_listener.py")):
+        lines = [l.strip() for l in cur.splitlines() if needle in l and not l.lstrip().startswith("#")]
+        # exactly one live line per job is expected; none, or extras, hash to something no manifest has
+        items[key] = ("sha256:" + hashlib.sha256(lines[0].encode()).hexdigest()) if len(lines) == 1 else \
+            ("sha256:" + hashlib.sha256(("\n".join(sorted(lines)) + "\n#count=%d" % len(lines)).encode()).hexdigest())
     return {"items": items}
 
 

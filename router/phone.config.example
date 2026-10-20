@@ -30,6 +30,12 @@
   "_sleep_relay": "LAN relay for the Mac's WillSleep signal (2026-09-04) -- see eyeguard-phone.py's sleep_relay_loop() and eyeguard/session_watcher.py's SleepWatcher for the full reasoning. Set sleep_relay_token to any random string (must match config.yaml's session_watcher.sleep_relay_token on the Mac exactly) to enable; leave blank/omit to disable the listener entirely (the Mac's direct WAN attempt still works on its own either way, same as before this existed). Not internet-facing -- only reachable from the LAN.",
   "sleep_relay_token": "",
   "sleep_relay_port": 51900,
+  "_mdm_poke": "MDM wake poke (2026-10-18). When the phone has been silent mdm_poke_after_seconds (default 75, well before the 150s dark threshold) the router sends one UDP datagram to the G11 (g11/mdm/poke_listener.py), which sends the phone an MDM push so an idle iPhone wakes and talks over the tunnel. It only SENDS a wake; the dark threshold and flag logic are untouched, so a dead phone is flagged at the same moment as without it. mdm_poke_token must equal the token in /opt/kev/mdm/poke.json on the G11. Leave host or token blank to disable. Primary instance only (not Jada's).",
+  "mdm_poke_host": "",
+  "mdm_poke_port": 51902,
+  "mdm_poke_token": "",
+  "mdm_poke_after_seconds": 75,
+  "mdm_poke_every_seconds": 45,
 
   "_router_watcher": "A SEPARATE process (eyeguard-router-watcher.py, its own service) that verifies eyeguard-phone.py's on-disk hash against a manifest published server-side, and that the process is actually running -- catches the case where eyeguard-phone.py itself was edited to disable its own checks, which nothing INSIDE that same script could ever detect. router_script_version must match a version key already published via deploy/publish_router_manifest.sh.",
   "router_script_version": "unknown",
