@@ -70,6 +70,14 @@ CONNLOG_FILES = {"connlog.sh": "/usr/bin/connlog.sh",
 JADA_CONF = "/etc/eyeguard/phone-jada.json"
 JADA_INIT_NAME = "eyeguard-phone-jada.init"
 JADA_INIT_PATH = "/etc/init.d/eyeguard-phone-jada"
+# Network DNS + bypass monitor (2026-10-20, router/eyeguard-dnsnet.py). Required
+# ONLY if the published manifest lists its init script -- the requirement lives in
+# Dad's manifest, so editing a local file can't switch it off.
+DNSNET_FILES = {"eyeguard-dnsnet.py": "/usr/bin/eyeguard-dnsnet.py",
+                "eyeguard-dnsnet.init": "/etc/init.d/eyeguard-dnsnet"}
+DNSNET_INIT_NAME = "eyeguard-dnsnet.init"
+DNSNET_STATS = CONF.get("dnsnet_stats_file", "/tmp/dnsnet-stats.json")
+DNSNET_STALE_SECONDS = 300
 CONNLOG_DIR = CONF.get("connlog_dir", "/tmp/connlog")
 CONNLOG_STALE_SECONDS = int(CONF.get("connlog_stale_seconds", 300))
 CONNLOG_CONSECUTIVE = 2          # checks in a row before alerting (~10 min)
@@ -365,6 +373,84 @@ def _check_jada(manifest) -> bool:
     return tampered
 
 
+def evaluate_dnsnet(running, init_enabled, stats_age, captures, expected, uptime):
+    """Pure. -> list of problem strings (empty = healthy) for the network monitor.
+    running None = lookup failure, never a signal. stats_age None = no stats file.
+    captures/expected come from the daemon's own counters (numbers only; this
+    watcher never reads what the monitor observed)."""
+    if uptime is not None and uptime < BOOT_GRACE_SECONDS:
+        return []
+    problems = []
+    if running is False:
+        problems.append("the network monitor is not running")
+    if not init_enabled:
+        problems.append("the network monitor is not enabled at boot")
+    if running is not False:
+        if stats_age is None:
+            problems.append("the network monitor has written no status")
+        elif stats_age > DNSNET_STALE_SECONDS:
+            problems.append(f"the network monitor has been silent for {int(stats_age)}s")
+        elif captures is not None and expected and captures < expected:
+            problems.append(f"only {captures} of {expected} network captures are running")
+    return problems
+
+
+def _dnsnet_inputs():
+    out = _ps()
+    running = None if out is None else ("eyeguard-dnsnet.py" in out)
+    stats_age = captures = expected = None
+    try:
+        stats_age = time.time() - os.stat(DNSNET_STATS).st_mtime
+        d = json.load(open(DNSNET_STATS))
+        captures, expected = int(d.get("captures")), int(d.get("expected_captures"))
+    except Exception:
+        pass
+    try:
+        uptime = float(open("/proc/uptime").read().split()[0])
+    except Exception:
+        uptime = None
+    return running, bool(glob.glob("/etc/rc.d/S*eyeguard-dnsnet")), stats_age, captures, expected, uptime
+
+
+_DNSNET_BAD = [0]
+_DNSNET_ALERTED = [False]
+
+
+def _check_dnsnet(manifest) -> bool:
+    """Network monitor. Required ONLY if the published manifest lists its init
+    script. -> True if either file's hash mismatches the manifest (reported via
+    script_tampered). Not-running / silent / partial / not-enabled raise the
+    no-SQL tamper flag, debounced (2 checks) and once per outage."""
+    if not manifest or DNSNET_INIT_NAME not in manifest:
+        return False
+    tampered = False
+    problems = []
+    for name, path in DNSNET_FILES.items():
+        expected = manifest.get(name)
+        if expected is None:
+            continue
+        live = _file_hash(path)
+        if live is None:
+            problems.append(f"{path} is missing")
+        elif live != expected:
+            tampered = True
+            print(f"[router-watcher] {name} hash mismatch: expected {expected}, "
+                  f"got {live}", flush=True)
+    problems += evaluate_dnsnet(*_dnsnet_inputs())
+    if problems:
+        _DNSNET_BAD[0] += 1
+        print(f"[router-watcher] network-monitor problems ({_DNSNET_BAD[0]}): {problems}",
+              flush=True)
+        if _DNSNET_BAD[0] >= CONNLOG_CONSECUTIVE and not _DNSNET_ALERTED[0]:
+            if _post_flag("; ".join(problems), what="network DNS/bypass monitor",
+                          title="Network monitor"):
+                _DNSNET_ALERTED[0] = True
+    else:
+        _DNSNET_BAD[0] = 0
+        _DNSNET_ALERTED[0] = False
+    return tampered
+
+
 def _check_once() -> tuple[bool, bool]:
     """Returns (script_tampered, process_down)."""
     manifest = _fetch_manifest()
@@ -387,6 +473,8 @@ def _check_once() -> tuple[bool, bool]:
     if _check_connlog(manifest):
         script_tampered = True
     if _check_jada(manifest):
+        script_tampered = True
+    if _check_dnsnet(manifest):
         script_tampered = True
 
     running = _phone_process_running()

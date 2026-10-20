@@ -42,7 +42,11 @@ def main():
     # eyeguard-phone-jada.init (2026-10-01): listing it is likewise the
     # server-side statement that the second instance (Jada's phone) is
     # REQUIRED -- the watcher alerts if that instance stops or is disabled.
-    for name in ("connlog.sh", "connlog.init", "eyeguard-phone-jada.init"):
+    # eyeguard-dnsnet.py / .init (2026-10-20): listing the network DNS + bypass
+    # monitor is the server-side statement that it is REQUIRED -- the watcher
+    # alerts if it stops, goes silent, loses a capture, or is edited.
+    for name in ("connlog.sh", "connlog.init", "eyeguard-phone-jada.init",
+                 "eyeguard-dnsnet.py", "eyeguard-dnsnet.init"):
         f = REPO_ROOT / "router" / name
         files[name] = "sha256:" + hashlib.sha256(f.read_bytes()).hexdigest()
 
