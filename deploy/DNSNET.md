@@ -54,7 +54,7 @@ DHCP name, tunnel name, or lease hostname; `UNKNOWN device` if none), IP, MAC (m
 randomized "private" address) and network segment, e.g.
 `net-signal: explicit domain example.com from Jonahs-iPhone: 192.168.8.153, MAC 6e:1c:.. (randomized address), home LAN`.
 Neither prefix starts with `phone` or `jada`, so the server's phone-specific logic never evaluates it.
-At most one alert per device + class + target every 30 minutes.
+Explicit-content alerts: at most one per device + target every 30 minutes (a repeat visit is the signal, so no backoff). Bypass alerts describe a persistent state, so repeats of the same device + class + target back off: 30 min, 2 h, 8 h, then daily, each marked `[repeat #N]`; the first alert and any new device or target are immediate. Simulated worst case (a device hitting a DoH address every 5 minutes for a week): about 10 emails instead of ~330.
 
 **A device merely appearing is not an alert.** A new phone, a visitor or a new gadget alerts only if it
 does something one of the rules above catches, and then the alert describes it.
