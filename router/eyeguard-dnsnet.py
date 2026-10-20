@@ -61,8 +61,27 @@ NOISE = [n.lower() for n in CONF.get("noise_domains", [])]
 APP_MAP = {k.lower(): v for k, v in CONF.get("app_map", {}).items()}
 
 IFACES = CONF.get("dnsnet_interfaces", ["br-lan", "br-guest", "br-iot", "wgserver"])
-EXCLUDED = set(CONF.get("dnsnet_excluded_ips",
-                        CONF.get("connlog_excluded_ips", ["10.1.0.5"])))
+# Never evaluated, by address AND by MAC. Jada's phone: her tunnel peer and her home
+# address (also read live from her own phone-jada.json), plus her hardware MAC so a
+# changed DHCP address cannot expose her. Config can only ADD to this set; removing
+# her needs a code change (PR + Dad), same as connlog's exclusion.
+JADA_DEFAULT_IPS = {"10.1.0.5", "192.168.8.113"}
+JADA_DEFAULT_MACS = {"84:0f:4c:65:75:6c"}
+JADA_CONF_PATH = "/etc/eyeguard/phone-jada.json"
+
+
+def _jada_conf_ips(path=JADA_CONF_PATH) -> set:
+    try:
+        c = json.load(open(path))
+        return {c[k] for k in ("home_ip", "wg_ip") if c.get(k)}
+    except Exception:
+        return set()
+
+
+EXCLUDED = (JADA_DEFAULT_IPS | _jada_conf_ips()
+            | set(CONF.get("connlog_excluded_ips", []))
+            | set(CONF.get("dnsnet_excluded_ips", [])))
+EXCLUDED_MACS = JADA_DEFAULT_MACS | {m.lower() for m in CONF.get("dnsnet_excluded_macs", [])}
 THROTTLE = int(CONF.get("dnsnet_throttle_seconds", 1800))   # per client+class+target
 STATS_PATH = Path(CONF.get("dnsnet_stats_file", "/tmp/dnsnet-stats.json"))
 STATS_LOG_SECONDS = int(CONF.get("dnsnet_stats_log_seconds", 3600))
@@ -270,6 +289,55 @@ def sender_loop():
         _post_flags(row)
 
 
+_MACX = {"ips": set(), "at": 0.0}
+
+
+def parse_leases(text: str) -> dict:
+    """Pure. dnsmasq lease file -> {ip: mac}."""
+    out = {}
+    for ln in text.splitlines():
+        f = ln.split()
+        if len(f) >= 3 and re.fullmatch(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}", f[1]):
+            out[f[2]] = f[1].lower()
+    return out
+
+
+def parse_neigh(text: str) -> dict:
+    """Pure. `ip neigh` output -> {ip: mac}."""
+    out = {}
+    for ln in text.splitlines():
+        m = re.match(r"(\d+\.\d+\.\d+\.\d+) .*lladdr ((?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})", ln)
+        if m:
+            out[m.group(1)] = m.group(2).lower()
+    return out
+
+
+def excluded_by_mac(ttl: float = 30.0) -> set:
+    """IPs that currently belong to an excluded MAC (lease file + neighbor table)."""
+    now = time.time()
+    if now - _MACX["at"] > ttl:
+        ips = set()
+        try:
+            for ip, mac in parse_leases(open(LEASES).read()).items():
+                if mac in EXCLUDED_MACS:
+                    ips.add(ip)
+        except Exception:
+            pass
+        try:
+            out = subprocess.run(["ip", "neigh"], capture_output=True, text=True, timeout=5).stdout
+            for ip, mac in parse_neigh(out).items():
+                if mac in EXCLUDED_MACS:
+                    ips.add(ip)
+        except Exception:
+            pass
+        _MACX["ips"], _MACX["at"] = ips, now
+    return _MACX["ips"]
+
+
+def is_excluded(ip: str) -> bool:
+    return ip in EXCLUDED or ip in excluded_by_mac()
+
+
 def device_label(ip: str) -> str:
     if ip in DEVICE_NAMES:
         return f"{DEVICE_NAMES[ip]} ({ip})"
@@ -362,7 +430,7 @@ def raise_event(client: str, cls: str, target: str, now: float | None = None) ->
     """-> 'alerted' | 'observed' | 'throttled' | 'excluded' | 'covered'.
     The single decision point for every signal."""
     now = now or time.time()
-    if client in EXCLUDED:
+    if is_excluded(client):
         with _LOCK:
             _STATS["excluded_skipped"] += 1
         return "excluded"
@@ -692,7 +760,7 @@ def main():
     signal.signal(signal.SIGTERM, _terminate)
     load_tor()
     print(f"[eyeguard-dnsnet] active on {IFACES}; alert classes: "
-          f"{sorted(ALERT_CLASSES)}; excluded: {sorted(EXCLUDED)}", flush=True)
+          f"{sorted(ALERT_CLASSES)}; excluded: {sorted(EXCLUDED)} + macs {sorted(EXCLUDED_MACS)}", flush=True)
     for fn in (tor_refresh_loop, invariants_loop, stats_loop, sender_loop):
         threading.Thread(target=fn, daemon=True).start()
     for iface in IFACES:

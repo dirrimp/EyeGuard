@@ -127,11 +127,32 @@ reset(); dn.on_dns("192.168.8.150", "192.168.8.1", "pornhub.com", LOCAL, now=tim
 dn.on_dns("192.168.8.150", "192.168.8.1", "pornhub.com", LOCAL, now=time.time() + dn.THROTTLE + 5)
 check("after the throttle window the same hit alerts again", len(POSTED) == 2)
 
-print("-- excluded IPs are never evaluated --")
-reset(); dn.EXCLUDED = {"10.1.0.5"}
-res = dn.on_dns("10.1.0.5", "10.1.0.1", "pornhub.com", LOCAL) + dn.on_flow("10.1.0.5", "185.220.101.7", 9001, "tcp", LOCAL, TOR)
-check("excluded peer: no flag, no observation", POSTED == [] and dn._STATS["observed"] == {} and set(res) == {"excluded"})
-dn.EXCLUDED = set()
+print("-- excluded devices are never evaluated (by IP and by MAC) --")
+check("default exclusion covers BOTH of Jada's addresses", {"10.1.0.5", "192.168.8.113"} <= dn.EXCLUDED)
+check("default exclusion covers her hardware MAC", "84:0f:4c:65:75:6c" in dn.EXCLUDED_MACS)
+for who in ("10.1.0.5", "192.168.8.113"):
+    reset(); _ = dn._MACX.update({"ips": set(), "at": time.time()})
+    res = dn.on_dns(who, "10.1.0.1", "pornhub.com", LOCAL) + dn.on_flow(who, "185.220.101.7", 9001, "tcp", LOCAL, TOR) \
+        + dn.on_dns(who, "10.1.0.1", "nordvpn.com", LOCAL) + dn.on_wg_handshake(who, "5.5.5.5", 443, LOCAL)
+    check(f"{who}: no flag, no observation, every rule skipped", POSTED == [] and dn._STATS["observed"] == {} and set(res) == {"excluded"}, str(res))
+check("lease parser", dn.parse_leases("1792 84:0F:4C:65:75:6C 192.168.8.77 Jadas-iPhone 01:84\n1 bad x y") == {"192.168.8.77": "84:0f:4c:65:75:6c"})
+check("neighbor parser", dn.parse_neigh("192.168.8.77 dev br-lan lladdr 84:0f:4c:65:75:6c REACHABLE\n192.168.8.9 FAILED") == {"192.168.8.77": "84:0f:4c:65:75:6c"})
+lf = tempfile.NamedTemporaryFile("w", suffix=".leases", delete=False)
+lf.write("1792 84:0f:4c:65:75:6c 192.168.8.77 Jadas-iPhone 01:84\n1792 84:94:37:ec:d6:83 192.168.8.150 Jonahs-Mac 01:84\n"); lf.close()
+old_leases = dn.LEASES; dn.LEASES = lf.name
+reset(); dn._MACX.update({"ips": set(), "at": 0.0})
+res = dn.on_dns("192.168.8.77", "192.168.8.1", "pornhub.com", LOCAL)
+check("her phone at an UNEXPECTED address (lease says her MAC) is still excluded", res == ["excluded"] and POSTED == [], str(res))
+reset(); res = dn.on_dns("192.168.8.150", "192.168.8.1", "pornhub.com", LOCAL)
+check("the Mac's lease does not get excluded", res == ["alerted"], str(res))
+dn.LEASES = old_leases; os.unlink(lf.name); dn._MACX.update({"ips": set(), "at": 0.0})
+jc = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+json.dump({"home_ip": "192.168.8.200", "wg_ip": "10.1.0.9"}, jc); jc.close()
+check("her own phone-jada.json addresses are picked up live", dn._jada_conf_ips(jc.name) == {"192.168.8.200", "10.1.0.9"})
+os.unlink(jc.name)
+check("a missing/garbled phone-jada.json never un-excludes the defaults", dn._jada_conf_ips("/nonexistent") == set() and {"10.1.0.5", "192.168.8.113"} <= dn.EXCLUDED)
+check("config can only add to the exclusion set (no override that drops her)",
+      "set(CONF.get(\"dnsnet_excluded_ips\", []))" in (ROOT / "router" / "eyeguard-dnsnet.py").read_text())
 
 print("-- phone-monitor overlap: de-duplicated only while that monitor is alive --")
 reset(alive={"primary": True, "jada": False})

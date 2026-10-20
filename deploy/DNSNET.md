@@ -65,9 +65,13 @@ is visible); DoH to an unlisted private server; IPv6 (disabled today, tripwire a
 
 ## Decisions for Jonah and Dad
 
-- **Jada's tunnel peer 10.1.0.5 is excluded by default**, the same exclusion connlog already uses.
-  Her phone's own monitor already reads her DNS. Including her is one config line
-  (`dnsnet_excluded_ips: []`) and needs both of you.
+- **Jada's phone is never evaluated**: not her tunnel peer (10.1.0.5), not her home address
+  (192.168.8.113 and whatever her own `phone-jada.json` says), and not whatever address her
+  hardware MAC (84:0f:4c:65:75:6c) holds in the lease file or neighbor table, so a changed DHCP
+  address cannot expose her. "Excluded" = her packets are dropped before any rule runs: no DNS
+  check, no bypass check, no alert, no record. Her own phone monitor is the only thing that reads
+  her DNS. Config can only ADD exclusions; including her is a code change (PR + Dad) and needs both
+  of you.
 - Alerts reach both partners through the existing sender.
 
 ## Install, test, tune
