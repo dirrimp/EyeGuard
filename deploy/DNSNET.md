@@ -16,7 +16,7 @@ destination IPs, never payload or screens.
 
 | Class | Signal | Default |
 |---|---|---|
-| `tor-guard` | new TCP connection to a current Tor guard relay, any port (Onionoo list, shared cache) | alert |
+| `tor-guard` | new TCP connection to a current Tor guard relay OR one of Tor Browser's published default bridges, any port | alert |
 | `tor-domain` | lookup of torproject.org (updates, bridges, snowflake) | alert |
 | `vpn-domain` | lookup of a VPN / proxy / anti-censorship provider (suffix match; proton.me mail is NOT listed, only Proton VPN endpoints) | alert |
 | `private-relay` | lookup of `mask.icloud.com` / `mask-h2.icloud.com` (iCloud Private Relay) | alert |
@@ -25,10 +25,15 @@ destination IPs, never payload or screens.
 | `vpn-port` | OpenVPN 1194, PPTP 1723, L2TP 1701, WireGuard 51820 | alert |
 | `wg-handshake` | a WireGuard handshake (148-byte, type 1) to a non-household address on ANY port | alert |
 | `ipv6-enabled` | IPv6 switched on for a client segment (the capture is IPv4-only) | alert |
+| `explicit-sni` | the same explicit-site rule applied to the **TLS server name** of a new HTTPS connection, only when that device did NOT just look the name up in DNS (cached, encrypted or bypassed DNS) | alert |
+| `vpn-ip` | a connection to a known VPN server address (public list, ~7,000 ranges, refreshed daily) | alert |
 | `dns-bypass` | plain DNS sent to a resolver other than the router/G11 | observe |
 | `doh-host` | lookup of a public DoH hostname | observe |
 | `ike-ipsec` | UDP 500/4500 (also Wi-Fi Calling) | observe |
 | `proxy-port` | SOCKS 1080, 3128, 8118, 9050/9150, 8388 | observe |
+| `tls-no-sni` | a TLS hello with no server name (common for tunnels) | observe |
+| `ech-hidden` | a site hiding its name behind a public Encrypted Client Hello name | observe |
+| `dns-tunnel` | many distinct long/random sub-names under one domain from one device in a minute, or one very long random label (iodine/dnscat style) | observe |
 
 Observe-only classes are counted in `/tmp/dnsnet-stats.json` and an hourly log line, and never email
 until promoted with `dnsnet_alert_classes` (new heuristics that could fire on innocent traffic are
@@ -36,6 +41,11 @@ measured first, the same way connlog was).
 
 Traffic whose destination is the router or the G11 is never a bypass (the household's own tunnel
 and its DoH on 8853).
+
+## What it reads, beyond DNS
+
+- **TLS server names (SNI):** one extra capture per segment of TLS ClientHellos only (handshakes, low volume, snaplen 1500 so a late-placed name is still read). A name the device also just looked up in DNS is skipped so one visit is one alert. QUIC/HTTP3 hides the name and is not covered (blocking UDP/443 at the firewall would force TCP; that is a router change for Agent IT).
+- **Public lists** (daily, via curl, last good copy kept, a tiny or garbled list is never written): VPN server ranges (`vpn_ranges.txt`) and Tor Browser's default bridges (`tor_bridges.json`). Private custom bridges cannot be listed.
 
 ## How an alert looks
 
@@ -60,7 +70,7 @@ dead, this monitor alerts instead. Every other class is never suppressed.
 
 `gen_router_manifest.py` lists the daemon and its init script. Once a manifest with them is
 published, the router watcher alerts if the monitor stops, is not enabled at boot, goes silent
-(status file older than 5 min), loses a capture (16 expected: 4 per interface), or either file
+(status file older than 5 min), loses a capture (20 expected: 5 per interface), or either file
 differs from the manifest. Same server-side-requirement rule as connlog and Jada's instance.
 
 ## Not covered (honest residuals)

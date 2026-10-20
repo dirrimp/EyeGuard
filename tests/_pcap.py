@@ -28,3 +28,32 @@ def write_pcap(path, packets):
             eth = b"\x02" * 6 + b"\x04" * 6 + b"\x08\x00"
             fr = eth + ip
             f.write(struct.pack("<IIII", 1700000000 + i, 0, len(fr), len(fr)) + fr)
+
+
+def client_hello(sni="example.com", ech=False, no_sni=False, pad_before=0, version=0x0303):
+    """A TLS ClientHello record. `pad_before` = bytes of filler extension placed BEFORE the SNI
+    (Chrome randomises extension order, so the name can sit late in a large hello)."""
+    exts = b""
+    if pad_before:
+        exts += struct.pack(">HH", 0x0015, pad_before) + b"\x00" * pad_before       # padding ext
+    if not no_sni:
+        name = sni.encode()
+        lst = b"\x00" + struct.pack(">H", len(name)) + name
+        exts += struct.pack(">HH", 0x0000, len(lst) + 2) + struct.pack(">H", len(lst)) + lst
+    if ech:
+        exts += struct.pack(">HH", 0xFE0D, 4) + b"\x00\x00\x00\x00"
+    exts += struct.pack(">HH", 0x002B, 3) + b"\x02\x03\x04"                          # supported_versions
+    body = struct.pack(">H", version) + b"\x11" * 32 + b"\x20" + b"\x22" * 32 \
+        + struct.pack(">H", 4) + b"\x13\x01\x13\x02" + b"\x01\x00" + struct.pack(">H", len(exts)) + exts
+    hs = b"\x01" + len(body).to_bytes(3, "big") + body
+    return b"\x16\x03\x01" + struct.pack(">H", len(hs)) + hs
+
+
+def tcpdump_x_lines(ip_bytes, header="12:00:03.1 IP 1.2.3.4.5 > 5.6.7.8.443: Flags [P.], seq 1, length 0"):
+    """What `tcpdump -x` prints for one packet: a header line, then indented hex lines."""
+    lines = [header]
+    for off in range(0, len(ip_bytes), 16):
+        chunk = ip_bytes[off:off + 16]
+        groups = [chunk[i:i + 2].hex() for i in range(0, len(chunk), 2)]
+        lines.append("\t0x%04x:  %s" % (off, " ".join(groups)))
+    return lines

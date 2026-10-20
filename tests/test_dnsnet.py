@@ -59,7 +59,9 @@ TOR = {"185.220.101.7"}
 
 
 def reset(alive=None, covered=None):
-    POSTED.clear(); dn._SEEN.clear()
+    POSTED.clear(); dn._SEEN.clear(); dn._RECENT_DNS.clear()
+    for k in ("sni_seen", "sni_unparsed", "sni_dns_dup"):
+        dn._STATS.pop(k, None)
     dn._STATS.update({"dns_queries": 0, "dns_classified": 0, "alerts": {}, "observed": {},
                       "suppressed_covered": 0, "excluded_skipped": 0})
     dn._COVER["map"] = covered if covered is not None else {"192.168.8.153": "primary", "10.1.0.3": "primary"}
@@ -192,6 +194,136 @@ reset(); dn._IDENT["at"] = 0.0
 check("an unknown device doing something harmless raises nothing", dn.on_dns("192.168.9.77", "192.168.8.1", "example.com", LOCAL) == [] and POSTED == [])
 check("an unknown device tripping a rule alerts and is described as UNKNOWN with its address",
       dn.on_dns("192.168.9.77", "192.168.8.1", "pornhub.com", LOCAL) == ["alerted"] and "UNKNOWN device: 192.168.9.77" in POSTED[0]["reason"] and "guest Wi-Fi" in POSTED[0]["reason"], str(POSTED))
+
+print("-- TLS server name (SNI): same explicit rule even when DNS was bypassed --")
+def hello_pkt(sni="example.com", src="192.168.8.150", dst="93.184.216.34", **kw):
+    return P.tcp(src, dst, 40000, 443, 0x18, P.client_hello(sni, **kw))
+h = dn.parse_client_hello(hello_pkt("www.pornhub.com"))
+check("ClientHello parsed: src, dst, port, name", h and h["src"] == "192.168.8.150" and h["dst"] == "93.184.216.34" and h["dport"] == 443 and h["sni"] == "www.pornhub.com" and not h["ech"] and not h["cut"], str(h))
+check("name placed LATE in a big hello (after 900 bytes of other extensions) is still found", dn.parse_client_hello(hello_pkt("late.example.org", pad_before=900))["sni"] == "late.example.org")
+check("ECH extension detected", dn.parse_client_hello(hello_pkt("a.example.com", ech=True))["ech"] is True)
+check("no server_name extension -> sni None, not cut", (lambda r: r["sni"] is None and not r["cut"])(dn.parse_client_hello(hello_pkt(no_sni=True))))
+full = hello_pkt("late.example.org", pad_before=900)
+tr = dn.parse_client_hello(full[:700])
+check("a hello cut short before its SNI is marked cut (absent != not present)", tr and tr["sni"] is None and tr["cut"], str(tr))
+check("invalid hostname bytes are rejected, not trusted", dn.parse_client_hello(hello_pkt("bad name!.com"))["sni"] is None)
+check("non-TLS / non-TCP / garbage -> None",
+      dn.parse_client_hello(P.tcp("1.1.1.1", "2.2.2.2", 1, 443, 0x18, b"GET / HTTP/1.1\r\n" + b"x" * 60)) is None
+      and dn.parse_client_hello(P.udp("1.1.1.1", "2.2.2.2", 1, 443, b"\x16" + b"x" * 80)) is None
+      and dn.parse_client_hello(b"\x45\x00") is None and dn.parse_client_hello(b"") is None)
+sh = P.client_hello("x.example.com"); sh = bytearray(sh); sh[5] = 0x02
+check("a ServerHello (handshake type 2) is not a ClientHello", dn.parse_client_hello(P.tcp("1.1.1.1", "2.2.2.2", 443, 40000, 0x18, bytes(sh))) is None)
+
+print("-- real BPF + real tcpdump -x output through the reassembler --")
+if shutil.which("tcpdump") is None:
+    print("  [SKIP] tcpdump not installed")
+else:
+    d2 = tempfile.mkdtemp()
+    pk = [hello_pkt("www.pornhub.com"),                                              # 0 hello
+          P.tcp("192.168.8.150", "93.184.216.34", 40001, 443, 0x18, b"\x17\x03\x03" + b"x" * 80),   # 1 app data
+          hello_pkt("late.example.org", pad_before=900),                              # 2 big hello
+          P.tcp("93.184.216.34", "192.168.8.150", 443, 40002, 0x18, bytes(sh)),       # 3 server->client
+          hello_pkt(no_sni=True),                                                     # 4 hello no sni
+          P.tcp("192.168.8.150", "93.184.216.34", 40003, 80, 0x18, P.client_hello("on80.example.com")),  # 5 port 80
+          hello_pkt("opts.example.net"),                                              # 6 hello
+          P.tcp("192.168.8.150", "93.184.216.34", 40004, 443, 0x18, b"\x16\x03\x03\x00\x30\x10" + b"\x00" * 60)]  # 7 client->443 handshake, type 0x10 (not a hello)
+    pcap = os.path.join(d2, "h.pcap"); P.write_pcap(pcap, pk)
+    out = subprocess.run(["tcpdump", "-r", pcap, "-nn", "-x", "-s", str(dn.SNI_SNAPLEN), dn.SNI_FILTER], capture_output=True, text=True).stdout.splitlines()
+    asm = dn.HexAssembler(); got_h = []
+    for ln in out:
+        pkt = asm.feed(ln)
+        if pkt:
+            got_h.append(dn.parse_client_hello(pkt))
+    names = [g["sni"] if g else "?" for g in got_h]
+    check("filter selects exactly the 4 ClientHellos (not app data, ServerHello, other handshake types or port 80)", names == ["www.pornhub.com", "late.example.org", None, "opts.example.net"], str(names))
+    check("the 900-byte-padded hello survives a real snaplen 1500 capture intact", got_h[1] and not got_h[1]["cut"])
+    shutil.rmtree(d2, ignore_errors=True)
+check("snaplen covers a whole ethernet packet (tcpdump -r cannot prove this: it ignores -s)", dn.SNI_SNAPLEN >= dn.SNAP_IP + 14)
+a2 = dn.HexAssembler(); lines = P.tcpdump_x_lines(hello_pkt("now.example.com")); emitted = None
+for ln in lines:
+    emitted = a2.feed(ln) or emitted
+check("a packet is emitted at its LAST line, not when the next packet arrives", emitted is not None and dn.parse_client_hello(emitted)["sni"] == "now.example.com")
+
+print("-- SNI rules --")
+reset()
+r = dn.on_sni("192.168.8.150", "93.184.216.34", "www.pornhub.com", False, False, LOCAL)
+check("explicit site name with NO prior DNS lookup alerts (DNS was cached or bypassed)", r == ["alerted"] and "explicit site name in a TLS handshake" in POSTED[0]["reason"] and POSTED[0]["reason"].startswith("net-signal:") and " from " in POSTED[0]["reason"] and "192.168.8.150" in POSTED[0]["reason"] and "pornhub.com" in POSTED[0]["reason"], str(POSTED))
+reset(); dn._RECENT_DNS.clear()
+dn.on_dns("192.168.8.150", "192.168.8.1", "www.pornhub.com", LOCAL)
+n_before = len(POSTED)
+r = dn.on_sni("192.168.8.150", "93.184.216.34", "cdn.pornhub.com", False, False, LOCAL)
+check("same site already looked up by that device -> SNI stays silent (no double email)", r == [] and len(POSTED) == n_before and dn._STATS["sni_dns_dup"] == 1, str(r))
+reset(); dn._RECENT_DNS.clear()
+check("another device is not covered by someone else's lookup", dn.on_sni("192.168.8.77", "93.184.216.34", "www.pornhub.com", False, False, LOCAL) == ["alerted"])
+reset(); dn._RECENT_DNS.clear()
+check("VPN provider by TLS name (no DNS seen) alerts", dn.on_sni("192.168.8.150", "5.5.5.5", "api.nordvpn.com", False, False, LOCAL) == ["alerted"])
+reset(); dn._RECENT_DNS.clear()
+check("innocent name raises nothing", dn.on_sni("192.168.8.150", "93.184.216.34", "example.com", False, False, LOCAL) == [] and POSTED == [])
+reset(); check("hello with no name is observed, not emailed", dn.on_sni("192.168.8.150", "5.5.5.5", None, False, False, LOCAL) == ["observed"] and POSTED == [])
+reset(); check("a cut hello with no name is counted as unparsed, never reported", dn.on_sni("192.168.8.150", "5.5.5.5", None, False, True, LOCAL) == [] and dn._STATS["sni_unparsed"] == 1)
+reset(); check("ECH public name is observed", dn.on_sni("192.168.8.150", "104.16.1.1", "cloudflare-ech.com", True, False, LOCAL) == ["observed"])
+reset(); check("traffic to the router/G11 ignored", dn.on_sni("10.1.0.2", "192.168.8.231", "www.pornhub.com", False, False, LOCAL) == [])
+reset(); dn._RECENT_DNS.clear(); dn.ALERT_CLASSES = set(dn.ALERT_DEFAULT) | {"tls-no-sni"}
+check("config promotes tls-no-sni to an alert", dn.on_sni("192.168.8.150", "5.5.5.5", None, False, False, LOCAL) == ["alerted"])
+reset()
+
+print("-- known VPN server ranges --")
+st_, en_ = dn.parse_ranges("2.26.157.0/24\n2.26.158.0/24\n10.0.0.0/8\n192.168.1.0/24\n127.0.0.0/8\njunk\n5.5.5.5\n8.8.8.0/24 # note\n8.8.8.0/25\n300.1.1.1/24\n1.2.3.4/40\n")
+tabs = {"starts": st_, "ends": en_}
+check("adjacent ranges merge; private, loopback, junk and bad masks are ignored", len(st_) == 3, str(list(zip(st_, en_))))
+check("matches first/last address of a range and a single host",
+      all(dn.vpn_match(i, tabs) for i in ("2.26.157.0", "2.26.158.255", "5.5.5.5", "8.8.8.100")))
+check("just outside a range does not match", not any(dn.vpn_match(i, tabs) for i in ("2.26.156.255", "2.26.159.0", "5.5.5.4", "5.5.5.6", "8.8.9.0")))
+check("private/garbage addresses never match", not any(dn.vpn_match(i, tabs) for i in ("10.1.2.3", "192.168.1.5", "127.0.0.1", "nonsense", "")))
+dn._VPN.update(starts=st_, ends=en_)
+reset(); r = dn.on_flow("192.168.8.150", "2.26.157.9", 443, "tcp", LOCAL, TOR)
+check("TCP connection to a known VPN server alerts as vpn-ip", r == ["alerted"] and "known VPN server contacted 2.26.157.9" in POSTED[0]["reason"])
+reset(); check("UDP to a known VPN server alerts too", dn.on_flow("192.168.8.150", "5.5.5.5", 51820, "udp", LOCAL, TOR).count("alerted") == 2)
+reset(); check("an ordinary destination is silent", dn.on_flow("192.168.8.150", "93.184.216.34", 443, "tcp", LOCAL, TOR) == [])
+reset(); check("the router/G11 are never 'VPN servers'", dn.on_flow("10.1.0.2", "192.168.8.231", 443, "tcp", LOCAL, TOR) == [])
+dn._VPN.update(starts=[], ends=[])
+orig_curl = dn._curl
+dn._curl = lambda a, timeout=15: ("", 0)
+check("a failed fetch returns nothing (last good list kept)", dn._fetch_text("https://x.invalid") is None)
+dn._curl = lambda a, timeout=15: ("body", 200)
+check("a good fetch returns the body", dn._fetch_text("https://x.invalid") == "body")
+dn._curl = orig_curl
+src_all = (ROOT / "router" / "eyeguard-dnsnet.py").read_text()
+check("a tiny/garbled list is never written over the cache", "len(parse_ranges(txt)[0]) > 1000" in src_all)
+
+print("-- Tor default bridges --")
+sample = '{"bridges": {"obfs4": ["obfs4 146.57.248.225:22 FINGERPRINT cert=abc", "obfs4 209.148.46.65:443 F"], "meek": ["meek_lite 192.0.2.20:80 url=https://x"], "private": ["x 10.0.0.5:9001", "y 198.51.100.7:80"]}}'
+br = dn.parse_bridge_ips(sample)
+check("bridge IPs parsed; documentation and private addresses ignored", br == {"146.57.248.225", "209.148.46.65"}, str(br))
+reset(); r = dn.on_flow("192.168.8.150", "146.57.248.225", 22, "tcp", LOCAL, TOR | br)
+check("a default Tor bridge contacted on ANY port alerts", r == ["alerted"] and "Tor entry relay or default bridge contacted 146.57.248.225" in POSTED[0]["reason"])
+dn._TOR["ips"], dn._TOR["bridges"] = {"1.1.1.9"}, {"2.2.2.9"}; dn._TOR["all"] = dn._TOR["ips"] | dn._TOR["bridges"]
+check("guards and bridges are one lookup set", dn.tor_all() == {"1.1.1.9", "2.2.2.9"})
+dn._TOR["ips"], dn._TOR["bridges"], dn._TOR["all"] = set(), set(), set()
+
+print("-- DNS tunnelling --")
+check("query type is parsed", dn.parse_dns_query("IP 1.2.3.4.5 > 5.6.7.8.53: 7+ TXT? a.example.com. (30)")[3] == "TXT"
+      and dn.parse_dns_query("IP 1.2.3.4.5 > 5.6.7.8.53: 7+ [1au] Type65? svcb.example.com. (45)")[3] == "TYPE65")
+import random
+rnd = random.Random(7)
+def rlabel(n): return "".join(rnd.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(n))
+td_ = dn.TunnelDetector(); res = [td_.observe("192.168.8.150", f"{rlabel(30)}.t.evil.net", "TXT", 100.0 + i) for i in range(60)]
+check("iodine-style flood (60 long random sub-names in a minute) trips exactly once", [r for r in res if r] == ["evil.net"], str([r for r in res if r]))
+td_ = dn.TunnelDetector(); res = [td_.observe("192.168.8.150", f"i{i}.cdn.example.com", "A", 100.0 + i) for i in range(80)]
+check("a CDN-style burst of short, low-entropy names does NOT trip", not any(res))
+td_ = dn.TunnelDetector(); check("one very long random label trips immediately", td_.observe("1.1.1.1", f"{rlabel(60)}.evil.net", "A", 1.0) == "evil.net")
+td_ = dn.TunnelDetector(); check("a long but low-entropy label does not", td_.observe("1.1.1.1", ("a" * 60) + ".example.com", "A", 1.0) is None)
+td_ = dn.TunnelDetector(); res = [td_.observe("1.1.1.1", f"{rlabel(12)}.x.evil.net", "TXT", 1.0 + i * 0.1) for i in range(60)]
+check("a TXT flood of mid-length names trips", "evil.net" in res)
+td_ = dn.TunnelDetector(); [td_.observe("1.1.1.1", f"{rlabel(30)}.t.evil.net", "TXT", 1.0 + i) for i in range(30)]
+check("a different device is tracked separately", all(td_.observe("2.2.2.2", f"{rlabel(30)}.t.evil.net", "TXT", 40.0 + i) is None for i in range(5)))
+td_ = dn.TunnelDetector(); [td_.observe("1.1.1.1", f"{rlabel(30)}.t.evil.net", "TXT", 1.0 + i) for i in range(30)]
+check("the window resets after a minute", td_.observe("1.1.1.1", f"{rlabel(30)}.t.evil.net", "TXT", 500.0) is None)
+reset(); dn.TUNNELS = dn.TunnelDetector(); r = dn.on_dns("192.168.8.150", "192.168.8.1", f"{rlabel(60)}.evil.net", LOCAL, qtype="A")
+check("tunnelling is OBSERVE-ONLY by default: counted, never emailed", "observed" in r and POSTED == [] and "dns-tunnel" in dn._STATS["observed"])
+reset(); dn.TUNNELS = dn.TunnelDetector(); dn.ALERT_CLASSES = set(dn.ALERT_DEFAULT) | {"dns-tunnel"}
+check("config promotes it to an alert", "alerted" in dn.on_dns("192.168.8.150", "192.168.8.1", f"{rlabel(60)}.evil.net", LOCAL, qtype="A") and "possible DNS tunnelling" in POSTED[0]["reason"])
+reset(); dn.TUNNELS = dn.TunnelDetector()
 
 print("-- phone-monitor overlap: de-duplicated only while that monitor is alive --")
 reset(alive={"primary": True, "jada": False})
