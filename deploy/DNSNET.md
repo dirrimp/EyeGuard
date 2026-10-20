@@ -40,9 +40,15 @@ and its DoH on 8853).
 ## How an alert looks
 
 An anon insert into `flags` (no SQL, no new secret), `app = "Network"`, reason `net-signal: ...`
-(explicit domain) or `net-bypass: ...`, with the device named from DHCP / the tunnel map. Neither
-prefix starts with `phone` or `jada`, so the server's phone-specific logic never evaluates it.
+(explicit domain) or `net-bypass: ...`. **Every alert names the device that caused it**: name (static
+DHCP name, tunnel name, or lease hostname; `UNKNOWN device` if none), IP, MAC (marked when it is a
+randomized "private" address) and network segment, e.g.
+`net-signal: explicit domain example.com from Jonahs-iPhone: 192.168.8.153, MAC 6e:1c:.. (randomized address), home LAN`.
+Neither prefix starts with `phone` or `jada`, so the server's phone-specific logic never evaluates it.
 At most one alert per device + class + target every 30 minutes.
+
+**A device merely appearing is not an alert.** A new phone, a visitor or a new gadget alerts only if it
+does something one of the rules above catches, and then the alert describes it.
 
 ## Overlap with the phone monitors
 
@@ -63,16 +69,11 @@ obfs4 / meek / snowflake bridges and AmneziaWG-style obfuscated tunnels (built t
 signatures); a VPN inside the household's own tunnel from outside the home (only the outer tunnel
 is visible); DoH to an unlisted private server; IPv6 (disabled today, tripwire above).
 
-## Decisions for Jonah and Dad
+## Scope
 
-- **Jada's phone is never evaluated**: not her tunnel peer (10.1.0.5), not her home address
-  (192.168.8.113 and whatever her own `phone-jada.json` says), and not whatever address her
-  hardware MAC (84:0f:4c:65:75:6c) holds in the lease file or neighbor table, so a changed DHCP
-  address cannot expose her. "Excluded" = her packets are dropped before any rule runs: no DNS
-  check, no bypass check, no alert, no record. Her own phone monitor is the only thing that reads
-  her DNS. Config can only ADD exclusions; including her is a code change (PR + Dad) and needs both
-  of you.
-- Alerts reach both partners through the existing sender.
+**Every device on every segment is evaluated, Jada's phone included** (Jonah's decision 2026-10-20;
+Jada knows). Nobody is excluded by default. Exclusion exists only as an explicit config choice
+(`dnsnet_excluded_ips` / `dnsnet_excluded_macs`). Alerts reach both partners through the existing sender.
 
 ## Install, test, tune
 

@@ -127,32 +127,71 @@ reset(); dn.on_dns("192.168.8.150", "192.168.8.1", "pornhub.com", LOCAL, now=tim
 dn.on_dns("192.168.8.150", "192.168.8.1", "pornhub.com", LOCAL, now=time.time() + dn.THROTTLE + 5)
 check("after the throttle window the same hit alerts again", len(POSTED) == 2)
 
-print("-- excluded devices are never evaluated (by IP and by MAC) --")
-check("default exclusion covers BOTH of Jada's addresses", {"10.1.0.5", "192.168.8.113"} <= dn.EXCLUDED)
-check("default exclusion covers her hardware MAC", "84:0f:4c:65:75:6c" in dn.EXCLUDED_MACS)
-for who in ("10.1.0.5", "192.168.8.113"):
-    reset(); _ = dn._MACX.update({"ips": set(), "at": time.time()})
-    res = dn.on_dns(who, "10.1.0.1", "pornhub.com", LOCAL) + dn.on_flow(who, "185.220.101.7", 9001, "tcp", LOCAL, TOR) \
-        + dn.on_dns(who, "10.1.0.1", "nordvpn.com", LOCAL) + dn.on_wg_handshake(who, "5.5.5.5", 443, LOCAL)
-    check(f"{who}: no flag, no observation, every rule skipped", POSTED == [] and dn._STATS["observed"] == {} and set(res) == {"excluded"}, str(res))
+print("-- every device is evaluated, Jada's included; exclusion is opt-in only --")
+check("default: nobody is excluded (by IP or MAC)", dn.EXCLUDED == set() and dn.EXCLUDED_MACS == set())
+for who in ("10.1.0.5", "192.168.8.113", "192.168.9.77", "192.168.10.5", "192.168.8.244"):
+    reset(); dn._MACX.update({"ips": set(), "at": time.time()})
+    r = dn.on_dns(who, "10.1.0.1", "pornhub.com", LOCAL)
+    check(f"{who}: explicit domain alerts", r == ["alerted"] and len(POSTED) == 1, str(r))
+reset(); r = dn.on_flow("192.168.9.77", "185.220.101.7", 9001, "tcp", LOCAL, TOR)
+check("a guest-network device using Tor alerts", r == ["alerted"] and "guest Wi-Fi" in POSTED[0]["reason"], str(POSTED))
+reset(); dn.EXCLUDED = {"10.9.9.9"}
+check("opt-in exclusion by IP still works", dn.on_dns("10.9.9.9", "10.1.0.1", "pornhub.com", LOCAL) == ["excluded"] and POSTED == [])
+dn.EXCLUDED = set()
+lf = tempfile.NamedTemporaryFile("w", suffix=".leases", delete=False)
+lf.write("1792 aa:bb:cc:00:00:01 192.168.8.77 Someones-Phone 01:aa\n"); lf.close()
+old_leases, old_macs = dn.LEASES, dn.EXCLUDED_MACS
+dn.LEASES = lf.name; dn.EXCLUDED_MACS = {"aa:bb:cc:00:00:01"}; dn._MACX.update({"ips": set(), "at": 0.0}); reset()
+check("opt-in exclusion by MAC follows the device to whatever address it holds", dn.on_dns("192.168.8.77", "192.168.8.1", "pornhub.com", LOCAL) == ["excluded"])
+dn.LEASES, dn.EXCLUDED_MACS = old_leases, old_macs; os.unlink(lf.name); dn._MACX.update({"ips": set(), "at": 0.0})
 check("lease parser", dn.parse_leases("1792 84:0F:4C:65:75:6C 192.168.8.77 Jadas-iPhone 01:84\n1 bad x y") == {"192.168.8.77": "84:0f:4c:65:75:6c"})
 check("neighbor parser", dn.parse_neigh("192.168.8.77 dev br-lan lladdr 84:0f:4c:65:75:6c REACHABLE\n192.168.8.9 FAILED") == {"192.168.8.77": "84:0f:4c:65:75:6c"})
-lf = tempfile.NamedTemporaryFile("w", suffix=".leases", delete=False)
-lf.write("1792 84:0f:4c:65:75:6c 192.168.8.77 Jadas-iPhone 01:84\n1792 84:94:37:ec:d6:83 192.168.8.150 Jonahs-Mac 01:84\n"); lf.close()
-old_leases = dn.LEASES; dn.LEASES = lf.name
-reset(); dn._MACX.update({"ips": set(), "at": 0.0})
-res = dn.on_dns("192.168.8.77", "192.168.8.1", "pornhub.com", LOCAL)
-check("her phone at an UNEXPECTED address (lease says her MAC) is still excluded", res == ["excluded"] and POSTED == [], str(res))
-reset(); res = dn.on_dns("192.168.8.150", "192.168.8.1", "pornhub.com", LOCAL)
-check("the Mac's lease does not get excluded", res == ["alerted"], str(res))
-dn.LEASES = old_leases; os.unlink(lf.name); dn._MACX.update({"ips": set(), "at": 0.0})
-jc = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
-json.dump({"home_ip": "192.168.8.200", "wg_ip": "10.1.0.9"}, jc); jc.close()
-check("her own phone-jada.json addresses are picked up live", dn._jada_conf_ips(jc.name) == {"192.168.8.200", "10.1.0.9"})
-os.unlink(jc.name)
-check("a missing/garbled phone-jada.json never un-excludes the defaults", dn._jada_conf_ips("/nonexistent") == set() and {"10.1.0.5", "192.168.8.113"} <= dn.EXCLUDED)
-check("config can only add to the exclusion set (no override that drops her)",
-      "set(CONF.get(\"dnsnet_excluded_ips\", []))" in (ROOT / "router" / "eyeguard-dnsnet.py").read_text())
+
+print("-- every alert names the device that caused it --")
+dhcp_txt = """config dnsmasq
+\toption domain 'lan'
+config host
+\toption mac '6E:1C:30:D6:53:C7'
+\toption ip '192.168.8.153'
+\toption tag 'Jonahs-iPhone'
+config host
+\toption name 'Jadas-iPhone'
+\toption mac '84:0f:4c:65:75:6c'
+\toption ip '192.168.8.113'
+"""
+bm, bi = dn.parse_dhcp_hosts(dhcp_txt)
+check("static DHCP hosts parsed (tag or name, by mac and by ip)", bm["6e:1c:30:d6:53:c7"] == "Jonahs-iPhone" and bi["192.168.8.113"] == "Jadas-iPhone" and len(bm) == 2)
+check("randomized-MAC detection", dn.is_private_mac("6e:1c:30:d6:53:c7") and not dn.is_private_mac("84:0f:4c:65:75:6c") and not dn.is_private_mac("2c:7c:f2:d8:7a:0d"))
+check("segments", dn.segment_of("192.168.9.5") == "guest Wi-Fi" and dn.segment_of("192.168.10.9") == "IoT network"
+      and dn.segment_of("10.1.0.3") == "VPN tunnel" and dn.segment_of("192.168.8.1") == "home LAN")
+td = tempfile.mkdtemp()
+lf2 = Path(td) / "leases"; lf2.write_text("1792 6e:1c:30:d6:53:c7 192.168.8.153 iPhone 01:6e\n1792 de:ad:be:ef:00:01 192.168.9.50 * 01:de\n")
+hf = Path(td) / "dhcp"; hf.write_text(dhcp_txt)
+save = (dn.LEASES, dn.DHCP_CONFIG)
+dn.LEASES, dn.DHCP_CONFIG = str(lf2), str(hf)
+dn._IDENT["at"] = 0.0
+i = dn.identify("192.168.8.153")
+check("identify: static name beats the lease hostname, MAC and segment included",
+      i["name"] == "Jonahs-iPhone" and i["mac"] == "6e:1c:30:d6:53:c7" and i["private"] and i["segment"] == "home LAN", str(i))
+check("tunnel devices are named from the tunnel map", dn.identify("10.1.0.5")["name"] == "Jadas-Phone")
+check("an unnamed guest is labelled UNKNOWN with its MAC",
+      "UNKNOWN device: 192.168.9.50, MAC de:ad:be:ef:00:01 (randomized address), guest Wi-Fi" == dn.device_label("192.168.9.50"), dn.device_label("192.168.9.50"))
+reset(); dn.on_dns("192.168.8.153", "192.168.8.1", "pornhub.com", LOCAL)
+check("explicit-domain alert says which device: name, IP, MAC, segment",
+      "Jonahs-iPhone: 192.168.8.153, MAC 6e:1c:30:d6:53:c7 (randomized address), home LAN" in POSTED[0]["reason"]
+      and "Jonahs-iPhone" in POSTED[0]["window_title"], str(POSTED))
+reset(); dn.on_flow("192.168.9.50", "185.220.101.7", 9001, "tcp", LOCAL, TOR)
+check("bypass alert from an unknown guest identifies it as UNKNOWN with its MAC", "UNKNOWN device" in POSTED[0]["reason"] and "de:ad:be:ef:00:01" in POSTED[0]["reason"], str(POSTED))
+
+print("-- a device appearing is NOT an alert by itself --")
+src = (ROOT / "router" / "eyeguard-dnsnet.py").read_text()
+check("no new-device alert, scan or state file exists", "new-device" not in src and "devices_loop" not in src and "dnsnet_devices" not in src)
+dn.LEASES, dn.DHCP_CONFIG = save
+shutil.rmtree(td, ignore_errors=True)
+reset(); dn._IDENT["at"] = 0.0
+check("an unknown device doing something harmless raises nothing", dn.on_dns("192.168.9.77", "192.168.8.1", "example.com", LOCAL) == [] and POSTED == [])
+check("an unknown device tripping a rule alerts and is described as UNKNOWN with its address",
+      dn.on_dns("192.168.9.77", "192.168.8.1", "pornhub.com", LOCAL) == ["alerted"] and "UNKNOWN device: 192.168.9.77" in POSTED[0]["reason"] and "guest Wi-Fi" in POSTED[0]["reason"], str(POSTED))
 
 print("-- phone-monitor overlap: de-duplicated only while that monitor is alive --")
 reset(alive={"primary": True, "jada": False})

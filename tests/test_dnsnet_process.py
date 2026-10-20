@@ -74,10 +74,11 @@ time.sleep(600)
 ''')
 fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
 (d / "tor.json").write_text(json.dumps({"ips": ["185.220.101.7"]}))
+(d / "leases").write_text("1792 84:94:37:ec:d6:83 192.168.8.150 Jonahs-Mac 01:84\n")
 conf = {"api_key": "ANONKEY", "supabase_url": f"http://127.0.0.1:{srv.server_port}",
         "explicit_terms": ["porn", "pornhub"], "noise_domains": ["googleapis.com"],
         "app_map": {}, "dnsnet_interfaces": ["fake0", "fake1"], "dnsnet_local_ips": ["192.168.8.1", "10.1.0.1"], "dnsnet_stats_seconds": 1,
-        "dnsnet_stats_file": str(d / "stats.json"), "tor_relay_cache_file": str(d / "tor.json"),
+        "dnsnet_stats_file": str(d / "stats.json"), "dnsnet_leases_file": str(d / "leases"), "dnsnet_dhcp_config": str(d / "nodhcp"), "tor_relay_cache_file": str(d / "tor.json"),
         "dnsnet_stats_log_seconds": 3600}
 (d / "phone.json").write_text(json.dumps(conf))
 env = dict(os.environ, EG_PHONE_CONF=str(d / "phone.json"), PATH=f"{d / 'bin'}:{os.environ['PATH']}",
@@ -85,7 +86,7 @@ env = dict(os.environ, EG_PHONE_CONF=str(d / "phone.json"), PATH=f"{d / 'bin'}:{
 proc = subprocess.Popen([sys.executable, str(ROOT / "router" / "eyeguard-dnsnet.py")], env=env,
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 deadline = time.time() + 25
-while time.time() < deadline and len(got) < 5:
+while time.time() < deadline and len(got) < 7:
     time.sleep(0.5)
 time.sleep(2)
 
@@ -94,19 +95,22 @@ reasons = [r["reason"] for r in rows]
 print("  alerts received:", len(rows))
 check("flags arrive at the flags endpoint with the anon key",
       got and all(p == "/rest/v1/flags" and k == "ANONKEY" for p, k, _ in got))
-check("explicit domain from a LAN device -> red", any(r.startswith("net-signal: explicit domain pornhub.com from 192.168.8.150") for r in reasons), str(reasons))
-check("VPN provider lookup -> red", any("VPN/proxy provider lookup nordvpn.com from 192.168.8.160" in r for r in reasons))
-check("Tor guard contact -> red", any("Tor entry relay contacted 185.220.101.7 from 192.168.8.150" in r for r in reasons))
-check("DoT attempt -> red", any("DNS-over-TLS/QUIC attempt (port 853) 1.2.3.4:853 from 192.168.8.150" in r for r in reasons))
+check("explicit domain from a LAN device -> red", any(r.startswith("net-signal: explicit domain pornhub.com from Jonahs-Mac: 192.168.8.150, MAC 84:94:37:ec:d6:83, home LAN") for r in reasons), str(reasons))
+check("VPN provider lookup -> red", any("VPN/proxy provider lookup nordvpn.com from UNKNOWN device: 192.168.8.160, home LAN" in r for r in reasons))
+check("Tor guard contact -> red", any("Tor entry relay contacted 185.220.101.7 from Jonahs-Mac: 192.168.8.150" in r for r in reasons))
+check("DoT attempt -> red", any("DNS-over-TLS/QUIC attempt (port 853) 1.2.3.4:853 from Jonahs-Mac: 192.168.8.150" in r for r in reasons))
 check("WireGuard handshake on 443 -> red", any("WireGuard tunnel handshake to the internet 5.5.5.5:443" in r for r in reasons))
 check("every row is flagged / Network / Likely", all(r["verdict"] == "flagged" and r["app"] == "Network" and r["grade"] == "Likely" for r in rows))
-check("no row text mentions the excluded peer 10.1.0.5", not any("10.1.0.5" in r for r in reasons))
+check("Jada's tunnel address is evaluated like everyone else's",
+      any("explicit domain pornhub.com from Jadas-Phone: 10.1.0.5" in r for r in reasons) and any("Tor entry relay contacted 185.220.101.7 from Jadas-Phone" in r for r in reasons), str(reasons))
+check("a device that merely joins (in the lease file) raises nothing", not any("net-device" in r for r in reasons))
+check("every alert names its device (a name or UNKNOWN, plus the IP and network)", all((" from " in r) and ("home LAN" in r or "VPN tunnel" in r) and ("Jonahs-Mac" in r or "Jadas-Phone" in r or "UNKNOWN device" in r) for r in reasons), str(reasons))
 check("innocent, noise and EDNS-innocent queries raise nothing",
       not any("example.com" in r or "googleapis" in r for r in reasons))
 check("the outside-resolver query is observed, not alerted", not any("example.org" in r or "8.8.4.4" in r for r in reasons))
 check("duplicate across the two interfaces is throttled to one alert per signal",
-      len([r for r in reasons if "explicit domain pornhub.com" in r]) == 1)
-check("exactly five alerts (no extras)", len(rows) == 5, str(reasons))
+      len([r for r in reasons if "explicit domain pornhub.com from Jonahs-Mac" in r]) == 1)
+check("exactly seven alerts (no extras)", len(rows) == 7, f"{len(rows)}: {reasons}")
 
 stats = None
 for _ in range(20):
@@ -119,7 +123,6 @@ for _ in range(20):
 check("status file reports every capture (4 per interface x 2)", stats and stats.get("captures") == 8 and stats.get("expected_captures") == 8, str(stats and (stats.get("captures"), stats.get("expected_captures"))))
 check("status counts ONLY the outside resolver (router addresses are never a bypass), once per interface",
       stats and stats["observed"].get("dns-bypass") == {"8.8.4.4": 2}, str(stats and stats.get("observed")))
-check("status counts the excluded peer without logging what it did", stats and stats["excluded_skipped"] >= 2)
 
 kids = subprocess.run(["pgrep", "-f", str(fake)], capture_output=True, text=True).stdout.split()
 check("8 fake tcpdump children are running", len(kids) == 8, str(len(kids)))

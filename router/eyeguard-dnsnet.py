@@ -61,36 +61,24 @@ NOISE = [n.lower() for n in CONF.get("noise_domains", [])]
 APP_MAP = {k.lower(): v for k, v in CONF.get("app_map", {}).items()}
 
 IFACES = CONF.get("dnsnet_interfaces", ["br-lan", "br-guest", "br-iot", "wgserver"])
-# Never evaluated, by address AND by MAC. Jada's phone: her tunnel peer and her home
-# address (also read live from her own phone-jada.json), plus her hardware MAC so a
-# changed DHCP address cannot expose her. Config can only ADD to this set; removing
-# her needs a code change (PR + Dad), same as connlog's exclusion.
-JADA_DEFAULT_IPS = {"10.1.0.5", "192.168.8.113"}
-JADA_DEFAULT_MACS = {"84:0f:4c:65:75:6c"}
-JADA_CONF_PATH = "/etc/eyeguard/phone-jada.json"
-
-
-def _jada_conf_ips(path=JADA_CONF_PATH) -> set:
-    try:
-        c = json.load(open(path))
-        return {c[k] for k in ("home_ip", "wg_ip") if c.get(k)}
-    except Exception:
-        return set()
-
-
-EXCLUDED = (JADA_DEFAULT_IPS | _jada_conf_ips()
-            | set(CONF.get("connlog_excluded_ips", []))
-            | set(CONF.get("dnsnet_excluded_ips", [])))
-EXCLUDED_MACS = JADA_DEFAULT_MACS | {m.lower() for m in CONF.get("dnsnet_excluded_macs", [])}
+# EVERY device on the network is evaluated, Jada's included (Jonah's decision
+# 2026-10-20, Jada knows). Exclusion exists only as an explicit, deliberate config choice;
+# the default is nobody. The connection logger's own exclusion list is NOT inherited.
+EXCLUDED = set(CONF.get("dnsnet_excluded_ips", []))
+EXCLUDED_MACS = {m.lower() for m in CONF.get("dnsnet_excluded_macs", [])}
 THROTTLE = int(CONF.get("dnsnet_throttle_seconds", 1800))   # per client+class+target
 STATS_PATH = Path(CONF.get("dnsnet_stats_file", "/tmp/dnsnet-stats.json"))
 STATS_LOG_SECONDS = int(CONF.get("dnsnet_stats_log_seconds", 3600))
 STATS_SECONDS = int(CONF.get("dnsnet_stats_seconds", 60))
 TOR_CACHE = Path(CONF.get("tor_relay_cache_file", "/etc/eyeguard/tor_relays.json"))
 TOR_REFRESH = int(CONF.get("tor_refresh_seconds", 21600))
-LEASES = "/tmp/dhcp.leases"
+LEASES = CONF.get("dnsnet_leases_file", "/tmp/dhcp.leases")
+DHCP_CONFIG = CONF.get("dnsnet_dhcp_config", "/etc/config/dhcp")
 DEVICE_NAMES = {"10.1.0.2": "Jonahs-Mac", "10.1.0.3": "JJPWS-Phone",
-                "10.1.0.4": "Jonahs-Mac-Remote"}
+                "10.1.0.4": "Jonahs-Mac-Remote", "10.1.0.5": "Jadas-Phone"}
+SEGMENTS = {"192.168.8.": "home LAN", "192.168.9.": "guest Wi-Fi", "192.168.10.": "IoT network",
+            "10.1.0.": "VPN tunnel"}
+SEGMENTS.update(CONF.get("dnsnet_segments", {}))
 DEVICE_NAMES.update(CONF.get("dnsnet_device_names", {}))
 # Addresses that are NOT bypass destinations: the router itself and the G11.
 TRUSTED_DESTS = set(CONF.get("dnsnet_trusted_dests", ["192.168.8.231"]))
@@ -338,17 +326,102 @@ def is_excluded(ip: str) -> bool:
     return ip in EXCLUDED or ip in excluded_by_mac()
 
 
-def device_label(ip: str) -> str:
-    if ip in DEVICE_NAMES:
-        return f"{DEVICE_NAMES[ip]} ({ip})"
+def parse_dhcp_hosts(text: str) -> tuple:
+    """Pure. /etc/config/dhcp -> ({mac: name}, {ip: name}) for static `config host` entries."""
+    by_mac, by_ip = {}, {}
+    cur = None
+    for ln in text.splitlines():
+        t = ln.strip()
+        if t.startswith("config "):
+            if cur is not None:
+                _store_host(cur, by_mac, by_ip)
+            cur = {} if t.split()[1] == "host" else None
+        elif cur is not None:
+            m = re.match(r"option\s+(\w+)\s+['\"]?([^'\"]*)['\"]?\s*$", t)
+            if m:
+                cur[m.group(1)] = m.group(2)
+    if cur is not None:
+        _store_host(cur, by_mac, by_ip)
+    return by_mac, by_ip
+
+
+def _store_host(h, by_mac, by_ip):
+    name = h.get("name") or h.get("tag")
+    if not name:
+        return
+    for mac in h.get("mac", "").lower().split():
+        by_mac[mac] = name
+    if h.get("ip"):
+        by_ip[h["ip"]] = name
+
+
+def is_private_mac(mac: str) -> bool:
+    """Locally administered bit set = a randomized (iOS 'Private Wi-Fi Address') MAC."""
     try:
-        for ln in open(LEASES):
+        return bool(int(mac.split(":")[0], 16) & 0x02)
+    except (ValueError, IndexError):
+        return False
+
+
+def segment_of(ip: str) -> str:
+    for prefix, name in SEGMENTS.items():
+        if ip.startswith(prefix):
+            return name
+    return "network"
+
+
+_IDENT = {"at": 0.0, "mac_of": {}, "host_of": {}, "static_mac": {}, "static_ip": {}}
+
+
+def _refresh_identity(ttl=30.0, now=None):
+    now = time.time() if now is None else now
+    if now - _IDENT["at"] <= ttl:
+        return
+    mac_of, host_of = {}, {}
+    try:
+        for ln in open(LEASES).read().splitlines():
             f = ln.split()
-            if len(f) >= 4 and f[2] == ip and f[3] not in ("*", ""):
-                return f"{f[3]} ({ip})"
+            if len(f) >= 4:
+                mac_of[f[2]] = f[1].lower()
+                if f[3] not in ("*", ""):
+                    host_of[f[2]] = f[3]
     except Exception:
         pass
-    return ip
+    try:
+        out = subprocess.run(["ip", "neigh"], capture_output=True, text=True, timeout=5).stdout
+        for ip, mac in parse_neigh(out).items():
+            mac_of.setdefault(ip, mac)
+    except Exception:
+        pass
+    smac, sip = {}, {}
+    try:
+        smac, sip = parse_dhcp_hosts(open(DHCP_CONFIG).read())
+    except Exception:
+        pass
+    _IDENT.update(at=now, mac_of=mac_of, host_of=host_of, static_mac=smac, static_ip=sip)
+
+
+def identify(ip: str) -> dict:
+    """Everything the router can say about the device behind an address."""
+    _refresh_identity()
+    mac = _IDENT["mac_of"].get(ip)
+    name = (DEVICE_NAMES.get(ip) or (mac and _IDENT["static_mac"].get(mac))
+            or _IDENT["static_ip"].get(ip) or _IDENT["host_of"].get(ip))
+    return {"ip": ip, "mac": mac, "name": name, "segment": segment_of(ip),
+            "private": bool(mac and is_private_mac(mac))}
+
+
+def format_device(d: dict) -> str:
+    """'Jonahs-iPhone: 192.168.8.153, MAC 6e:.. (randomized address), home LAN'."""
+    bits = [d["ip"]]
+    if d.get("mac"):
+        bits.append(f"MAC {d['mac']}" + (" (randomized address)" if d.get("private") else ""))
+    bits.append(d["segment"])
+    return f"{d.get('name') or 'UNKNOWN device'}: " + ", ".join(bits)
+
+
+def device_label(ip: str) -> str:
+    return format_device(identify(ip))
 
 
 # ---- overlap with the per-phone monitors -----------------------------------
@@ -461,7 +534,7 @@ def raise_event(client: str, cls: str, target: str, now: float | None = None) ->
         "flagged_at": now_iso(), "verdict": "flagged",
         "reason": f"{prefix}: {_TITLES.get(cls, cls)} {target} from {who}",
         "app": "Network", "url": None,
-        "window_title": f"{_TITLES.get(cls, cls)}: {target}",
+        "window_title": f"{_TITLES.get(cls, cls)}: {target} -- {identify(client).get('name') or client}",
         "grade": "Likely", "risk": "high", "is_nudity": False})
     return "alerted"
 
