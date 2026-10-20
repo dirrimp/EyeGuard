@@ -70,6 +70,18 @@ python3 -c "import ast;ast.parse(open('/tmp/eg-dnsnet/eyeguard-dnsnet.py').read(
 python3 -c "
 import json;c=json.load(open('/etc/eyeguard/phone.json'))
 assert c.get('explicit_terms') and c.get('api_key') and c.get('supabase_url'); print('  ok  phone.json has terms, noise (%d), app map, key' % len(c.get('noise_domains',[])))"
+python3 - <<'PY'
+import socket, subprocess, re, json
+c = json.load(open("/etc/eyeguard/phone.json"))
+mine = set(re.findall(r"inet (\d+\.\d+\.\d+\.\d+)/", subprocess.run(["ip", "-4", "addr", "show"], capture_output=True, text=True).stdout))
+for name in c.get("dnsnet_trusted_hostnames", ["vpn.orthanc.me"]):
+    try:
+        ips = socket.gethostbyname_ex(name.encode("ascii"))[2]     # bytes: python3-light has no idna codec
+        print("  %s  tunnel hostname %s -> %s (%s)" % ("ok " if set(ips) & mine else "WARN", name, ips,
+              "is a router address" if set(ips) & mine else "NOT a router address right now: check the DDNS record"))
+    except Exception as e:
+        print("  WARN tunnel hostname %s does not resolve here: %s" % (name, type(e).__name__))
+PY
 echo "  memory free: $(awk '/MemAvailable/{print int($2/1024)" MB"}' /proc/meminfo)"
 REMOTE
 
