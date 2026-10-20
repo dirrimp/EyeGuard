@@ -416,6 +416,58 @@ for k in range(48):                              # the core rule never backs off
     n += dn.on_dns("192.168.8.150", "192.168.8.1", "pornhub.com", LOCAL, now=k * 1900.0) == ["alerted"]
 check("explicit-domain repeats keep the flat 30-minute throttle (48 visits spaced 31 min = 48 alerts)", n == 48, str(n))
 
+print("-- always-on tunnels must never alert --")
+WAN = "73.43.190.194"
+LOCAL_T = LOCAL | {WAN}
+reset()
+ev = []
+for who in ("10.1.0.2", "10.1.0.3", "10.1.0.4", "10.1.0.5"):                       # every tunnel peer
+    for i in range(50):
+        ev += dn.on_dns(who, "10.1.0.1", f"www.site{i}.example.com", LOCAL_T, now=1000.0 + i)       # DNS to the router's tunnel address
+        ev += dn.on_flow(who, "93.184.216.34", 443, "tcp", LOCAL_T, TOR, now=1000.0 + i)             # ordinary HTTPS out
+        ev += dn.on_flow(who, "192.168.8.231", 443, "tcp", LOCAL_T, TOR, now=1000.0 + i)             # the G11
+        ev += dn.on_flow(who, "10.1.0.1", 8853, "tcp", LOCAL_T, TOR, now=1000.0 + i)                 # DoH to the router's own 8853
+for who in ("192.168.8.153", "192.168.8.150", "192.168.8.113"):                     # a device AT HOME with its tunnel connected
+    for port in (51820, 500, 4500, 1194, 1701, 853, 1723, 1080, 3128, 9050, 9150, 8388, 8118):
+        for proto in ("udp", "tcp"):
+            ev += dn.on_flow(who, WAN, port, proto, LOCAL_T, TOR, now=2000.0 + port)               # its tunnel to the router's public address, any port
+    ev += dn.on_wg_handshake(who, WAN, 51820, LOCAL_T, now=2000.0)
+check("every tunnel peer + every at-home tunnel connection: ZERO alerts and ZERO observations", [e for e in ev if e not in ("",)] == [] and POSTED == [] and dn._STATS["observed"] == {}, f"{set(ev)} {POSTED[:1]}")
+check("tunnel DNS to the router is not an 'outside resolver'", dn.on_dns("10.1.0.3", "10.1.0.1", "example.com", LOCAL_T) == [] and dn.on_dns("10.1.0.3", "192.168.8.1", "example.com", LOCAL_T) == [])
+
+print("-- the ISP changes the router's public address --")
+old_fn = dn.router_local_ips
+dn._LOCAL.update(ips=set(), at=0.0); dn._REMEMBERED.clear()
+dn.router_local_ips = lambda: {"127.0.0.1", "192.168.8.1", "10.1.0.1", "73.43.190.194"}
+t0 = 5_000_000.0; dn.local_ips(now=t0)
+dn.router_local_ips = lambda: {"127.0.0.1", "192.168.8.1", "10.1.0.1", "98.7.6.5"}      # new WAN address
+cur = dn.local_ips(ttl=0, now=t0 + 600)
+check("right after the change both the new and the OLD address are exempt", {"98.7.6.5", "73.43.190.194"} <= cur)
+reset(); check("a phone still dialing the OLD address (stale DNS) does not alert", dn.on_flow("192.168.8.153", "73.43.190.194", 51820, "udp", cur, TOR, now=t0 + 700) == [])
+check("a day later (DNS long since updated) the old address is no longer exempt", "73.43.190.194" not in dn.local_ips(ttl=0, now=t0 + 600 + 86400 + 120))
+dn._REMEMBERED.clear(); dn._REMEMBERED["73.43.190.194"] = t0; dn._LOCAL.update(ips={"98.7.6.5"}, at=t0 + 10)
+check("the age filter alone (no refresh in between) also expires the old address after a day", "73.43.190.194" not in dn.local_ips(ttl=10**9, now=t0 + 86400 + 60) and "73.43.190.194" in dn.local_ips(ttl=10**9, now=t0 + 3600))
+reset(); check("...and a connection to it then alerts as the VPN port it is", dn.on_flow("192.168.8.153", "73.43.190.194", 51820, "udp", dn.local_ips(ttl=0, now=t0 + 90000), TOR, now=t0 + 90000) == ["alerted"])
+dn.router_local_ips = old_fn; dn._LOCAL.update(ips=set(), at=0.0); dn._REMEMBERED.clear()
+dn._REMEMBERED.clear(); dn.TRUSTED_HOSTNAMES[:] = ["home.example.net"]
+dn.remember_addresses(["203.0.113.77"], now=t0)
+dn._LOCAL.update(ips={"127.0.0.1"}, at=t0)
+check("a configured tunnel hostname's resolved address is exempt (and kept for a day)", "203.0.113.77" in dn.local_ips(now=t0 + 3600) and "203.0.113.77" not in dn.local_ips(now=t0 + 90000))
+dn.TRUSTED_HOSTNAMES[:] = []; dn._REMEMBERED.clear(); dn._LOCAL.update(ips=set(), at=0.0)
+class _R:
+    def __call__(self, name): return (name, [], ["203.0.113.5"])
+dn.TRUSTED_HOSTNAMES[:] = ["home.example.net"]
+import threading as _th
+_t = _th.Thread(target=dn.trusted_names_loop, args=(_R(),), daemon=True); _t.start(); time.sleep(0.5)
+check("trusted_names_loop resolves configured names into the exempt set", "203.0.113.5" in dn._REMEMBERED)
+dn.TRUSTED_HOSTNAMES[:] = []; dn._REMEMBERED.clear()
+check("trusted_names_loop is a no-op with no names configured", dn.trusted_names_loop is not None and not dn.TRUSTED_HOSTNAMES)
+
+print("-- only household devices are evaluated --")
+check("household ranges", all(dn.is_household_ip(i) for i in ("192.168.8.153", "192.168.9.60", "192.168.10.20", "10.1.0.3", "172.16.5.5", "100.64.1.1")))
+check("internet addresses are never 'devices' (e.g. the carrier's Wi-Fi Calling reply)", not any(dn.is_household_ip(i) for i in ("208.54.4.195", "8.8.8.8", "73.43.190.194", "172.32.0.1", "1.2.3", "", "nonsense")))
+reset()
+
 print("-- observe-only classes count but never email --")
 reset()
 check("DNS to an outside resolver is observed, not emailed", dn.on_dns("192.168.8.150", "8.8.4.4", "example.com", LOCAL) == ["observed"] and POSTED == [])

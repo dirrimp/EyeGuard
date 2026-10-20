@@ -59,6 +59,18 @@ Explicit-content alerts: at most one per device + target every 30 minutes (a rep
 **A device merely appearing is not an alert.** A new phone, a visitor or a new gadget alerts only if it
 does something one of the rules above catches, and then the alert describes it.
 
+## Your always-on tunnels
+
+Devices away from home reach the router over AmneziaWG. The monitor reads the tunnel's **decrypted**
+side (`wgserver`), never the encrypted packets, and it exempts everything addressed to the router or
+the G11 at any port, so a tunnel (away or at home, where the phone dials the router's own public
+address) cannot trip a rule. Because the ISP can change that public address and a phone with stale DNS
+keeps dialing the old one, every address the router held in the last 24 h stays exempt; tunnel
+hostnames can also be listed in `dnsnet_trusted_hostnames`. Only packets that come FROM a household
+address are evaluated, so inbound internet packets are never mistaken for a device. The monitor is
+passive (tcpdump); it cannot change or interrupt a tunnel, and tunnel-down detection stays with the
+phone monitors.
+
 ## Overlap with the phone monitors
 
 For devices the phone monitors already cover, the three overlapping classes (`explicit-dns`,

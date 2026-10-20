@@ -45,6 +45,7 @@ import math
 import os
 import queue
 import re
+import socket
 import struct
 import subprocess
 import sys
@@ -103,6 +104,10 @@ SEGMENTS.update(CONF.get("dnsnet_segments", {}))
 DEVICE_NAMES.update(CONF.get("dnsnet_device_names", {}))
 # Addresses that are NOT bypass destinations: the router itself and the G11.
 TRUSTED_DESTS = set(CONF.get("dnsnet_trusted_dests", ["192.168.8.231"]))
+# Hostnames that point at this household's own tunnel endpoint (e.g. a DDNS name in the phones'
+# AmneziaWG configs). Re-resolved every few minutes; an address is remembered for a day.
+TRUSTED_HOSTNAMES = list(CONF.get("dnsnet_trusted_hostnames", []))
+ADDR_MEMORY = 86400                 # an address the router held (or a trusted name resolved to) stays exempt this long
 
 # Attack classes. ALERT = emailed immediately (throttled). OBSERVE = counted.
 # A DNS LOOKUP of a VPN / Tor / Private Relay name is NOT use of one: on this network Apple devices
@@ -973,14 +978,49 @@ def on_wg_handshake(src: str, dst: str, dport: int, local_ips: set,
 _LOCAL = {"ips": set(), "at": 0.0}
 
 
-def local_ips(ttl: float = 60.0) -> set:
-    """The router's own IPv4 addresses (LAN gateways, tunnel, and the current WAN
-    address), refreshed at most every `ttl` seconds."""
-    now = time.time()
-    if not _LOCAL["ips"] or now - _LOCAL["at"] > ttl:
+_REMEMBERED = {}                    # address -> last time the router held it / a trusted name resolved to it
+
+
+def remember_addresses(addrs, now=None):
+    now = time.time() if now is None else now
+    for a in addrs:
+        _REMEMBERED[a] = now
+    for a in [a for a, t in _REMEMBERED.items() if now - t > ADDR_MEMORY]:
+        del _REMEMBERED[a]
+
+
+def local_ips(ttl: float = 60.0, now=None) -> set:
+    """The router's own IPv4 addresses (LAN gateways, tunnel, WAN) refreshed at most every `ttl`
+    seconds, PLUS every address it held or a trusted hostname resolved to in the last 24 h. A phone
+    with stale DNS keeps dialing the OLD WAN address for a while after the ISP changes it; that is the
+    household's own tunnel, not a bypass."""
+    t = time.time() if now is None else now
+    if not _LOCAL["ips"] or t - _LOCAL["at"] > ttl:
         _LOCAL["ips"] = router_local_ips()
-        _LOCAL["at"] = now
-    return _LOCAL["ips"]
+        _LOCAL["at"] = t
+        remember_addresses(_LOCAL["ips"], t)
+    return _LOCAL["ips"] | {a for a, seen in _REMEMBERED.items() if t - seen <= ADDR_MEMORY}
+
+
+def trusted_names_loop(resolve=socket.gethostbyname_ex):
+    """Keep the addresses of dnsnet_trusted_hostnames fresh (no-op when none are configured)."""
+    while TRUSTED_HOSTNAMES:
+        for name in TRUSTED_HOSTNAMES:
+            try:
+                remember_addresses(resolve(name)[2])
+            except Exception as ex:
+                print(f"[eyeguard-dnsnet] trusted hostname {name}: {type(ex).__name__}", flush=True)
+        time.sleep(300)
+
+
+def is_household_ip(ip: str) -> bool:
+    """Only packets FROM a household address (LAN, guest, IoT, tunnel) are evaluated. An inbound packet
+    from the internet (e.g. the carrier's Wi-Fi Calling IPsec reply) is not a device doing something."""
+    try:
+        a, b, _, _ = (int(x) for x in ip.split("."))
+    except ValueError:
+        return False
+    return a == 10 or (a == 192 and b == 168) or (a == 172 and 16 <= b <= 31) or (a == 100 and 64 <= b <= 127)
 
 
 def router_local_ips() -> set:
@@ -1106,7 +1146,7 @@ def dns_loop(iface: str):
             for line in proc.stdout:
                 local = local_ips()
                 p = parse_dns_query(line)
-                if p and p[0] not in local:
+                if p and p[0] not in local and is_household_ip(p[0]):
                     on_dns(p[0], p[1], p[2], local, qtype=p[3])
             proc.wait()
         except Exception as ex:
@@ -1122,7 +1162,7 @@ def flow_loop(iface: str):
             for line in proc.stdout:
                 local = local_ips()
                 f = parse_flow_line(line)
-                if f and f[0] not in local:
+                if f and f[0] not in local and is_household_ip(f[0]):
                     tor = tor_all()
                     on_flow(f[0], f[2], f[3], "tcp", local, tor)
             proc.wait()
@@ -1146,7 +1186,7 @@ def wg_loop(iface: str):
             for line in proc.stdout:
                 local = local_ips()
                 f = parse_flow_line(line)
-                if f and f[0] not in local:
+                if f and f[0] not in local and is_household_ip(f[0]):
                     on_wg_handshake(f[0], f[2], f[3], local)
             proc.wait()
         except Exception as ex:
@@ -1162,7 +1202,7 @@ def udp_loop(iface: str):
             for line in proc.stdout:
                 local = local_ips()
                 f = parse_flow_line(line)
-                if f and f[0] not in local:
+                if f and f[0] not in local and is_household_ip(f[0]):
                     tor = tor_all()
                     on_flow(f[0], f[2], f[3], "udp", local, tor)
             proc.wait()
@@ -1189,7 +1229,7 @@ def sni_loop(iface: str):
                 if pkt is None:
                     continue
                 h = parse_client_hello(pkt)
-                if h and h["src"] not in local_ips():
+                if h and h["src"] not in local_ips() and is_household_ip(h["src"]):
                     on_sni(h["src"], h["dst"], h["sni"], h["ech"], h["cut"], local_ips())
             proc.wait()
         except Exception as ex:
@@ -1248,7 +1288,7 @@ def main():
     load_vpn_ranges()
     print(f"[eyeguard-dnsnet] active on {IFACES}; alert classes: "
           f"{sorted(ALERT_CLASSES)}; excluded: {sorted(EXCLUDED)} + macs {sorted(EXCLUDED_MACS)}", flush=True)
-    for fn in (tor_refresh_loop, invariants_loop, stats_loop, sender_loop, lists_loop):
+    for fn in (tor_refresh_loop, invariants_loop, stats_loop, sender_loop, lists_loop, trusted_names_loop):
         threading.Thread(target=fn, daemon=True).start()
     for iface in IFACES:
         for fn in (dns_loop, flow_loop, wg_loop, udp_loop, sni_loop):
