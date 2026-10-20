@@ -81,7 +81,7 @@ fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
 (d / "leases").write_text("1792 84:94:37:ec:d6:83 192.168.8.150 Jonahs-Mac 01:84\n")
 conf = {"api_key": "ANONKEY", "supabase_url": f"http://127.0.0.1:{srv.server_port}",
         "explicit_terms": ["porn", "pornhub"], "noise_domains": ["googleapis.com"],
-        "app_map": {}, "dnsnet_interfaces": ["fake0", "fake1"], "dnsnet_local_ips": ["192.168.8.1", "10.1.0.1", "73.43.190.194"], "dnsnet_stats_seconds": 1,
+        "app_map": {}, "dnsnet_interfaces": ["fake0", "fake1"], "dnsnet_local_ips": ["192.168.8.1", "10.1.0.1", "73.43.190.194"], "dnsnet_stats_seconds": 1, "dnsnet_trusted_hostnames": [],
         "dnsnet_stats_file": str(d / "stats.json"), "dnsnet_leases_file": str(d / "leases"), "dnsnet_dhcp_config": str(d / "nodhcp"), "tor_relay_cache_file": str(d / "tor.json"),
         "dnsnet_stats_log_seconds": 3600}
 (d / "phone.json").write_text(json.dumps(conf))

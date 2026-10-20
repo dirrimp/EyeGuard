@@ -92,7 +92,8 @@ DEVICE_NAMES.update(CONF.get("dnsnet_device_names", {}))
 TRUSTED_DESTS = set(CONF.get("dnsnet_trusted_dests", ["192.168.8.231"]))
 # Hostnames that point at this household's own tunnel endpoint (e.g. a DDNS name in the phones'
 # AmneziaWG configs). Re-resolved every few minutes; an address is remembered for a day.
-TRUSTED_HOSTNAMES = list(CONF.get("dnsnet_trusted_hostnames", []))
+# Default: the endpoint all four device profiles dial (self-hosted DDNS that tracks the router's WAN IP).
+TRUSTED_HOSTNAMES = list(CONF.get("dnsnet_trusted_hostnames", ["vpn.orthanc.me"]))
 ADDR_MEMORY = 86400                 # an address the router held (or a trusted name resolved to) stays exempt this long
 
 # Attack classes. ALERT = emailed immediately (throttled). OBSERVE = counted.
@@ -659,11 +660,13 @@ def local_ips(ttl: float = 60.0, now=None) -> set:
 
 
 def trusted_names_loop(resolve=socket.gethostbyname_ex):
-    """Keep the addresses of dnsnet_trusted_hostnames fresh (no-op when none are configured)."""
+    """Keep the addresses of dnsnet_trusted_hostnames fresh (no-op when none are configured).
+    The name is passed as BYTES: this router's python3-light has no idna codec, so a str hostname
+    raises 'LookupError: unknown encoding: idna' (verified live) and nothing would ever resolve."""
     while TRUSTED_HOSTNAMES:
         for name in TRUSTED_HOSTNAMES:
             try:
-                remember_addresses(resolve(name)[2])
+                remember_addresses(resolve(name.encode("ascii"))[2])
             except Exception as ex:
                 print(f"[eyeguard-dnsnet] trusted hostname {name}: {type(ex).__name__}", flush=True)
         time.sleep(300)
