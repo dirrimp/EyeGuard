@@ -140,11 +140,11 @@ chmod 755 /etc/init.d/eyeguard-phone && /etc/init.d/eyeguard-phone enable && /et
 ```
 **Kill any foreground test runs first** (`ps | grep eyeguard-phone`) — a
 leftover manually-started instance plus the new service means duplicate
-tcpdump captures and duplicate/conflicting Supabase posts. Note: killing the
-python process does not kill its tcpdump children (they're orphaned, not
-tracked by procd) — `kill` those PIDs too, or they linger until their pipe
-finally errors out (fast on busy `br-lan`, can take a long time on quiet
-`wgserver`).
+tcpdump captures and duplicate/conflicting Supabase posts. Since the SIGTERM fix, stopping the service
+takes its tcpdump children down with it, and every start sweeps leftovers from a SIGKILL/crash (only
+tcpdump processes with parent init and this script's own capture filters). Older releases orphaned
+their children, which lingered until their pipe finally errored (fast on busy `br-lan`, a very long
+time on quiet `wgserver`).
 
 ## Supabase side (one-time)
 Run `supabase/phone.sql` in the SQL Editor — it adds the `phone_status`
