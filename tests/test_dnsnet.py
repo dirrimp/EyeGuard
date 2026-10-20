@@ -256,7 +256,15 @@ check("same site already looked up by that device -> SNI stays silent (no double
 reset(); dn._RECENT_DNS.clear()
 check("another device is not covered by someone else's lookup", dn.on_sni("192.168.8.77", "93.184.216.34", "www.pornhub.com", False, False, LOCAL) == ["alerted"])
 reset(); dn._RECENT_DNS.clear()
-check("VPN provider by TLS name (no DNS seen) alerts", dn.on_sni("192.168.8.150", "5.5.5.5", "api.nordvpn.com", False, False, LOCAL) == ["alerted"])
+check("a TLS connection to a VPN provider's website/API (the Proton app polling its account API) is observed, not emailed",
+      dn.on_sni("192.168.8.150", "5.5.5.5", "account.protonvpn.com", False, False, LOCAL) == ["observed"] and POSTED == [])
+reset(); dn._RECENT_DNS.clear()
+check("a REAL TLS connection to iCloud Private Relay alerts (that is masking, unlike a lookup)",
+      dn.on_sni("192.168.8.150", "17.253.1.1", "mask.icloud.com", False, False, LOCAL) == ["alerted"] and "connection to iCloud Private Relay" in POSTED[0]["reason"], str(POSTED))
+reset(); dn.on_dns("192.168.8.150", "192.168.8.1", "mask.icloud.com", LOCAL)
+check("...even when the device also looked the name up (the lookup was only observed)",
+      dn.on_sni("192.168.8.150", "17.253.1.1", "mask-h2.icloud.com", False, False, LOCAL) == ["alerted"])
+reset(); dn._RECENT_DNS.clear()
 reset(); dn._RECENT_DNS.clear()
 check("innocent name raises nothing", dn.on_sni("192.168.8.150", "93.184.216.34", "example.com", False, False, LOCAL) == [] and POSTED == [])
 reset(); check("hello with no name is observed, not emailed", dn.on_sni("192.168.8.150", "5.5.5.5", None, False, False, LOCAL) == ["observed"] and POSTED == [])
@@ -336,7 +344,7 @@ reset(alive={"primary": True, "jada": False})
 r = dn.on_flow("192.168.8.153", "185.220.101.8", 443, "tcp", LOCAL, {"185.220.101.8"})
 check("tor-guard on the phone also deduped while alive", r == ["covered"])
 r = dn.on_dns("192.168.8.153", "192.168.8.1", "nordvpn.com", LOCAL)
-check("a class the phone monitor does NOT raise is never suppressed (VPN lookup)", r == ["alerted"])
+check("a VPN-provider lookup is observed (never emailed, never reported as 'covered')", r == ["observed"])
 r = dn.on_flow("192.168.8.153", "5.6.7.8", 853, "tcp", LOCAL, TOR)
 check("DoT attempt from the phone is never suppressed", r == ["alerted"])
 reset(alive={"primary": True, "jada": False})
@@ -367,12 +375,17 @@ check("traffic to the router / G11 is never bypass (household tunnel, own DoH on
       dn.on_wg_handshake("10.1.0.2", "73.43.190.194", 51820, LOCAL) == []
       and dn.on_flow("10.1.0.2", "192.168.8.231", 853, "tcp", LOCAL, TOR) == []
       and dn.on_flow("10.1.0.2", "10.1.0.1", 8853, "tcp", LOCAL, TOR) == [])
-for dom, cls in [("nordvpn.com", "VPN/proxy"), ("api.protonvpn.ch", "VPN/proxy"), ("vpn-api.proton.me", "VPN/proxy"),
-                 ("x.mullvad.net", "VPN/proxy"), ("check.torproject.org", "Tor project"),
-                 ("mask.icloud.com", "Private Relay"), ("mask-h2.icloud.com", "Private Relay")]:
+for dom, cls in [("nordvpn.com", "vpn-domain"), ("api.protonvpn.ch", "vpn-domain"), ("vpn-api.proton.me", "vpn-domain"),
+                 ("account.protonvpn.com", "vpn-domain"), ("x.mullvad.net", "vpn-domain"), ("check.torproject.org", "tor-domain"),
+                 ("mask.icloud.com", "private-relay-lookup"), ("mask-h2.icloud.com", "private-relay-lookup")]:
     reset()
     r = dn.on_dns("192.168.8.150", "192.168.8.1", dom, LOCAL)
-    check(f"{dom} alerts as {cls}", r == ["alerted"] and cls.split("/")[0] in POSTED[0]["reason"] or cls in POSTED[0]["reason"], str(POSTED))
+    check(f"{dom} is OBSERVED as {cls}, never emailed", r == ["observed"] and POSTED == [] and cls in dn._STATS["observed"], str((r, POSTED)))
+reset()
+for i in range(500):      # measured on the live network: ~1,300 lookups of mask.icloud.com in 15 h from 12 clients
+    dn.on_dns("10.1.0.3", "10.1.0.1", "mask.icloud.com", LOCAL, now=1000.0 + i * 60)
+    dn.on_dns("192.168.8.150", "192.168.8.1", "account.protonvpn.com", LOCAL, now=1000.0 + i * 60)
+check("500 Private Relay / Proton VPN app lookups over ~8 h produce ZERO emails", POSTED == [])
 for dom in ["mail.proton.me", "drive.proton.me", "account.proton.me", "icloud.com", "p01-mail.icloud.com",
             "notnordvpn.com", "nordvpn.com.example.org", "mask.icloud.com.evil.example"]:
     reset()

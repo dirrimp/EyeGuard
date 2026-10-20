@@ -110,7 +110,7 @@ env = dict(os.environ, FAKE_SNI=str(d / "sni.json"), FAKE_ARGV=str(d / "sni_argv
 proc = subprocess.Popen([sys.executable, str(ROOT / "router" / "eyeguard-dnsnet.py")], env=env,
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 deadline = time.time() + 40
-while time.time() < deadline and len(got) < 10:
+while time.time() < deadline and len(got) < 9:
     time.sleep(0.5)
 time.sleep(2)
 
@@ -120,7 +120,7 @@ print("  alerts received:", len(rows))
 check("flags arrive at the flags endpoint with the anon key",
       got and all(p == "/rest/v1/flags" and k == "ANONKEY" for p, k, _ in got))
 check("explicit domain from a LAN device -> red", any(r.startswith("net-signal: explicit domain pornhub.com from Jonahs-Mac: 192.168.8.150, MAC 84:94:37:ec:d6:83, home LAN") for r in reasons), str(reasons))
-check("VPN provider lookup -> red", any("VPN/proxy provider lookup nordvpn.com from UNKNOWN device: 192.168.8.160, home LAN" in r for r in reasons))
+check("a VPN-provider LOOKUP is observed, not emailed", not any("nordvpn" in r for r in reasons))
 check("Tor guard contact -> red", any("Tor entry relay or default bridge contacted 185.220.101.7 from Jonahs-Mac: 192.168.8.150" in r for r in reasons))
 check("DoT attempt -> red", any("DNS-over-TLS/QUIC attempt (port 853) 1.2.3.4:853 from Jonahs-Mac: 192.168.8.150" in r for r in reasons))
 check("WireGuard handshake on 443 -> red", any("WireGuard tunnel handshake to the internet 5.5.5.5:443" in r for r in reasons))
@@ -139,7 +139,7 @@ check("innocent, noise and EDNS-innocent queries raise nothing",
 check("the outside-resolver query is observed, not alerted", not any("example.org" in r or "8.8.4.4" in r for r in reasons))
 check("duplicate across the two interfaces is throttled to one alert per signal",
       len([r for r in reasons if "explicit domain pornhub.com from Jonahs-Mac" in r]) == 1)
-check("exactly ten alerts (no extras)", len(rows) == 10, f"{len(rows)}: {reasons}")
+check("exactly nine alerts (no extras)", len(rows) == 9, f"{len(rows)}: {reasons}")
 
 stats = None
 for _ in range(20):

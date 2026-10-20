@@ -17,9 +17,7 @@ destination IPs, never payload or screens.
 | Class | Signal | Default |
 |---|---|---|
 | `tor-guard` | new TCP connection to a current Tor guard relay OR one of Tor Browser's published default bridges, any port | alert |
-| `tor-domain` | lookup of torproject.org (updates, bridges, snowflake) | alert |
-| `vpn-domain` | lookup of a VPN / proxy / anti-censorship provider (suffix match; proton.me mail is NOT listed, only Proton VPN endpoints) | alert |
-| `private-relay` | lookup of `mask.icloud.com` / `mask-h2.icloud.com` (iCloud Private Relay) | alert |
+| `private-relay` | a real TLS connection to iCloud Private Relay (`mask.icloud.com` / `mask-h2.icloud.com` as the server name) | alert |
 | `dot-attempt` | any TCP/UDP 853 (DNS-over-TLS / QUIC) to a non-household address | alert |
 | `doh-ip` | TCP 443 to a known DoH provider IP (same list as the firewall rules) | alert |
 | `vpn-port` | OpenVPN 1194, PPTP 1723, L2TP 1701, WireGuard 51820 | alert |
@@ -27,6 +25,7 @@ destination IPs, never payload or screens.
 | `ipv6-enabled` | IPv6 switched on for a client segment (the capture is IPv4-only) | alert |
 | `explicit-sni` | the same explicit-site rule applied to the **TLS server name** of a new HTTPS connection, only when that device did NOT just look the name up in DNS (cached, encrypted or bypassed DNS) | alert |
 | `vpn-ip` | a connection to a known VPN server address (public list, ~7,000 ranges, refreshed daily) | alert |
+| `vpn-domain` / `tor-domain` / `private-relay-lookup` | a DNS **lookup** of a VPN/proxy provider, a Tor Project name, or `mask.icloud.com`. Lookups are not use: on this network Apple devices look up `mask.icloud.com` ~1,300 times a day (AdGuard blocks it and they keep retrying), the Mac's Proton VPN app polls its account API all day, and EyeGuard's own tooling reads torproject.org. Real use is caught by the connection-based classes above. | observe |
 | `dns-bypass` | plain DNS sent to a resolver other than the router/G11 | observe |
 | `doh-host` | lookup of a public DoH hostname | observe |
 | `ike-ipsec` | UDP 500/4500 (also Wi-Fi Calling) | observe |

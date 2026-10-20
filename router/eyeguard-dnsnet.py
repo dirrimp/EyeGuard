@@ -98,11 +98,17 @@ DEVICE_NAMES.update(CONF.get("dnsnet_device_names", {}))
 TRUSTED_DESTS = set(CONF.get("dnsnet_trusted_dests", ["192.168.8.231"]))
 
 # Attack classes. ALERT = emailed immediately (throttled). OBSERVE = counted.
-ALERT_DEFAULT = ["explicit-dns", "explicit-sni", "vpn-ip", "tor-guard", "doh-ip", "dot-attempt", "vpn-domain",
-                 "tor-domain", "private-relay", "vpn-port", "wg-handshake",
-                 "ipv6-enabled"]
+# A DNS LOOKUP of a VPN / Tor / Private Relay name is NOT use of one: on this network Apple devices
+# look up mask.icloud.com ~1,300 times a day (AdGuard blocks it and they keep retrying), the Mac's
+# Proton VPN app polls its account API all day, and EyeGuard's own tooling reads torproject.org.
+# So lookups (and TLS connections to a VPN/Tor provider's own website or API) are observe-only;
+# alerts come from actual use: a connection to a VPN server, a Tor relay or bridge, a WireGuard
+# handshake, a DoT/DoH attempt, or a real TLS connection to iCloud Private Relay.
+ALERT_DEFAULT = ["explicit-dns", "explicit-sni", "vpn-ip", "tor-guard", "doh-ip", "dot-attempt",
+                 "private-relay", "vpn-port", "wg-handshake", "ipv6-enabled"]
 OBSERVE_ONLY = ["dns-bypass", "doh-host", "ike-ipsec", "openvpn-udp", "proxy-port",
-                "tls-no-sni", "ech-hidden", "dns-tunnel"]
+                "tls-no-sni", "ech-hidden", "dns-tunnel",
+                "vpn-domain", "tor-domain", "private-relay-lookup"]
 ALERT_CLASSES = set(CONF.get("dnsnet_alert_classes", ALERT_DEFAULT))
 
 # ---- the same classification as eyeguard-phone.py (parity-tested) ----------
@@ -782,7 +788,8 @@ _TITLES = {
     "doh-ip": "DNS-over-HTTPS provider contacted",
     "dot-attempt": "DNS-over-TLS/QUIC attempt (port 853)",
     "vpn-domain": "VPN/proxy provider lookup",
-    "private-relay": "iCloud Private Relay lookup",
+    "private-relay-lookup": "iCloud Private Relay lookup (observe-only)",
+    "private-relay": "connection to iCloud Private Relay",
     "vpn-port": "VPN protocol traffic",
     "wg-handshake": "WireGuard tunnel handshake to the internet",
     "ipv6-enabled": "IPv6 enabled on a client network",
@@ -863,7 +870,7 @@ def on_dns(client: str, resolver: str, qname: str, local_ips: set,
     if host_matches(qname, TOR_DOMAINS):
         out.append(raise_event(client, "tor-domain", host_matches(qname, TOR_DOMAINS), now))
     if host_matches(qname, PRIVATE_RELAY):
-        out.append(raise_event(client, "private-relay", host_matches(qname, PRIVATE_RELAY), now))
+        out.append(raise_event(client, "private-relay-lookup", host_matches(qname, PRIVATE_RELAY), now))
     if host_matches(qname, DOH_HOSTS):
         out.append(raise_event(client, "doh-host", host_matches(qname, DOH_HOSTS), now))
     return out
@@ -917,6 +924,9 @@ def on_sni(client: str, dst: str, sni: str | None, ech: bool, cut: bool, local_i
     out = []
     if host_matches(sni, ECH_PUBLIC_NAMES):
         out.append(raise_event(client, "ech-hidden", host_matches(sni, ECH_PUBLIC_NAMES), now))
+    relay = host_matches(sni, PRIVATE_RELAY)
+    if relay:      # a real TLS connection to the relay (its name resolved despite the block): masking, not a lookup
+        out.append(raise_event(client, "private-relay", relay, now))
     if dns_seen_recently(client, sni, t_now):
         with _LOCK:
             _STATS["sni_dns_dup"] = _STATS.get("sni_dns_dup", 0) + 1
@@ -925,7 +935,7 @@ def on_sni(client: str, dst: str, sni: str | None, ech: bool, cut: bool, local_i
     if c and c[0] == "flagged":
         out.append(raise_event(client, "explicit-sni", base_domain(sni), now))
     for suffixes, cls in ((VPN_DOMAINS, "vpn-domain"), (TOR_DOMAINS, "tor-domain"),
-                          (PRIVATE_RELAY, "private-relay"), (DOH_HOSTS, "doh-host")):
+                          (DOH_HOSTS, "doh-host")):
         hit = host_matches(sni, suffixes)
         if hit:
             out.append(raise_event(client, cls, hit, now))
