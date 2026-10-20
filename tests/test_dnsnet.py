@@ -252,6 +252,30 @@ for dom in ["mail.proton.me", "drive.proton.me", "account.proton.me", "icloud.co
     r = dn.on_dns("192.168.8.150", "192.168.8.1", dom, LOCAL)
     check(f"{dom} does NOT alert", r == [] or "alerted" not in r, str(r))
 
+print("-- persistent offenders back off; the first alert and new targets are immediate --")
+reset(); dn.THROTTLE, dn.THROTTLE_BACKOFF = 1800, 4
+check("defaults: 30 min first gap, x4 backoff, never more than a day between reminders", dn.THROTTLE_MAX == 86400 and dn.THROTTLE_BACKOFF == 4 and dn.THROTTLE == 1800)
+n = 0; times = []
+for k in range(7 * 288):                        # a device hits a DoH address every 5 minutes for a week
+    r = dn.on_flow("192.168.10.20", "8.8.8.8", 443, "tcp", LOCAL, TOR, now=1000.0 + k * 300)
+    if r == ["alerted"]: times.append(k * 300)
+check("a week of constant DoH attempts = about 10 emails (was ~330), not one every 30 minutes", 8 <= len(times) <= 12, f"{len(times)}: {[round(t / 3600, 1) for t in times]}")
+check("the very first one is immediate", times[0] == 0)
+check("spacing grows 30 min -> 2 h -> 8 h -> daily", [round((b - a) / 3600, 1) for a, b in zip(times, times[1:4])] == [0.5, 2.0, 8.0])
+check("it keeps reminding at least daily after that", all((b - a) <= 86400 + 300 for a, b in zip(times[3:], times[4:])))
+check("repeats are marked, the first is not", "[repeat" not in POSTED[0]["reason"] and "[repeat #2]" in POSTED[1]["reason"] and "[repeat #3]" in POSTED[2]["reason"])
+reset(); dn.on_flow("192.168.10.20", "8.8.8.8", 443, "tcp", LOCAL, TOR, now=0.0)
+check("a different target from the same device alerts immediately", dn.on_flow("192.168.10.20", "1.1.1.1", 443, "tcp", LOCAL, TOR, now=60.0) == ["alerted"])
+check("a different device alerts immediately", dn.on_flow("192.168.10.21", "8.8.8.8", 443, "tcp", LOCAL, TOR, now=61.0) == ["alerted"])
+reset(); dn.on_flow("192.168.10.20", "8.8.8.8", 443, "tcp", LOCAL, TOR, now=0.0); dn.on_flow("192.168.10.20", "8.8.8.8", 443, "tcp", LOCAL, TOR, now=1900.0)
+check("after two quiet days it is a new episode again (30 min gap, no repeat marker)",
+      dn.on_flow("192.168.10.20", "8.8.8.8", 443, "tcp", LOCAL, TOR, now=1900.0 + 2 * 86400 + 5) == ["alerted"]
+      and "[repeat" not in POSTED[-1]["reason"] and dn.on_flow("192.168.10.20", "8.8.8.8", 443, "tcp", LOCAL, TOR, now=1900.0 + 2 * 86400 + 5 + 1810) == ["alerted"])
+reset(); n = 0
+for k in range(48):                              # the core rule never backs off: a repeat visit is the signal
+    n += dn.on_dns("192.168.8.150", "192.168.8.1", "pornhub.com", LOCAL, now=k * 1900.0) == ["alerted"]
+check("explicit-domain repeats keep the flat 30-minute throttle (48 visits spaced 31 min = 48 alerts)", n == 48, str(n))
+
 print("-- observe-only classes count but never email --")
 reset()
 check("DNS to an outside resolver is observed, not emailed", dn.on_dns("192.168.8.150", "8.8.4.4", "example.com", LOCAL) == ["observed"] and POSTED == [])

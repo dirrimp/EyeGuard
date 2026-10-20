@@ -67,6 +67,13 @@ IFACES = CONF.get("dnsnet_interfaces", ["br-lan", "br-guest", "br-iot", "wgserve
 EXCLUDED = set(CONF.get("dnsnet_excluded_ips", []))
 EXCLUDED_MACS = {m.lower() for m in CONF.get("dnsnet_excluded_macs", [])}
 THROTTLE = int(CONF.get("dnsnet_throttle_seconds", 1800))   # per client+class+target
+# Bypass classes describe a persistent STATE (a device that keeps contacting a DoH address, a VPN
+# server...), so repeats of the same device+class+target back off: 30 min, 2 h, 8 h, then daily,
+# each marked "[repeat #N]". The first alert is always immediate and a NEW target or device alerts
+# at once. Explicit-content rules never back off (a repeat visit IS the signal): flat THROTTLE.
+THROTTLE_MAX = int(CONF.get("dnsnet_throttle_max_seconds", 86400))
+THROTTLE_BACKOFF = int(CONF.get("dnsnet_throttle_backoff", 4))
+FLAT_THROTTLE_CLASSES = ("explicit-dns", "explicit-sni")
 STATS_PATH = Path(CONF.get("dnsnet_stats_file", "/tmp/dnsnet-stats.json"))
 STATS_LOG_SECONDS = int(CONF.get("dnsnet_stats_log_seconds", 3600))
 STATS_SECONDS = int(CONF.get("dnsnet_stats_seconds", 60))
@@ -464,7 +471,7 @@ def covered_by_live_monitor(ip: str, cls: str, now: float | None = None) -> bool
     same class itself. Only explicit-dns, doh-ip and tor-guard overlap."""
     if cls not in ("explicit-dns", "doh-ip", "tor-guard"):
         return False
-    now = now or time.time()
+    now = time.time() if now is None else now
     with _LOCK:
         stale = now - _COVER["checked"] > 30
     if stale:
@@ -507,7 +514,7 @@ _TITLES = {
 def raise_event(client: str, cls: str, target: str, now: float | None = None) -> str:
     """-> 'alerted' | 'observed' | 'throttled' | 'excluded' | 'covered'.
     The single decision point for every signal."""
-    now = now or time.time()
+    now = time.time() if now is None else now
     if is_excluded(client):
         with _LOCK:
             _STATS["excluded_skipped"] += 1
@@ -525,11 +532,21 @@ def raise_event(client: str, cls: str, target: str, now: float | None = None) ->
         return "covered"
     key = (client, cls, target)
     with _LOCK:
-        if now - _SEEN.get(key, 0) < THROTTLE:
-            return "throttled"
-        _SEEN[key] = now
+        last, level = _SEEN.get(key, (0.0, 0))
+        if last and now - last > 2 * THROTTLE_MAX:
+            level = -1                      # quiet for two days: a new episode
+        elif last:
+            gap = THROTTLE if cls in FLAT_THROTTLE_CLASSES else min(THROTTLE * THROTTLE_BACKOFF ** level, THROTTLE_MAX)
+            if now - last < gap:
+                return "throttled"
+            level += 1
+        else:
+            level = -1
+        level = 0 if level < 0 else level
+        repeat = level if cls not in FLAT_THROTTLE_CLASSES else 0
+        _SEEN[key] = (now, level)
         if len(_SEEN) > 5000:
-            for k in [k for k, t in _SEEN.items() if now - t > THROTTLE]:
+            for k in [k for k, v in _SEEN.items() if now - v[0] > 2 * THROTTLE_MAX]:
                 del _SEEN[k]
         _STATS["alerts"][cls] = _STATS["alerts"].get(cls, 0) + 1
     explicit = cls == "explicit-dns"
@@ -537,7 +554,7 @@ def raise_event(client: str, cls: str, target: str, now: float | None = None) ->
     prefix = "net-signal" if explicit else "net-bypass"
     _emit({
         "flagged_at": now_iso(), "verdict": "flagged",
-        "reason": f"{prefix}: {_TITLES.get(cls, cls)} {target} from {who}",
+        "reason": f"{prefix}: {_TITLES.get(cls, cls)} {target} from {who}" + (f" [repeat #{repeat + 1}]" if repeat else ""),
         "app": "Network", "url": None,
         "window_title": f"{_TITLES.get(cls, cls)}: {target} -- {identify(client).get('name') or client}",
         "grade": "Likely", "risk": "high", "is_nudity": False})
