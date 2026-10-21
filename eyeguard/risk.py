@@ -26,6 +26,17 @@ def score_from_reason(reason: str | None) -> float:
     return float(m.group(1)) if m else 1.0
 
 
+def pattern_hits(pat: str, ctx: dict, hay: str) -> bool:
+    """One list entry vs one context. 'app:Name' matches only when the frontmost APP NAME is exactly
+    Name (case-insensitive), so a word in a page title or URL ("promo code", "striped", "barcode")
+    can never trigger it. Any other entry is a case-insensitive substring of app + title + url, as
+    before. Used by the suppress / low_risk / high_risk lists and by the ignore list."""
+    p = str(pat).strip()
+    if p.lower().startswith("app:"):
+        return (ctx.get("app") or "").strip().lower() == p[4:].strip().lower()
+    return p.lower() in hay
+
+
 def _haystack(ctx: dict) -> str:
     return " ".join(filter(None, [ctx.get("app"), ctx.get("window_title"),
                                   ctx.get("url")])).lower()
@@ -46,7 +57,7 @@ def assess(verdict: str, reason: str, ctx: dict, rules: dict) -> dict:
     is_red = verdict == "flagged"
 
     def hit(key):
-        return any(p.lower() in hay for p in rules.get(key, []))
+        return any(pattern_hits(p, ctx, hay) for p in rules.get(key, []))
 
     # SUPPRESS contexts (terminal, code editors, Claude, login...) cannot contain
     # real flaggable content, so drop EVERYTHING here — including RED. This is
@@ -73,6 +84,14 @@ def assess(verdict: str, reason: str, ctx: dict, rules: dict) -> dict:
         if is_red and not is_nudenet:
             red_min = float(rules.get("low_risk_red_min_confidence", 0.93))
             if score < red_min:
+                # A CLIP RED too weak for the low-risk RED bar is NOT dropped when it is still a
+                # confident yellow: report it as YELLOW (its red probability is part of the
+                # yellow mass, so score >= low_risk_min_confidence means yellow clears its bar).
+                # Before 2026-10-21 it was dropped, so the most severe detections vanished
+                # while milder ones survived.
+                if rules.get("low_risk_red_demote", True) and score >= float(rules.get("low_risk_min_confidence", 0.85)):
+                    return {"keep": True, "risk": risk, "grade": "Likely" if score >= 0.85 else "Possible",
+                            "score": round(score, 3), "demote_to_alert": True}
                 return {"keep": False, "risk": "low-discarded", "grade": "",
                         "score": score}
         elif not is_red:

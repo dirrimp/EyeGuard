@@ -120,6 +120,8 @@ def run(cfg: dict, interval: float | None, once: bool):
                         if not a["keep"]:
                             continue
                         grade, risk = a["grade"], a["risk"]
+                        if a.get("demote_to_alert"):
+                            result.verdict = Verdict.ALERT
                     logger.log(result, frame.display_index, frame.image,
                                context=ctx, grade=grade, risk=risk)
                     if ctx.get("app") or ctx.get("url") or ctx.get("window_title"):
