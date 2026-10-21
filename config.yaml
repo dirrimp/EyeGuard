@@ -70,6 +70,14 @@ arbiter:
   # Raise if blank-ish pages still flag; lower if real sparse content is missed.
   min_content_std: 12.0
 
+  # Tile-only RED corroboration (2026-10-21). A CLIP RED reached ONLY by a zoomed tile (the full
+  # frame itself does not reach RED) stays RED only if NudeNet also saw at least this much exposure
+  # anywhere in the frame; otherwise it is recorded as YELLOW (still flagged, dashboard, no instant
+  # email). Full-frame CLIP REDs and NudeNet's own REDs (>= flag_threshold) are never affected.
+  # Remove this line to restore the old behaviour. Offline test: 31 REDs on 624 non-explicit photos
+  # became 11; every removed one had NudeNet = 0.00. Explicit-tier recall is NOT measured.
+  tile_red_nudenet_min: 0.30
+
   # Scoring is a 3-way head-to-head: P(best explicit prompt) vs P(best suggestive)
   # vs P(best safe), softmaxed against each other per crop/tile.
   # RED: P(explicit) >= this -> FLAGGED. Set high so RED needs a CONFIDENT
