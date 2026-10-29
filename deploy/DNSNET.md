@@ -129,3 +129,11 @@ A test that DOES email both partners (tell Dad first): `curl -m3 https://1.1.1.1
 
 Tests: `python3 tests/test_dnsnet.py` and `python3 tests/test_dnsnet_process.py` (real process, fake tcpdump, local receiver). The BPF filters are evaluated by real `tcpdump` against
 synthetic pcaps; skipped with a message if tcpdump is missing).
+
+## Expected tunnels (`dnsnet_expected_tunnels`, off by default)
+A device that is SUPPOSED to hold a VPN tunnel open (the G11's gluetun -> Proton VPN) would otherwise
+raise vpn-ip / vpn-port / wg-handshake all day. Config in `/etc/eyeguard/phone.json`:
+`"dnsnet_expected_tunnels": [{"src": "192.168.8.231", "dst": "217.138.198.0/24", "port": 51820}]`.
+Silences ONLY those three classes, ONLY for that source, a destination range no wider than /24, and that UDP
+port. Tor, DoH, DoT, explicit names and any other VPN server/port from the same device still alert.
+Bad or too-broad entries are ignored and logged. Update the range when the G11's Proton server changes.

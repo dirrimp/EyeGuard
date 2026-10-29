@@ -110,6 +110,46 @@ TRUSTED_DESTS = set(CONF.get("dnsnet_trusted_dests", ["192.168.8.231"]))
 TRUSTED_HOSTNAMES = list(CONF.get("dnsnet_trusted_hostnames", ["vpn.orthanc.me"]))
 ADDR_MEMORY = 86400                 # an address the router held (or a trusted name resolved to) stays exempt this long
 
+# A tunnel one named device is EXPECTED to hold open (the G11's gluetun -> Proton VPN, which carries
+# its torrent traffic). Off by default (empty list). Each entry is {"src": "<one IPv4>",
+# "dst": "<a.b.c.d/NN, NN >= 24>", "port": <udp port>}; it silences ONLY the three tunnel classes
+# (vpn-ip, vpn-port, wg-handshake) for that exact source, destination range and UDP port. Everything else
+# from that device (Tor, DoH, DoT, explicit names, any other VPN server or port) still alerts.
+# Malformed or too-broad entries are ignored and logged, never widened.
+def _parse_expected_tunnels(entries) -> list:
+    out = []
+    for e in entries or []:
+        try:
+            src = str(e["src"]); port = int(e["port"])
+            net, _, bits = str(e["dst"]).partition("/")
+            bits = int(bits) if bits else 32
+            if not (24 <= bits <= 32) or not (1 <= port <= 65535):
+                raise ValueError("range wider than /24 or bad port")
+            base = _ip2int(net) & (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF
+            _ip2int(src)
+            out.append((src, base, bits, port))
+        except Exception as ex:   # noqa: BLE001
+            print(f"[eyeguard-dnsnet] ignoring bad dnsnet_expected_tunnels entry: {type(ex).__name__}", flush=True)
+    return out
+
+
+EXPECTED_TUNNELS = None   # parsed lazily (needs _ip2int)
+
+
+def expected_tunnel(src: str, dst: str, dport: int, proto: str = "udp") -> bool:
+    global EXPECTED_TUNNELS
+    if EXPECTED_TUNNELS is None:
+        EXPECTED_TUNNELS = _parse_expected_tunnels(CONF.get("dnsnet_expected_tunnels", []))
+    if proto != "udp" or not EXPECTED_TUNNELS:
+        return False
+    try:
+        n = _ip2int(dst)
+    except (ValueError, IndexError):
+        return False
+    return any(src == s and dport == p and (n & (0xFFFFFFFF << (32 - b)) & 0xFFFFFFFF) == base
+               for s, base, b, p in EXPECTED_TUNNELS)
+
+
 # Attack classes. ALERT = emailed immediately (throttled). OBSERVE = counted.
 # A DNS LOOKUP of a VPN / Tor / Private Relay name is NOT use of one: on this network Apple devices
 # look up mask.icloud.com ~1,300 times a day (AdGuard blocks it and they keep retrying), the Mac's
@@ -905,7 +945,8 @@ def on_flow(src: str, dst: str, dport: int, proto: str, local_ips: set,
     if dst in local_ips or dst in TRUSTED_DESTS:
         return []          # traffic to the router/G11 is the household's own tunnel/DNS
     out = []
-    if vpn_match(dst):
+    expected = expected_tunnel(src, dst, dport, proto)
+    if vpn_match(dst) and not expected:
         out.append(raise_event(src, "vpn-ip", dst, now))
     if proto == "tcp":
         if dst in tor_ips:
@@ -921,7 +962,7 @@ def on_flow(src: str, dst: str, dport: int, proto: str, local_ips: set,
     else:
         if dport == 853:
             out.append(raise_event(src, "dot-attempt", f"{dst}:853/udp", now))
-        if dport in VPN_UDP_PORTS:
+        if dport in VPN_UDP_PORTS and not expected:
             out.append(raise_event(src, "vpn-port", f"{VPN_UDP_PORTS[dport]} {dst}:{dport}", now))
         if dport in (500, 4500):
             out.append(raise_event(src, "ike-ipsec", f"{dst}:{dport}", now))
@@ -969,7 +1010,7 @@ def on_wg_handshake(src: str, dst: str, dport: int, local_ips: set,
                     now: float | None = None) -> list:
     """A WireGuard handshake initiation (UDP, 148-byte payload, type 1) from a
     client to a non-household address: a tunnel on any port."""
-    if dst in local_ips or dst in TRUSTED_DESTS:
+    if dst in local_ips or dst in TRUSTED_DESTS or expected_tunnel(src, dst, dport):
         return []
     return [raise_event(src, "wg-handshake", f"{dst}:{dport}", now)]
 
