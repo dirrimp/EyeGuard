@@ -1,0 +1,15 @@
+# EG-PRIV-01: the review agent must NEVER read these, even if asked. tools/review_context.py refuses them.
+# Captured content, review frames, decrypted material, keys, and live data directories.
+EyeGuard-data/
+flags.jsonl
+pending*
+*.enc
+*.age
+*frames*
+*private*key*
+*service_role*
+.supabase_secret
+*.pem
+*.p12
+*.mobileconfig
+.env
