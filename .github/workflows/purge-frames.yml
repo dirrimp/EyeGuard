@@ -1,0 +1,61 @@
+name: Purge old review frames
+
+# Replaces the pg_cron job eyeguard-image-retention, which failed on every run
+# because Supabase blocks `delete from storage.objects` (storage.protect_delete:
+# "Use the Storage API instead"). This deletes through the Storage API.
+# See tools/purge_frames.py for exactly what it will and will not delete.
+#
+# Triggers (deliberately NO workflow_dispatch and NO pull_request):
+#   * schedule: daily, always runs the code on main;
+#   * push to main touching these two files: so the merge of a change here gives an
+#     immediate run.
+# A manual "Run workflow" button lets anyone with write access pick ANY branch and
+# run its (edited) copy of this file WITH the secret below. That would let a branch
+# author reach the service_role key, which must stay with Dad alone. Schedule and
+# push-to-main only ever run merged, Dad-reviewed code, the same boundary as
+# publish-manifest.yml.
+#
+# Safe by default: it only COUNTS (dry run) until the repo variable
+# FRAME_PURGE_ENABLED is set to "true" (Settings -> Secrets and variables ->
+# Actions -> Variables). Deleting is permanent, so read a dry run first.
+#
+# SUPABASE_SERVICE_ROLE_KEY is the existing repo Actions secret that
+# publish-manifest.yml already uses. Same boundary: Dad's secret, never in this
+# repo, never on the monitored Mac, never in a coding session. The log prints
+# counts only (this repo is public, so Actions logs are public).
+
+on:
+  schedule:
+    - cron: "17 9 * * *"      # daily, 09:17 UTC (04:17 ET)
+  push:
+    branches: [main]
+    paths:
+      - "tools/purge_frames.py"
+      - ".github/workflows/purge-frames.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: purge-frames
+  cancel-in-progress: false
+
+jobs:
+  purge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Purge frames older than 7 days
+        env:
+          SUPABASE_URL: https://ucgldleacehxjjwwqomk.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          PURGE_ENABLED: ${{ vars.FRAME_PURGE_ENABLED }}
+        run: |
+          MODE=--dry-run
+          [ "$PURGE_ENABLED" = "true" ] && MODE=--apply
+          python3 tools/purge_frames.py $MODE --days 7 --max-delete 500
