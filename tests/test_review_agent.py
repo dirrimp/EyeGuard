@@ -43,6 +43,38 @@ check("denied file content never reaches the review input", not files and withhe
       and "TOP SECRET" not in rc.build(diff("EyeGuard-data/secret.txt", "TOP SECRET CONTENT"))[0])
 check("ignored paths are skipped", not rc.split_diff(diff("assets/logo.svg", "<svg/>"))[0])
 check("source files are not denied", not rc.denied("eyeguard/frame_crypto.py") and not rc.denied("deploy/decrypt_frame.py"))
+# EG-PRIV-01, narrowed (the old catch-all `*frames*` withheld code that merely had "frames" in its name)
+captured = [
+    "flagged_frames/2026-11-10T20-59-12.446472+00-00_alert_d1.jpg",
+    "EyeGuard-data/flagged_frames/2026-11-10T20-59-12.446472+00-00_alert_d1.jpg.enc",
+    "/Library/Application Support/EyeGuard/flagged_frames/a.bin",
+    "frames/a.bin", "x/frames/b.bin", "review_dump/frames/c.dat",
+    "2026-11-10T15-48-47.481549+00-00_flagged_d1.jpg", "x/shot.JPEG".lower(), "x/photo.heic", "x/photo.webp",
+    "flags.jsonl", "flags.jsonl.locked-by-dad-2026-08-16", "flags_report.html", "x/flags_report_old.html",
+    "pending_uploads.jsonl", "EyeGuard-data/anything.txt",
+    "keys/dad_private_key.pem", "keys/service_role.txt", ".env", "x/.env",
+]
+for p in captured:
+    check(f"denylist still withholds captured/secret path {p}", rc.denied(p))
+source = [
+    "tools/purge_frames.py", "tests/test_purge_frames.py", ".github/workflows/purge-frames.yml",
+    "eyeguard/frame_crypto.py", "deploy/decrypt_frame.py", "eyeguard/uploader.py",
+    "assets/menubar/eye_red.png", "supabase/image_retention_unschedule.sql", "docs/frames-retention.md",
+]
+for p in source:
+    check(f"denylist does not withhold source/asset {p}", not rc.denied(p))
+files, withheld = rc.split_diff(diff("tools/purge_frames.py", "x = 1"))
+check("a diff of tools/purge_frames.py reaches the review input", len(files) == 1 and not withheld, str((files, withheld)))
+files, withheld = rc.split_diff(diff("flagged_frames/a.jpg", "CAPTURED"))
+check("a diff of a captured frame is still withheld", not files and withheld == ["flagged_frames/a.jpg"]
+      and "CAPTURED" not in rc.build(diff("flagged_frames/a.jpg", "CAPTURED"))[0])
+# the core entries cannot be removed quietly
+required = ["EyeGuard-data/", "flagged_frames/", "frames/", "flags.jsonl*", "flags_report*", "pending*", "*.enc",
+            "*.age", "*.jpg", "*.jpeg", "*private*key*", "*service_role*", ".supabase_secret", "*.pem", ".env"]
+have = set(rc._patterns("denylist.txt"))
+check("denylist keeps every required entry", all(r in have for r in required), str([r for r in required if r not in have]))
+check("denylist has no catch-all that matches the word 'frames' anywhere",
+      not any(p.startswith("*") and p.endswith("*") and "frames" in p for p in have))
 # rules.md structure
 txt = (ROOT / ".review/rules.md").read_text()
 blocks = re.split(r"\n### ", txt)[1:]
