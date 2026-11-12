@@ -1,6 +1,6 @@
 # Core detection pipeline (Phase 1)
 mss>=9.0            # fast screen-framebuffer capture
-Pillow>=10.0       # image handling
+Pillow>=13.0.0     # image handling (<13 has many known CVEs; 10.4 had 69)
 numpy>=1.26        # frame diffing / array conversion
 PyYAML>=6.0        # config
 
@@ -15,7 +15,7 @@ nudenet>=3.4
 # eyeguard/clip_assets/text_features.npz (tools/build_text_features.py) — so
 # `transformers` is DEV-ONLY now (just those two tools), never imported at
 # runtime. NO torch / torchvision / transformers in the resident process.
-#   dev-only, to regenerate the model artifacts:  transformers>=4.44,<5  torch
+#   dev-only, to regenerate the model artifacts: see requirements-dev.txt
 
 # Client-side encryption of uploaded review frames (eyeguard/frame_crypto.py)
 # -- so a managed-cloud Supabase breach or anon-key leak can't expose actual

@@ -1,0 +1,5 @@
+# DEV-ONLY: regenerate the ONNX model artifacts (tools/export_clip_onnx.py,
+# tools/build_text_features.py). Never installed into the shipped bundle.
+-r requirements.txt
+transformers>=4.53,<6
+torch

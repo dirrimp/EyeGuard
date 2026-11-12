@@ -16,6 +16,12 @@ APP="${1:-$RUNTIME/EyeGuard-bundled.app}"      # build target (test name by defa
 [ -x "$PY_SRC/bin/python3.12" ] || { echo "Missing prepared python at $PY_SRC" >&2; exit 1; }
 [ -f "$PROJECT_DIR/assets/EyeGuard.icns" ] || { echo "Missing icon — run build_icons.sh" >&2; exit 1; }
 
+for bad in transformers torch huggingface_hub; do
+  if [ -d "$PY_SRC"/lib/python3.12/site-packages/"$bad" ]; then
+    echo "Refusing to bundle dev-only package '$bad' (see requirements-dev.txt). Rebuild with tools/prepare_bundle_python.sh" >&2; exit 1
+  fi
+done
+
 echo "==> Creating bundle skeleton: $APP"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
