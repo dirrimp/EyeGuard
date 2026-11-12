@@ -1,0 +1,58 @@
+name: Purge old review frames
+
+# Replaces the pg_cron job eyeguard-image-retention, which failed on every run
+# because Supabase blocks `delete from storage.objects` (storage.protect_delete:
+# "Use the Storage API instead"). This deletes through the Storage API.
+# See tools/purge_frames.py for exactly what it will and will not delete.
+#
+# Safe by default: a scheduled run only COUNTS (dry run) until the repo variable
+# FRAME_PURGE_ENABLED is set to "true" (Settings -> Secrets and variables ->
+# Actions -> Variables). A manual run deletes only if you tick "apply".
+#
+# SUPABASE_SERVICE_ROLE_KEY is the existing repo Actions secret that
+# publish-manifest.yml already uses. Same boundary: Dad's secret, never in this
+# repo, never on the monitored Mac, never in a coding session. The log prints
+# counts only (this repo is public, so Actions logs are public).
+
+on:
+  schedule:
+    - cron: "17 9 * * *"      # daily, 09:17 UTC (04:17 ET)
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Really delete (leave unticked for a dry run that only counts)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: purge-frames
+  cancel-in-progress: false
+
+jobs:
+  purge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Purge frames older than 7 days
+        env:
+          SUPABASE_URL: https://ucgldleacehxjjwwqomk.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          EVENT: ${{ github.event_name }}
+          INPUT_APPLY: ${{ inputs.apply }}
+          PURGE_ENABLED: ${{ vars.FRAME_PURGE_ENABLED }}
+        run: |
+          MODE=--dry-run
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            [ "$INPUT_APPLY" = "true" ] && MODE=--apply
+          else
+            [ "$PURGE_ENABLED" = "true" ] && MODE=--apply
+          fi
+          python3 tools/purge_frames.py $MODE --days 7 --max-delete 500
