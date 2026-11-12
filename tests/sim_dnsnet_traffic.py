@@ -97,7 +97,7 @@ else:
     json.dump(resolved, open(ipfile, "w"))
 def rule_hit(d):
     c = dn.classify(d)
-    return bool(c and c[0] == "flagged") or any(dn.host_matches(d, x) for x in (dn.VPN_DOMAINS, dn.TOR_DOMAINS, dn.PRIVATE_RELAY, dn.DOH_HOSTS))
+    return bool(c and c[0] == "flagged") or any(dn.host_matches(d, x) for x in (dn.VPN_DOMAINS, dn.TOR_DOMAINS, dn.PRIVATE_RELAY, dn.PRIVATE_RELAY_API, dn.DOH_HOSTS))
 excluded_sites = [d for d in resolved if rule_hit(d)]
 def ip_hit(ips):          # a site whose real address IS a DoH / VPN / Tor address trips the connection rules by definition
     return any(ip in dn.DOH_IPS or dn.vpn_match(ip) or ip in TOR for ip in ips)
