@@ -5,9 +5,19 @@ name: Purge old review frames
 # "Use the Storage API instead"). This deletes through the Storage API.
 # See tools/purge_frames.py for exactly what it will and will not delete.
 #
-# Safe by default: a scheduled run only COUNTS (dry run) until the repo variable
+# Triggers (deliberately NO workflow_dispatch and NO pull_request):
+#   * schedule: daily, always runs the code on main;
+#   * push to main touching these two files: so the merge of a change here gives an
+#     immediate run.
+# A manual "Run workflow" button lets anyone with write access pick ANY branch and
+# run its (edited) copy of this file WITH the secret below. That would let a branch
+# author reach the service_role key, which must stay with Dad alone. Schedule and
+# push-to-main only ever run merged, Dad-reviewed code, the same boundary as
+# publish-manifest.yml.
+#
+# Safe by default: it only COUNTS (dry run) until the repo variable
 # FRAME_PURGE_ENABLED is set to "true" (Settings -> Secrets and variables ->
-# Actions -> Variables). A manual run deletes only if you tick "apply".
+# Actions -> Variables). Deleting is permanent, so read a dry run first.
 #
 # SUPABASE_SERVICE_ROLE_KEY is the existing repo Actions secret that
 # publish-manifest.yml already uses. Same boundary: Dad's secret, never in this
@@ -17,12 +27,11 @@ name: Purge old review frames
 on:
   schedule:
     - cron: "17 9 * * *"      # daily, 09:17 UTC (04:17 ET)
-  workflow_dispatch:
-    inputs:
-      apply:
-        description: "Really delete (leave unticked for a dry run that only counts)"
-        type: boolean
-        default: false
+  push:
+    branches: [main]
+    paths:
+      - "tools/purge_frames.py"
+      - ".github/workflows/purge-frames.yml"
 
 permissions:
   contents: read
@@ -45,14 +54,8 @@ jobs:
         env:
           SUPABASE_URL: https://ucgldleacehxjjwwqomk.supabase.co
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          EVENT: ${{ github.event_name }}
-          INPUT_APPLY: ${{ inputs.apply }}
           PURGE_ENABLED: ${{ vars.FRAME_PURGE_ENABLED }}
         run: |
           MODE=--dry-run
-          if [ "$EVENT" = "workflow_dispatch" ]; then
-            [ "$INPUT_APPLY" = "true" ] && MODE=--apply
-          else
-            [ "$PURGE_ENABLED" = "true" ] && MODE=--apply
-          fi
+          [ "$PURGE_ENABLED" = "true" ] && MODE=--apply
           python3 tools/purge_frames.py $MODE --days 7 --max-delete 500

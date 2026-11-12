@@ -153,6 +153,22 @@ check("the key variable is never in a printed or raised message",
               for ln in output_lines), str([ln for ln in output_lines if "key" in ln]))
 check("defaults to dry run unless --apply", "args.apply" in src and "apply=args.apply" in src)
 
+# ---- the workflow cannot hand the secret to a branch author ----------------
+wf = (Path(__file__).resolve().parent.parent / ".github" / "workflows" / "purge-frames.yml").read_text()
+live = [ln for ln in wf.splitlines() if not ln.lstrip().startswith("#")]
+live_text = "\n".join(live)
+check("workflow has no manual trigger (workflow_dispatch would let a branch run with the secret)",
+      "workflow_dispatch" not in live_text)
+check("workflow has no pull_request / pull_request_target trigger",
+      "pull_request" not in live_text)
+check("workflow runs only on schedule or push to main",
+      "schedule:" in live_text and "branches: [main]" in live_text)
+check("the secret is referenced exactly once (one step env)",
+      live_text.count("secrets.SUPABASE_SERVICE_ROLE_KEY") == 1)
+check("workflow defaults to --dry-run and applies only when FRAME_PURGE_ENABLED is true",
+      "MODE=--dry-run" in live_text and '[ "$PURGE_ENABLED" = "true" ] && MODE=--apply' in live_text)
+check("workflow retention is 7 days and capped", "--days 7" in live_text and "--max-delete 500" in live_text)
+
 print()
 if fails:
     print(f"{len(fails)} FAILED: {fails}")
