@@ -625,6 +625,8 @@ class EyeGuardApp(rumps.App):
                             if not a["keep"]:
                                 continue
                             grade, risk = a["grade"], a["risk"]
+                            if a.get("demote_to_alert"):
+                                result.verdict = Verdict.ALERT
                         record = logger.log(result, frame.display_index,
                                             frame.image, context=ctx,
                                             grade=grade, risk=risk)
@@ -947,7 +949,8 @@ class EyeGuardApp(rumps.App):
             return False
         hay = " ".join(filter(None, [ctx.get("app"), ctx.get("window_title"),
                                      ctx.get("url")])).lower()
-        return any(p.lower() in hay for p in self._risk.get("suppress", []))
+        from .risk import pattern_hits
+        return any(pattern_hits(p, ctx, hay) for p in self._risk.get("suppress", []))
 
     def _drm_service(self, ctx: dict) -> str | None:
         """The DRM streaming service active in this context, if any."""

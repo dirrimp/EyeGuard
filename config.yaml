@@ -388,14 +388,14 @@ ignore:
     - "flags_readable"
     # the macOS login / lock screen — you can't browse anything there, and its
     # avatar/wallpaper false-flags as "a woman in tight clothing"
-    - "loginwindow"
+    - "app:loginwindow"
     # terminal apps show only text, never images, so there's no detection
     # value here -- but shell commands routinely contain secrets/keys, and
     # logging the window title verbatim can leak them into the flags table
     # and partner dashboard. Matches on app name too (is_ignored checks
     # app+url+title together), so this excludes these apps entirely.
-    - "Terminal"
-    - "iTerm2"
+    - "app:Terminal"
+    - "app:iTerm2"
 
 # Context-aware risk layer (no AI): combine the CLIP grade with WHERE it happened
 # to decide whether a flag is worth keeping and how likely it is real. Lets us
@@ -412,28 +412,36 @@ context_risk:
   # because game/nature textures misread as nudity at 0.7-0.9 on YouTube. NudeNet
   # reds (real exposure detected) bypass this and always surface.
   low_risk_red_min_confidence: 0.93
+  # 2026-10-21: a CLIP RED below the bar above is NOT dropped when it is still a confident yellow
+  # (score >= low_risk_min_confidence): it is recorded as YELLOW. Set false for the old drop.
+  low_risk_red_demote: true
 
+  # Entries written "app:Name" match ONLY when the frontmost app's name is exactly Name (a page title
+  # or URL with the word "code" / "striped" / "barcode" cannot trigger them). Every other entry is a
+  # case-insensitive substring of app + window title + URL, as before.
   # SUPPRESS — drop flags here (suggestive content effectively can't occur).
   suppress:
-    - "loginwindow"
-    - "Terminal"
-    - "iTerm"
+    - "app:loginwindow"
+    - "app:Terminal"
+    - "app:iTerm2"
     - "Visual Studio Code"
-    - "Code"            # VS Code window titles
-    - "Xcode"
-    - "Activity Monitor"
-    - "System Settings"
+    - "app:Code"        # VS Code (app name only: a title/URL with the word "code" must NOT suppress)
+    - "app:Xcode"
+    - "app:Activity Monitor"
+    - "app:System Settings"
     - "Claude"          # AI assistant / design+dev work
     - "SQL Editor"      # Supabase / database consoles — text only
     - "supabase.com"
     - "github.com"      # code hosting — text/diffs
     # Your OWN webcam + your own documents — 79 of 117 false flags came from here
-    - "Photo Booth"     # your own webcam feed (you, on camera)
-    - "PowerPoint"      # your own slide decks (wedding/family photo slideshows)
-    - "Keynote"
-    - "Accordance"      # Bible study software
+    - "app:Photo Booth" # your own webcam feed (you, on camera)
+    - "app:Microsoft PowerPoint"  # your own slide decks (wedding/family photo slideshows)
+    - "app:Keynote"
+    - "app:Accordance"  # Bible study software
     - "stripe.com"      # business dashboards / logins
-    - "Stripe"
+    - "- Stripe"
+    - "– Stripe"
+    - "| Stripe"
     - "EHR"
     # Cartoon hide-and-seek game you watch — smooth tan blob characters scored
     # 0.85-0.93 on "butt in tight pants", clearing even the low-risk discount.
@@ -446,11 +454,11 @@ context_risk:
   low_risk:
     # personal apps — your own photos / chats / file previews; nothing there
     # unless EyeGuard is really sure
-    - "Photos"
-    - "Messages"
-    - "Preview"
-    - "Mail"
-    - "Notes"
+    - "app:Photos"
+    - "app:Messages"
+    - "app:Preview"
+    - "app:Mail"
+    - "app:Notes"
     # work / fire-service training platforms (lecture + fireground footage; the
     # instructor walking away from camera misread as "a woman's butt in pants")
     - "fireengineering"

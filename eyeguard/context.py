@@ -130,4 +130,5 @@ def is_ignored(ctx: dict, patterns: list[str]) -> bool:
         return False
     hay = ((ctx.get("window_title") or "") + " "
            + (ctx.get("url") or "") + " " + (ctx.get("app") or "")).lower()
-    return any(p.lower() in hay for p in patterns)
+    from .risk import pattern_hits
+    return any(pattern_hits(p, ctx, hay) for p in patterns)
