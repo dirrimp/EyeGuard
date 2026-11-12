@@ -1,0 +1,12 @@
+# Paths the review agent never reads or reviews (generated, binary, or not code).
+# Review input is SOURCE, DIFFS, SQL and metadata only (see EG-PRIV-01 in rules.md).
+assets/
+eyeguard/clip_assets/
+docs/index.html
+*.svg
+*.png
+*.icns
+*.onnx
+*.npy
+*.pyc
+__pycache__/

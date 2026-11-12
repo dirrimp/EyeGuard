@@ -1,0 +1,31 @@
+# EG-PRIV-01: the review agent must NEVER read these, even if asked. tools/review_context.py refuses them.
+# Captured content, review frames, decrypted material, keys, and live data directories.
+#
+# Matching (tools/review_context.py _match): a pattern ending in "/" is a directory name at any depth;
+# any other pattern is an fnmatch glob on the full path or the file name, and "*" also matches "/".
+# Keep patterns specific to WHERE captured content lives. The old catch-all `*frames*` withheld source files
+# such as tools/purge_frames.py (code, not content), so the review agent could not read the code it was reviewing.
+# tests/test_review_agent.py pins both sides: the entries below must stay, and source files must not match.
+
+# live data and captured content
+EyeGuard-data/
+flagged_frames/
+frames/
+flags.jsonl*
+flags_report*
+pending*
+*.enc
+*.age
+*.jpg
+*.jpeg
+*.heic
+*.webp
+
+# keys and secrets
+*private*key*
+*service_role*
+.supabase_secret
+*.pem
+*.p12
+*.mobileconfig
+.env
