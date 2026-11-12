@@ -53,6 +53,7 @@ def build_detector(cfg: dict, verbose: bool = True) -> Detector:
             tile_grid=a.get("tile_grid", 1),
             tile_penalty=a.get("tile_penalty", 0.12),
             min_content_std=a.get("min_content_std", 12.0),
+            tile_red_nudenet_min=a.get("tile_red_nudenet_min"),
         )
         if verbose:
             print("[arbiter] loading CLIP (onnxruntime, ~560MB resident)...")

@@ -110,7 +110,8 @@ class ClipArbiter:
                  safe_prompts: list[str], red_threshold: float = 0.40,
                  yellow_threshold: float = 0.30, model_id: str | None = None,
                  tile_grid: int = 1, tile_penalty: float = 0.12,
-                 min_content_std: float = 12.0):
+                 min_content_std: float = 12.0,
+                 tile_red_nudenet_min: float | None = None):
         # Two tiers: explicit_prompts -> RED (FLAGGED), suggestive_prompts ->
         # YELLOW (ALERT). safe_prompts give CLIP neutral concepts to prefer.
         self.explicit_prompts = explicit_prompts
@@ -131,6 +132,12 @@ class ClipArbiter:
         # Min grayscale std for a crop to be considered "has content" worth
         # scoring. Below this = blank/uniform -> never flags.
         self.min_content_std = min_content_std
+        # Tile-only CLIP RED corroboration (None = off, the historical behaviour).
+        # A RED reached ONLY by a zoomed tile (the full frame does not itself reach RED)
+        # stays RED only if NudeNet also saw at least this much exposure somewhere in the
+        # frame; otherwise it is reported as YELLOW. Full-frame REDs and NudeNet's own
+        # >= flag_threshold REDs are never touched.
+        self.tile_red_nudenet_min = tile_red_nudenet_min
         self._text_features = None
         self._preprocess_images = None
         self._n_red = len(explicit_prompts)
@@ -214,7 +221,8 @@ class ClipArbiter:
                                          int(y) + th)))
         return crops
 
-    def arbitrate(self, image: Image.Image) -> tuple[Verdict, str]:
+    def arbitrate(self, image: Image.Image,
+                  nudenet_top: float = 1.0) -> tuple[Verdict, str]:
         if not self.available:
             return Verdict.REVIEW, "arbiter-unavailable"
         try:
@@ -260,6 +268,11 @@ class ClipArbiter:
 
             red_hit, red_crop, red_mass = self._tier_hit(red_per_crop, red_thr)
             yel_hit, yel_crop, yel_mass = self._tier_hit(combined, yel_thr)
+            demoted = False
+            if (red_hit and self.tile_red_nudenet_min is not None
+                    and not bool(red_per_crop[0] >= red_thr[0])      # full frame did not reach RED itself
+                    and nudenet_top < self.tile_red_nudenet_min):    # and NudeNet saw no exposure
+                red_hit, demoted = False, True
         except Exception as e:
             return Verdict.REVIEW, f"arbiter-error:{type(e).__name__}"
 
@@ -272,7 +285,8 @@ class ClipArbiter:
             best = int(probs[yel_crop, r:r + y].argmax())
             where = "full" if yel_crop == 0 else f"tile{yel_crop}"
             return Verdict.ALERT, \
-                f"clip-yellow:{yel_mass:.2f}:{where}:{self.suggestive_prompts[best][:24]}"
+                f"clip-yellow:{yel_mass:.2f}:{where}:{self.suggestive_prompts[best][:24]}" \
+                + ("(tile-red demoted)" if demoted else "")
         return Verdict.SAFE, f"clip:r{red_mass:.2f}/y{yel_mass:.2f}"
 
     @staticmethod
@@ -305,7 +319,7 @@ class Detector:
         # longer gates it — that gating was causing missed gym-clothes / gestures
         # / clothed-but-revealing frames NudeNet didn't register as body regions.
         if self.arbiter is not None:
-            verdict, reason = self.arbiter.arbitrate(image)
+            verdict, reason = self.arbiter.arbitrate(image, nudenet_top=result.top_score)
             result.verdict = verdict
             result.arbiter_answer = reason
             result.reason = (f"{result.reason} -> {reason}"
