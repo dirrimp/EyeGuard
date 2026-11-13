@@ -8,7 +8,7 @@ Paths matching .review/ignore.txt are skipped. Nothing here reads captured data.
 Usage: python3 tools/review_context.py [BASE_REF]      (default origin/main; diff is BASE...HEAD)
        python3 tools/review_context.py --diff-file F  (review a saved unified diff; used by tests)
 """
-import fnmatch, re, subprocess, sys
+import base64, fnmatch, json, re, subprocess, sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -87,10 +87,37 @@ MECH = [
     ("EG-COV-04", "blocker", "*", MAIL_RX, "mail path outside the three SQL senders"),
     ("EG-OPS-02", "major", "*.sh", r"chmod\s+-R", "blanket chmod; git modes are the source of truth"),
     ("EG-OPS-03", "major", "*", r"(~|/Users/[^/\s]+)/(Desktop|Documents|Downloads)/", "app/launchd path under a TCC-protected folder"),
-    ("EG-SEC-02", "blocker", "*", r"service_role|BEGIN (RSA |EC |)PRIVATE KEY|sb_secret_", "secret/private key material in the repo"),
+    # EG-SEC-02 matches KEY MATERIAL, not the secret's NAME: SUPABASE_SERVICE_ROLE_KEY in an env block, a
+    # `secrets.` reference or a comment is how code is supposed to use the key. Three shapes:
+    #  - a PEM private-key header
+    #  - a new-style Supabase secret key: sb_secret_ + 16 or more key characters
+    #  - a long literal assigned to a service_role-named setting (needs a digit: keeps "your-key-here" out)
+    # A legacy service_role JWT is caught by jwt_service_role() below (its payload is base64, so the text
+    # "service_role" never appears in the token). Hits on these are REDACTED in the output (see mechanical()).
+    ("EG-SEC-02", "blocker", "*", r"BEGIN (RSA |EC |OPENSSH |)PRIVATE KEY|sb_secret_[A-Za-z0-9_\-]{16,}"
+     r"|service_role\w*[\"']?\s*[:=]\s*[\"']?(?=[A-Za-z0-9_.\-]*\d)[A-Za-z0-9_.\-]{24,}",
+     "secret/private key material in the repo"),
     ("EG-SEC-01", "blocker", "*.py", r"(print|log\w*\.\w+|logging\.\w+)\(.*\b(password|secret|token|api_key|private_key)\b", "possible secret value written to a log/stdout"),
 ]
 ALLOW_MARK = "review-ok:"  # "review-ok: EG-XXX-NN <reason>" is ANNOTATED, never downgraded: severity stays, a human/PR body must justify it
+
+
+SEC02_MSG = "secret/private key material in the repo"
+_JWT = re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.(eyJ[A-Za-z0-9_-]{8,})\.[A-Za-z0-9_-]{8,}")
+
+
+def jwt_service_role(line):
+    """True if the line holds a JWT whose payload says role=service_role. The anon key is also a JWT
+    (public, deliberately in the repo), so the role is decoded, not guessed from the shape."""
+    for m in _JWT.finditer(line):
+        try:
+            seg = m.group(1)
+            payload = json.loads(base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4)))
+        except Exception:
+            continue
+        if isinstance(payload, dict) and payload.get("role") == "service_role":
+            return True
+    return False
 
 
 def mechanical(files):
@@ -101,7 +128,10 @@ def mechanical(files):
                 if fnmatch.fnmatch(path.rsplit("/", 1)[-1], glob) and re.search(rx, l, re.I):
                     if ALLOW_MARK in l and rid in l:
                         msg += " (author marked review-ok; severity unchanged, justify in PR body)"
-                    hits.append((rid, sev, path, l.strip()[:140], msg))
+                    shown = "[line withheld: possible key material]" if rid == "EG-SEC-02" else l.strip()[:140]
+                    hits.append((rid, sev, path, shown, msg))
+            if jwt_service_role(l):
+                hits.append(("EG-SEC-02", "blocker", path, "[line withheld: possible key material]", SEC02_MSG + " (service_role JWT)"))
     return hits
 
 

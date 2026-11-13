@@ -2,7 +2,7 @@
 """Offline test for the review agent's mechanical layer: planted violations are caught, a clean diff passes,
 denylisted paths are withheld (EG-PRIV-01), and every rule has the required fields.
 No docker, no network, no model. Run: python3 tests/test_review_agent.py"""
-import re, sys
+import base64, json, re, sys
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -25,7 +25,41 @@ check("EG-COV-02 swallowed except", "EG-COV-02" in ids(diff("eyeguard/x.py", "  
 check("EG-COV-04 resend call", "EG-COV-04" in ids(diff("eyeguard/x.py", "requests.post('https://api.resend.com/emails')")))
 check("EG-OPS-02 chmod -R", "EG-OPS-02" in ids(diff("deploy/x.sh", "chmod -R 755 /opt/x")))
 check("EG-OPS-03 Desktop path", "EG-OPS-03" in ids(diff("deploy/x.plist", "<string>/Users/jonah/Desktop/EyeGuard/run.sh</string>")))
-check("EG-SEC-02 service_role", "EG-SEC-02" in ids(diff("config.yaml", "key: service_role_abc")))
+# EG-SEC-02: fires on KEY MATERIAL, never on the secret's name. Fakes are built at run time so this file
+# holds no key-shaped text. (The old rule matched the bare word service_role: it flagged every env block that
+# NAMED the secret, and it never matched a real legacy service_role JWT, whose payload is base64.)
+def b64(o): return base64.urlsafe_b64encode(json.dumps(o).encode()).decode().rstrip("=")
+def fake_jwt(role): return "eyJ" + b64({"alg": "HS256"})[3:] + "." + b64({"iss": "supabase", "role": role}) + "." + "s" * 20
+SRV = "service" + "_role"
+planted = {
+    "new-style secret key": "key = '" + "sb_" + "secret_" + "a1B2c3D4" * 3 + "'",
+    "service_role JWT": "SUPABASE_KEY=" + fake_jwt(SRV),
+    "service_role JWT in YAML": "  token: \"" + fake_jwt(SRV) + "\"",
+    "PEM private key header": "-----BEGIN " + "PRIVATE KEY-----",
+    "RSA private key header": "-----BEGIN RSA " + "PRIVATE KEY-----",
+    "literal assigned to the setting": "supabase_" + SRV + "_key: " + "9f8e7d6c5b4a3" * 2,
+    "literal in an env file": "SUPABASE_" + SRV.upper() + "_KEY=" + "Ab3dEf6hIj9lMn2pQr5tUv8x",
+}
+for name, line in planted.items():
+    check(f"EG-SEC-02 catches {name}", "EG-SEC-02" in ids(diff("config.yaml", line)))
+names_only = [
+    "      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}",
+    "key = os.environ[\"SUPABASE_SERVICE_ROLE_KEY\"]",
+    "# the service_role key stays with Dad; the Mac only holds the anon key",
+    "needs SUPABASE_SERVICE_ROLE_KEY in env (never printed)",
+    "SUPABASE_SERVICE_ROLE_KEY=your-service-role-key-here",
+    "select * from pg_roles where rolname = 'service_role';",
+    "grant execute on function public.eg_heartbeat to " + SRV + ";",
+    "token = " + fake_jwt("anon"),
+    "export SUPABASE_URL=https://example.supabase.co",
+]
+for line in names_only:
+    check(f"EG-SEC-02 ignores a name/reference/anon key: {line[:48]!r}", "EG-SEC-02" not in ids(diff("deploy/x.sh", line)))
+hit = rc.mechanical(rc.split_diff(diff("config.yaml", planted["service_role JWT"]))[0])
+check("a key hit never echoes the line (redacted in the review input)",
+      hit and all("eyJ" not in h[3] and "withheld" in h[3] for h in hit)
+      and "eyJ" not in rc.build(diff("config.yaml", planted["service_role JWT"]))[0])
+check("EG-SEC-02 still a blocker", all(h[1] == "blocker" for h in hit))
 check("EG-SEC-01 secret logged", "EG-SEC-01" in ids(diff("eyeguard/x.py", "log.info(f'auth with {password}')")))
 # clean diff passes
 clean = diff("eyeguard/x.py", "def add(a, b):", "    return a + b")
