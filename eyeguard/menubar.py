@@ -24,6 +24,7 @@ from pathlib import Path
 import rumps
 
 from .capture import ScreenCapturer
+from .capture_permission import PermissionWatch, screen_capture_permitted
 from .context import capture_context, frontmost_is_self, is_ignored
 from .extensions import scan as scan_extensions, is_questionable
 from .vm_monitor import scan as scan_vm
@@ -592,6 +593,9 @@ class EyeGuardApp(rumps.App):
         # as "frozen" after 2 minutes of a genuinely unchanging but healthy
         # capture) this long while up = actually blind.
         FROZEN_SECONDS = 120
+        # A rejected Screen Recording grant returns the wallpaper (not black, not frozen), so ask
+        # macOS directly (booleans only, see capture_permission.py).
+        perm_watch = PermissionWatch()
         # GREEN activity trail: how often to sample the active app/site, and how
         # often to re-log the SAME location (a keepalive proving continued use).
         act_sample = int(self._activity.get("sample_seconds", 20))
@@ -664,7 +668,8 @@ class EyeGuardApp(rumps.App):
                         last_growth_time = now
                     frozen = (now - last_growth_time) > FROZEN_SECONDS
                     is_black = bright is not None and bright < 4.0
-                    ok = not is_black and not frozen
+                    no_permission = perm_watch.update(screen_capture_permitted())
+                    ok = not is_black and not frozen and not no_permission
                     with self._lock:
                         self._last_brightness = bright
                         self._screen_ok = ok
@@ -673,11 +678,13 @@ class EyeGuardApp(rumps.App):
                     if not ok:  # only log problems, not healthy probes
                         print(f"[probe] PROBLEM brightness={bright} "
                               f"frames={frames} frozen={frozen} "
+                              f"permission_denied={no_permission} "
                               f"(no screen access?)", flush=True)
                     if ok != self._last_probe_ok:  # log the transition, durably
                         if not ok:
                             self._log_diag(f"probe PROBLEM: brightness={bright} "
-                                           f"frames={frames} frozen={frozen}")
+                                           f"frames={frames} frozen={frozen} "
+                                           f"permission_denied={no_permission}")
                         else:
                             self._log_diag("probe recovered: screen_ok back to True")
                         self._last_probe_ok = ok
