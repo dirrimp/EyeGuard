@@ -697,6 +697,11 @@ encryption:
     FjNGI01CTj26b3opN5/eXuN6gogXA8ylzxZDTPopQwrvXovgy6B/kg1TCndQLmzm
     p1XTZfGXMQI6LaHl3tXENlcCAwEAAQ==
     -----END PUBLIC KEY-----
+  # Approved extra recipients (2026-11-16): public keys of partner devices that may view review frames in the
+  # dashboard. EMPTY = frames are encrypted for the key above only, exactly as before. Each entry is
+  # {label: "...", public_key_pem: |...} and is added by a pull request that Dad merges; it applies to frames
+  # uploaded AFTER the Mac deploys it. See docs/BROWSER-IMAGE-VIEWING-DESIGN.md. Max 7 (the key above is #1).
+  recipients: []
 
 file_integrity:
   enabled: true
