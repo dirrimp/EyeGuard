@@ -25,7 +25,9 @@ window.supabase={createClient:()=>({
    :t==="mdm_incidents"?{select:()=>({order:()=>({limit:async()=>window.__incres||({data:window.__inc})})})}:{select:()=>({order:()=>({limit:async()=>({data:[]})})})},
  storage:{from:()=>({createSignedUrls:async()=>({data:[]})})}})};
 </script>`;
-const html = page.replace(/<script src="https:\/\/cdn\.jsdelivr\.net[^"]*"><\/script>/, () => STUB);
+const dashJs = fs.readFileSync(path.join(__dirname, "..", "docs", "dashboard.js"), "utf8");
+const html = page.replace(/<script src="vendor\/supabase-js[^"]*"[^>]*><\/script>/, () => STUB)
+  .replace('<script src="dashboard.js"></script>', () => "<script>" + dashJs + "</script>");
 
 async function boot(setup) {
   const dom = new JSDOM(html, { runScripts: "dangerously", url: "https://example.test/", pretendToBeVisual: true,

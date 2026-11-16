@@ -2,7 +2,7 @@
 # Review input is SOURCE, DIFFS, SQL and metadata only (see EG-PRIV-01 in rules.md).
 assets/
 eyeguard/clip_assets/
-docs/index.html
+docs/vendor/
 *.svg
 *.png
 *.icns
