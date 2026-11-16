@@ -14,12 +14,29 @@ Word-boundary matching avoids false hits like "sex" inside "Middlesex".
 
 from __future__ import annotations
 
+import contextlib
 import io
 import re
 
 
 def ocr(pil_image) -> str:
-    """Recognize on-screen text via Apple Vision (on-device). '' on any failure."""
+    """Recognize on-screen text via Apple Vision (on-device). '' on any failure.
+
+    Runs inside an autorelease pool. The agent calls this from a plain Python thread, where nothing
+    drains the Objective-C autorelease pool, so every call leaked ~0.6 MB of Vision/NSData objects
+    (measured 2026-11-16: 300 calls = +250 MB without a pool, flat at ~95 MB with one). At one OCR
+    every 8 s while video is changing that is ~250 MB/h, and it is what kept tripping the 1200 MB
+    memory guard. The returned text is plain Python str, so it is safe to return after the pool drains."""
+    try:
+        import objc
+        pool = objc.autorelease_pool
+    except Exception:           # no PyObjC (non-macOS / tests): same behaviour as before
+        pool = contextlib.nullcontext
+    with pool():
+        return _ocr(pil_image)
+
+
+def _ocr(pil_image) -> str:
     try:
         import Vision
         import Foundation
