@@ -111,7 +111,7 @@ check("decrypt_frame.py still decrypts old v1 files", r.returncode == 0 and r.st
 # ---- config + wiring ----
 import yaml
 cfg = yaml.safe_load((ROOT / "config.yaml").read_text())
-check("config.yaml ships with recipients: [] (identical behaviour until Dad adds one)", cfg["encryption"]["enabled"] is True and cfg["encryption"]["recipients"] == [])
+check("config.yaml has an encryption.recipients list (its entries are validated by tests/test_config_recipients.py)", cfg["encryption"]["enabled"] is True and isinstance(cfg["encryption"]["recipients"], list))
 mb = (ROOT / "eyeguard" / "menubar.py").read_text()
 check("menubar passes the recipients through", "encryption_extra_public_keys=extra" in mb)
 

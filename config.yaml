@@ -701,7 +701,33 @@ encryption:
   # dashboard. EMPTY = frames are encrypted for the key above only, exactly as before. Each entry is
   # {label: "...", public_key_pem: |...} and is added by a pull request that Dad merges; it applies to frames
   # uploaded AFTER the Mac deploys it. See docs/BROWSER-IMAGE-VIEWING-DESIGN.md. Max 7 (the key above is #1).
-  recipients: []
+  recipients:
+    - label: "Dad's computer (browser key, enrolled 2026-11-16)"
+      public_key_pem: |
+        -----BEGIN PUBLIC KEY-----
+        MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAwLHBG55Srf9EJO+wHbQ4
+        BwnMvvbV4wPh/tcheqFMxCafKIRE6YzzDUxJBTmhtguZc7g8KTssW7ihGjA7OcTT
+        LZAVNd5t1O3D8Y32EacHqNL+oGKjKiBWlXa3eW92Ja5K3arWwhQtpZI4k7U4zXLh
+        amDH4Mvl1CI2EyKdnPx3beW7c8Uw36e9X3EQ1b5pEPRc4Q83xjQVg4Dp3QAyow/H
+        3Jol+gAHEE7MOqdSuLscAkEtu1DAk5Rs/e51NN7filfe7pp6/MUSmDiJGSsBeuHq
+        y/4lQ5vF7zWsluWOcu4UV8vvKYuh11k+3q3FXyWPrax5sJVSNLvte2tgVkOrL1Fj
+        yXzqzhYi9tRYJUhOjQ/5NC6N7KVrOfU0E5Miz6G3iw7Np7uad+20p+U27uMTEZAa
+        leHtytEbwsDiz7rQp9v7pVpE0jRRthwJtQeVF2+l86hVutumPi9F4Tx7OH59f6Yy
+        SXwIpk+RamhaNBggnc/lrN06zGlY8Pr0skCiv6sqM8mzAgMBAAE=
+        -----END PUBLIC KEY-----
+    - label: "Dad's phone (browser key, enrolled 2026-11-16)"
+      public_key_pem: |
+        -----BEGIN PUBLIC KEY-----
+        MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEArFQFrfXYzrDfKSPmLGG2
+        +AcO9LNEDAY3Ph7HsM/5St/G1NQ0XF8ZEQDj9RCavPXcDblpfKnzf9tZPl24N2+n
+        SoBxr4geCTsmyTt8SQBtAyZ7IsJ1+2bti1e5/wdzRa/6mq7Zc6Ux0CfINHSRhEO0
+        IYoAHJZ/xFiQWwhDxkBHxGMnmM5Psd6gy6k9n3Rj6Nu81wgp3+a04TR8an5mxxbT
+        9lpBBugf3B4ffiz40H0t0/v4GPmAnvD1l8tgXHd/iN4CM6YXA3sivg69YA1vWu0j
+        DBcJxswV8ue4f/OCaD1qsi1USsv5w8SCLMZcpuDoTUmrkLt3E9lfrNyGzOwtv53u
+        oPZLLTbMl7hSKPmR+hHOzJgLA//5EIASzJ17kbEX46tQcTsuE3qBUXcJ7dnJMM/c
+        xxrLNb8d5Mr0gAIYJoUcRNsqzTucsk1nNAqkFEC6nmeYcXq/AVy8sDHd8PCNLXur
+        LARhr4A5Sq25x7K826At6uVuHig8GSfrbdj0qYJZPtTrAgMBAAE=
+        -----END PUBLIC KEY-----
 
 file_integrity:
   enabled: true
