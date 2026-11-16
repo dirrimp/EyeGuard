@@ -60,7 +60,8 @@ def _score(reason: str) -> float | None:
 class SupabaseUploader:
     def __init__(self, url: str, api_key: str, pending_path: str,
                  retry_seconds: int = 60, heartbeat: bool = True,
-                 encryption_public_key_pem: str | None = None):
+                 encryption_public_key_pem: str | None = None,
+                 encryption_extra_public_keys: list | None = None):
         self.base = url.rstrip("/")
         self.api_key = api_key
         self.pending_path = Path(pending_path)
@@ -72,6 +73,10 @@ class SupabaseUploader:
         # private key (never this device). None = upload as plain JPEG,
         # same as before this existed.
         self.encryption_public_key_pem = encryption_public_key_pem
+        # Extra approved recipients (partners' browser keys, merged into config.yaml by Dad). Empty =
+        # exactly the old behaviour (single-recipient v1 frames). Dad's key above is ALWAYS recipient #0;
+        # a bad extra key is skipped and logged, never allowed to stop a frame from being encrypted for Dad.
+        self.encryption_extra_keys = self._valid_extra_keys(encryption_extra_public_keys or [])
         self._suspended = False  # True between sleep/power-off and wake
         self._status_provider = None  # returns {screen_ok, frames_analyzed}
         self._heartbeat_failing = False  # logged on first failure + recovery only
@@ -669,12 +674,40 @@ class SupabaseUploader:
             # JPEG, so a data breach or anyone holding the anon key can't see
             # actual frame content, only whoever holds the private key
             # (never this device -- see eyeguard/frame_crypto.py).
-            from .frame_crypto import encrypt_frame
-            data = encrypt_frame(data, self.encryption_public_key_pem)
+            from .frame_crypto import encrypt_frame, encrypt_frame_v2
             remote += ".enc"
+            if self.encryption_extra_keys:
+                data = encrypt_frame_v2(
+                    data, [self.encryption_public_key_pem] + self.encryption_extra_keys, remote)
+            else:
+                data = encrypt_frame(data, self.encryption_public_key_pem)
         self._put_image(remote, data)                         # raises on failure
         self._post_row(self._row(rec, remote))               # raises on failure
         return True
+
+    def _valid_extra_keys(self, pems: list) -> list:
+        """Keep only usable extra recipient keys (RSA >= 2048, at most MAX_RECIPIENTS - 1, no duplicates of
+        Dad's key). Anything else is logged and skipped: encryption for Dad must never depend on them."""
+        from .frame_crypto import MAX_RECIPIENTS, key_id, load_recipient
+        good, seen = [], set()
+        try:
+            seen.add(key_id(load_recipient(self.encryption_public_key_pem))) if self.encryption_public_key_pem else None
+        except Exception:
+            pass
+        for i, pem in enumerate(pems):
+            try:
+                kid = key_id(load_recipient(pem))
+            except Exception as e:
+                self._log_diag(f"encryption recipient #{i + 1} ignored: {type(e).__name__}")
+                continue
+            if kid in seen:
+                continue
+            if len(good) >= MAX_RECIPIENTS - 1:
+                self._log_diag(f"encryption recipient #{i + 1} ignored: more than {MAX_RECIPIENTS} recipients")
+                continue
+            seen.add(kid)
+            good.append(pem)
+        return good
 
     def _row(self, rec: dict, remote_path: str) -> dict:
         seed = f"{rec.get('timestamp')}|{rec.get('reason')}|{rec.get('display')}"
