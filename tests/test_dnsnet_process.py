@@ -128,7 +128,9 @@ check("a VPN-provider LOOKUP is observed, not emailed", not any("nordvpn" in r f
 check("Tor guard contact -> red", any("Tor entry relay or default bridge contacted 185.220.101.7 from Jonahs-Mac: 192.168.8.150" in r for r in reasons))
 check("DoT attempt -> red", any("DNS-over-TLS/QUIC attempt (port 853) 1.2.3.4:853 from Jonahs-Mac: 192.168.8.150" in r for r in reasons))
 check("WireGuard handshake on 443 -> red", any("WireGuard tunnel handshake to the internet 5.5.5.5:443" in r for r in reasons))
-check("every row is flagged / Network / Likely", all(r["verdict"] == "flagged" and r["app"] == "Network" and r["grade"] == "Likely" for r in rows))
+check("every row is Network; emailed rows are flagged/Likely, grouped follow-ups are yellow/Possible and say so",
+      all(r["app"] == "Network" and ((r["verdict"] == "flagged" and r["grade"] == "Likely" and "grouped" not in r["reason"])
+                                      or (r["verdict"] == "alert" and r["grade"] == "Possible" and "grouped" in r["reason"])) for r in rows))
 check("Jada's tunnel address is evaluated like everyone else's",
       any("explicit domain pornhub.com from Jadas-Phone: 10.1.0.5" in r for r in reasons) and any("Tor entry relay or default bridge contacted 185.220.101.7 from Jadas-Phone" in r for r in reasons), str(reasons))
 check("the phone's tunnel to the router's own public address (at home) raises nothing", not any("73.43.190.194" in r for r in reasons), str(reasons))

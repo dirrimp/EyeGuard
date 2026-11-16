@@ -59,7 +59,7 @@ TOR = {"185.220.101.7"}
 
 
 def reset(alive=None, covered=None):
-    POSTED.clear(); dn._SEEN.clear(); dn._RECENT_DNS.clear()
+    POSTED.clear(); dn._SEEN.clear(); dn._RECENT_DNS.clear(); dn._GROUP.clear(); dn._PENDING.clear()
     for k in ("sni_seen", "sni_unparsed", "sni_dns_dup"):
         dn._STATS.pop(k, None)
     dn._STATS.update({"dns_queries": 0, "dns_classified": 0, "alerts": {}, "observed": {},
@@ -289,8 +289,12 @@ check("matches first/last address of a range and a single host",
 check("just outside a range does not match", not any(dn.vpn_match(i, tabs) for i in ("2.26.156.255", "2.26.159.0", "5.5.5.4", "5.5.5.6", "8.8.9.0")))
 check("private/garbage addresses never match", not any(dn.vpn_match(i, tabs) for i in ("10.1.2.3", "192.168.1.5", "127.0.0.1", "nonsense", "")))
 dn._VPN.update(starts=st_, ends=en_)
-reset(); r = dn.on_flow("192.168.8.150", "2.26.157.9", 443, "tcp", LOCAL, TOR)
-check("TCP connection to a known VPN server alerts as vpn-ip", r == ["alerted"] and "known VPN server contacted 2.26.157.9" in POSTED[0]["reason"])
+reset(); r = dn.on_flow("192.168.8.150", "2.26.157.9", 443, "tcp", LOCAL, TOR, now=500.0)
+check("TCP/443 to a known VPN server is held for its TLS name (2026-11-16), not alerted at once", r == [] and POSTED == [])
+r = dn.sweep_pending(now=505.0)
+check("...and with no provider name by then it alerts as vpn-ip, as before", r == ["alerted"] and "known VPN server contacted 2.26.157.9" in POSTED[0]["reason"])
+reset(); r = dn.on_flow("192.168.8.150", "2.26.157.9", 1194, "tcp", LOCAL, TOR)
+check("a TCP connection to a known VPN server on another port alerts at once", "alerted" in r and any("known VPN server contacted 2.26.157.9" in p["reason"] for p in POSTED))
 reset(); check("UDP to a known VPN server alerts too", dn.on_flow("192.168.8.150", "5.5.5.5", 51820, "udp", LOCAL, TOR).count("alerted") == 2)
 reset(); check("an ordinary destination is silent", dn.on_flow("192.168.8.150", "93.184.216.34", 443, "tcp", LOCAL, TOR) == [])
 reset(); check("the router/G11 are never 'VPN servers'", dn.on_flow("10.1.0.2", "192.168.8.231", 443, "tcp", LOCAL, TOR) == [])
@@ -410,7 +414,9 @@ check("spacing grows 30 min -> 2 h -> 8 h -> daily", [round((b - a) / 3600, 1) f
 check("it keeps reminding at least daily after that", all((b - a) <= 86400 + 300 for a, b in zip(times[3:], times[4:])))
 check("repeats are marked, the first is not", "[repeat" not in POSTED[0]["reason"] and "[repeat #2]" in POSTED[1]["reason"] and "[repeat #3]" in POSTED[2]["reason"])
 reset(); dn.on_flow("192.168.10.20", "8.8.8.8", 443, "tcp", LOCAL, TOR, now=0.0)
-check("a different target from the same device alerts immediately", dn.on_flow("192.168.10.20", "1.1.1.1", 443, "tcp", LOCAL, TOR, now=60.0) == ["alerted"])
+check("a different target from the same device within 10 min is still sent, as a yellow row (grouped, 2026-11-16)",
+      dn.on_flow("192.168.10.20", "1.1.1.1", 443, "tcp", LOCAL, TOR, now=60.0) == ["grouped"]
+      and POSTED[-1]["verdict"] == "alert" and "1.1.1.1" in POSTED[-1]["reason"])
 check("a different device alerts immediately", dn.on_flow("192.168.10.21", "8.8.8.8", 443, "tcp", LOCAL, TOR, now=61.0) == ["alerted"])
 reset(); dn.on_flow("192.168.10.20", "8.8.8.8", 443, "tcp", LOCAL, TOR, now=0.0); dn.on_flow("192.168.10.20", "8.8.8.8", 443, "tcp", LOCAL, TOR, now=1900.0)
 check("after two quiet days it is a new episode again (30 min gap, no repeat marker)",
