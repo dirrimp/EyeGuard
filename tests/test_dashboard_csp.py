@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""The partner dashboard (docs/index.html) must keep its Content-Security-Policy honest.
-Offline, stdlib only. Run: python3 tests/test_dashboard_csp.py        (check)
-                           python3 tests/test_dashboard_csp.py --fix  (refresh the inline-script hash after an edit)"""
+"""The partner dashboard (docs/index.html + docs/dashboard.js) must keep its Content-Security-Policy honest.
+Offline, stdlib only. Run: python3 tests/test_dashboard_csp.py"""
 import base64, hashlib, re, sys
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
@@ -12,30 +11,21 @@ def check(name, ok, detail=""):
     print(f"  [{'ok  ' if ok else 'FAIL'}] {name}" + (f" -- {detail}" if detail and not ok else ""))
     if not ok: fails.append(name)
 
-def inline_hash(html):
-    m = re.findall(r"<script>(.*?)</script>", html, re.S)
-    assert len(m) == 1, f"expected exactly one inline script, found {len(m)}"
-    return base64.b64encode(hashlib.sha256(m[0].encode()).digest()).decode()
-
 html = PAGE.read_text()
-if "--fix" in sys.argv:
-    new = re.sub(r"'sha256-[A-Za-z0-9+/=]+'", f"'sha256-{inline_hash(html)}'", html, count=1)
-    PAGE.write_text(new); print("CSP script hash refreshed"); sys.exit(0)
-
 csp = re.search(r'<meta http-equiv="Content-Security-Policy" content="([^"]+)"', html)
 check("a Content-Security-Policy meta tag exists", bool(csp))
 c = csp.group(1) if csp else ""
 d = dict(x.strip().split(" ", 1) for x in c.split(";") if x.strip())
 check("default-src is 'none'", d.get("default-src") == "'none'")
-check("script-src is 'self' plus exactly one hash, no unsafe-inline / unsafe-eval / remote host",
-      re.fullmatch(r"'self' 'sha256-[A-Za-z0-9+/=]+'", d.get("script-src", "")) is not None)
-check("the script hash matches the inline script (re-run with --fix after editing it)",
-      f"'sha256-{inline_hash(html)}'" in d.get("script-src", ""))
+check("script-src is exactly 'self' (no hash to go stale, no unsafe-inline / unsafe-eval / remote host)",
+      d.get("script-src") == "'self'")
+check("the page has no inline script at all", not re.search(r"<script(?![^>]*\ssrc=)[^>]*>", html))
+check("the dashboard script is an external same-origin file", '<script src="dashboard.js"></script>' in html and (ROOT / "docs" / "dashboard.js").exists())
 check("network only to the project host", d.get("connect-src") == f"https://{HOST} wss://{HOST}")
 check("images only from this origin, data:, blob: and the project host", d.get("img-src") == f"'self' data: blob: https://{HOST}")
 check("no objects, no base-uri, no form posts", d.get("object-src") == "'none'" and d.get("base-uri") == "'none'" and d.get("form-action") == "'none'")
 check("no inline event handler attributes in the markup", not re.search(r"\son[a-z]+\s*=\s*[\"']", re.sub(r"<script>.*?</script>", "", html, flags=re.S)))
-js = re.findall(r"<script>(.*?)</script>", html, re.S)[0]
+js = (ROOT / "docs" / "dashboard.js").read_text()
 check("no generated markup with an inline handler either", not re.search(r"""<[a-z]+[^>]*\son[a-z]+\s*=""", js))
 check("no external script or stylesheet", not re.search(r"""<(script|link)[^>]+(src|href)=["']https?://""", html))
 check("the Supabase client is vendored, version-pinned and has an integrity hash",
