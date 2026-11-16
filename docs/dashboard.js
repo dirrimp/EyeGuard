@@ -155,7 +155,9 @@ async function load(){
   }
 
   // signed URLs for the images (private bucket)
-  const paths = rows.filter(r=>r.image_path).map(r=>r.image_path);
+  // Encrypted frames (.enc) are ciphertext: a browser <img> cannot show them, so they are not fetched here.
+  const isEnc = p => /\.enc$/i.test(p||"");
+  const paths = rows.filter(r=>r.image_path && !isEnc(r.image_path)).map(r=>r.image_path);
   const signed = {};
   if(paths.length){
     const { data:sd } = await sb.storage.from("frames").createSignedUrls(paths, 3600);
@@ -208,7 +210,9 @@ function card(r, dt, signed){
   const gcls = {Likely:"g-hi",Possible:"g-mid",Borderline:"g-lo"}[r.grade]||"";
   const grade = r.grade? `<span class="grade ${gcls}">${esc(r.grade)}</span>` : "";
   const url = r.image_path && signed[r.image_path];
-  const img = url? `<img class="thumb" src="${url}" loading="lazy">` : "";
+  const img = isEnc(r.image_path)
+    ? `<div class="thumb-enc"><b>&#128274; Image is encrypted</b><small>Opens only on a device that holds the viewing key</small></div>`
+    : (url? `<img class="thumb" src="${url}" loading="lazy">` : "");
   const detail = esc((rs.split(/—(.+)/)[1]||"").trim());
   const what = phone ? esc(rs.split(/:(.+)/)[1]||"").trim()+" ("+esc(r.app||"iPhone")+", via network)"
                    : tamper ? esc(rs.split(/:(.+)/)[1]||"").trim()+" — a possible attempt to defeat monitoring."
@@ -216,8 +220,8 @@ function card(r, dt, signed){
                    : vm ? esc(rs.split(/:(.+)/)[1]||"").trim()+" — review whether it's legitimate."
                    : txt ? "Explicit text on screen — "+detail
                    : sig ? "Explicit term in the URL / search — "+detail
-                   : red ? (r.is_nudity? "explicit nudity / exposed body — see image"
-                                 : "very revealing content — see image")
+                   : red ? (r.is_nudity? "explicit nudity / exposed body — image saved (encrypted)"
+                                 : "very revealing content — image saved (encrypted)")
                    : drm ? "Not a content flag — macOS blanks DRM-protected video, so EyeGuard couldn't view it. The title is logged so you can review it yourself."
                    : esc((r.reason||"").split(":").pop()||"suggestive content");
   return `<div class="card ${sevCls}">${img}<div class="body"><div class="rtop">`
