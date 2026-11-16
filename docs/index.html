@@ -112,6 +112,12 @@ details.asec>summary{cursor:pointer;font-family:var(--head);font-size:12px;color
   background:var(--card);border-bottom:1px solid var(--line);color:var(--muted);text-align:center;padding:0 14px;}
 .card .thumb-enc b{font-family:var(--head);letter-spacing:.04em;font-size:13px;color:var(--ink);}
 .card .thumb-enc small{font-size:11px;line-height:1.35;}
+.vk{margin:14px 0 4px;border:1px solid var(--line);background:var(--card);border-radius:6px;padding:10px 14px;font-size:13px;color:var(--muted);}
+.vk summary{cursor:pointer;font-family:var(--head);letter-spacing:.04em;color:var(--ink);}
+.vk p{line-height:1.45;margin:8px 0;}
+.vk textarea{width:100%;box-sizing:border-box;background:#0b0e12;color:var(--ink);border:1px solid var(--line);border-radius:4px;font:11px/1.35 monospace;padding:8px;}
+.vk .vkfp{font:12px/1.5 monospace;color:var(--ink);word-break:break-word;margin:6px 0;}
+.vk .vkbtns{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 0;}
 .card .body{padding:11px 14px;}
 .rtop{display:flex;align-items:center;gap:9px;flex-wrap:wrap;}
 .time{font-family:var(--head);color:var(--muted);font-size:12px;letter-spacing:.03em;}
@@ -205,11 +211,13 @@ footer{color:var(--muted);font-size:11px;text-align:center;padding:24px;
     </div>
   </div>
 
+  <div id="viewkey"></div>
   <div class="apps" id="apps"></div>
   <div class="feed" id="feed"></div>
   <footer>Flags are read-only (apps can be approved or denied above) · history auto-deletes after 7 days · flags carry an encrypted review image (it opens only on a device that holds the viewing key; this page shows a lock instead), browsing shows site only</footer>
 </div>
 
 <script src="vendor/supabase-js-2.118.0.umd.js" integrity="sha384-TcHRA3zBbn+Lexh5n+Oil4guNPOS3rjNDpGRAN46u/s/mB2IZ50ceC6TYDU2yvgK"></script>
+<script src="frame-viewer.js"></script>
 <script src="dashboard.js"></script>
 </body></html>
