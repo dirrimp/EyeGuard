@@ -7,6 +7,95 @@ const SUPABASE_KEY = "sb_publishable_y9pDf3aBNY4Le5u9tbUXzg_qCRvMn-b";
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const $ = (id) => document.getElementById(id);
+// ---- encrypted review images: per-device key (see frame-viewer.js, docs/BROWSER-IMAGE-VIEWING-DESIGN.md) ----
+let device = null;                 // { privateKey, keyId, fingerprint, pem } once this device is enrolled
+const frameCache = new Map();      // image_path -> blob: URL of the decrypted frame (memory only)
+const FRAME_MSG = {
+  legacy: ["Older frame", "Opens on Dad's device only"],
+  "not-recipient": ["Not shared with this device", "Saved before this device was approved, or not approved yet"],
+  mismatch: ["Not shown", "This image does not match its flag"],
+  auth: ["Can't verify this image", "It failed its integrity check"],
+  "not-image": ["Can't verify this image", "It failed its integrity check"],
+  "bad-format": ["Can't open this image", "Unrecognised format"],
+  network: ["Couldn't load this image", "It will be retried on the next refresh"],
+};
+function lockCard(el, title, sub){
+  el.className = "thumb-enc";
+  el.replaceChildren();
+  const b = document.createElement("b"); b.textContent = "\u{1F512} " + title;
+  const s = document.createElement("small"); s.textContent = sub;
+  el.append(b, s);
+}
+async function showFrame(el){
+  if(!device || el.dataset.busy) return;
+  const path = el.dataset.path, flag = el.dataset.flag;
+  el.dataset.busy = "1";
+  try{
+    if(!EGViewer.nameMatchesFlag(path, flag)) return lockCard(el, ...FRAME_MSG.mismatch);
+    let url = frameCache.get(path);
+    if(!url){
+      lockCard(el, "Decrypting\u2026", "On this device only");
+      const { data, error } = await sb.storage.from("frames").createSignedUrl(path, 120);
+      if(error || !data) return lockCard(el, ...FRAME_MSG.network);
+      let bytes;
+      try{ const r = await fetch(data.signedUrl); if(!r.ok) throw new Error("http"); bytes = new Uint8Array(await r.arrayBuffer()); }
+      catch(e){ return lockCard(el, ...FRAME_MSG.network); }
+      try{
+        const jpg = await EGViewer.decryptFrame(bytes, device, path);
+        url = URL.createObjectURL(new Blob([jpg], {type:"image/jpeg"}));
+        frameCache.set(path, url);
+      }catch(e){ return lockCard(el, ...(FRAME_MSG[e.code] || FRAME_MSG.auth)); }
+    }
+    const img = document.createElement("img"); img.className = "thumb"; img.src = url; img.alt = "review frame";
+    img.addEventListener("click", ()=>window.open(url, "_blank", "noopener"));
+    el.replaceWith(img);
+  } finally { delete el.dataset.busy; }
+}
+let frameObserver = null;
+function hydrateFrames(){
+  if(!device) return;
+  const els = [...document.querySelectorAll(".thumb-enc[data-path]")];
+  if(!("IntersectionObserver" in window)){ els.forEach(showFrame); return; }
+  if(frameObserver) frameObserver.disconnect();
+  frameObserver = new IntersectionObserver((entries)=>entries.forEach(e=>{
+    if(e.isIntersecting){ frameObserver.unobserve(e.target); showFrame(e.target); } }), {rootMargin:"200px"});
+  els.forEach(el=>frameObserver.observe(el));
+}
+function pruneFrameCache(rows){   // keep decrypted frames only for rows still on screen
+  const keep = new Set(rows.map(r=>r.image_path));
+  for(const [p,u] of frameCache) if(!keep.has(p)){ URL.revokeObjectURL(u); frameCache.delete(p); }
+}
+function renderViewKey(){
+  const box = $("viewkey"); box.replaceChildren();
+  const d = document.createElement("details"); d.className = "vk"; const sm = document.createElement("summary");
+  const p = (t)=>{ const e = document.createElement("p"); e.textContent = t; return e; };
+  const btn = (id, t, fn)=>{ const b = document.createElement("button"); b.className = "btn"; b.id = id; b.textContent = t; b.addEventListener("click", fn); return b; };
+  if(!(window.crypto && crypto.subtle && window.indexedDB && window.EGViewer)){
+    sm.textContent = "Image viewing: not available in this browser";
+    d.append(sm, p("This browser cannot hold a viewing key (it needs a secure page, WebCrypto and IndexedDB)."));
+  } else if(!device){
+    sm.textContent = "Image viewing: not set up on this device";
+    d.append(sm, p("Review images are encrypted. To view them here, this device creates a key that never leaves it: nobody, not even this page, can export it. Dad then approves the device by adding its public key. Frames saved after he approves open here; older ones stay locked."),
+      btn("vkSetup", "Set up image viewing on this device", async ()=>{
+        try{ device = await EGViewer.enroll(); }catch(e){ alert("Could not create a key in this browser."); return; }
+        renderViewKey(); load(); }));
+  } else {
+    sm.textContent = "Image viewing: key on this device"; d.open = true;
+    const fp = document.createElement("div"); fp.className = "vkfp"; fp.textContent = "Fingerprint: " + device.fingerprint;
+    const ta = document.createElement("textarea"); ta.readOnly = true; ta.rows = 6; ta.value = device.pem;
+    const row = document.createElement("div"); row.className = "vkbtns";
+    row.append(btn("vkCopy", "Copy public key", async ()=>{
+      try{ await navigator.clipboard.writeText(device.pem); } catch(e){ ta.select(); document.execCommand("copy"); } }),
+      btn("vkRemove", "Remove key from this device", async ()=>{
+        if(!confirm("Remove the viewing key from this device? You would need Dad to approve a new key to view images again.")) return;
+        await EGViewer.removeDevice(); device = null;
+        for(const u of frameCache.values()) URL.revokeObjectURL(u); frameCache.clear();
+        renderViewKey(); load(); }));
+    d.append(sm, p("Send this public key to Dad. He checks the fingerprint with you (in person or by voice) before approving it. The public key is safe to share; the private half cannot leave this device."), fp, ta, row,
+      p("Frames saved before Dad approves this device stay locked. If you clear this site's data or switch browsers, set up again and ask Dad to approve the new key."));
+  }
+  box.append(d);
+}
 let pollTimer = null;
 
 // ---------- auth ----------
@@ -41,6 +130,8 @@ function showApp(session){
   $("app").classList.remove("hidden");
   $("who").textContent = session.user.email;
   history.replaceState(null,"",location.pathname); // strip auth tokens from URL
+  if(window.EGViewer) EGViewer.loadDevice().then(d=>{ device = d; renderViewKey(); hydrateFrames(); }).catch(()=>renderViewKey());
+  renderViewKey();
   load();
   if(pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(load, 20000); // live refresh
@@ -179,6 +270,8 @@ async function load(){
     + `<div class="grid">${byDay[day].join("")}</div></section>`).join("");
   feed.querySelectorAll("img.thumb").forEach(img=>{
     img.onclick=()=>window.open(img.src,"_blank"); });
+  pruneFrameCache(rows);
+  hydrateFrames();
 }
 
 function where(r){
@@ -211,7 +304,7 @@ function card(r, dt, signed){
   const grade = r.grade? `<span class="grade ${gcls}">${esc(r.grade)}</span>` : "";
   const url = r.image_path && signed[r.image_path];
   const img = isEnc(r.image_path)
-    ? `<div class="thumb-enc"><b>&#128274; Image is encrypted</b><small>Opens only on a device that holds the viewing key</small></div>`
+    ? `<div class="thumb-enc" data-path="${esc(r.image_path)}" data-flag="${esc(r.flagged_at)}"><b>&#128274; Image is encrypted</b><small>${device ? "Decrypting on this device\u2026" : "Opens only on a device that holds the viewing key"}</small></div>`
     : (url? `<img class="thumb" src="${url}" loading="lazy">` : "");
   const detail = esc((rs.split(/—(.+)/)[1]||"").trim());
   const what = phone ? esc(rs.split(/:(.+)/)[1]||"").trim()+" ("+esc(r.app||"iPhone")+", via network)"
