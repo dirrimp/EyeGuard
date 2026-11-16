@@ -105,6 +105,10 @@ details.asec>summary{cursor:pointer;font-family:var(--head);font-size:12px;color
 .card.green{border-left-color:var(--green);}
 .card img.thumb{width:100%;height:190px;object-fit:cover;background:#000;display:block;
   border-bottom:1px solid var(--line);cursor:pointer;}
+.card .thumb-enc{height:120px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;
+  background:var(--card);border-bottom:1px solid var(--line);color:var(--muted);text-align:center;padding:0 14px;}
+.card .thumb-enc b{font-family:var(--head);letter-spacing:.04em;font-size:13px;color:var(--ink);}
+.card .thumb-enc small{font-size:11px;line-height:1.35;}
 .card .body{padding:11px 14px;}
 .rtop{display:flex;align-items:center;gap:9px;flex-wrap:wrap;}
 .time{font-family:var(--head);color:var(--muted);font-size:12px;letter-spacing:.03em;}
@@ -200,7 +204,7 @@ footer{color:var(--muted);font-size:11px;text-align:center;padding:24px;
 
   <div class="apps" id="apps"></div>
   <div class="feed" id="feed"></div>
-  <footer>Flags are read-only (apps can be approved or denied above) · history auto-deletes after 7 days · flags carry a review image, browsing shows site only</footer>
+  <footer>Flags are read-only (apps can be approved or denied above) · history auto-deletes after 7 days · flags carry an encrypted review image (it opens only on a device that holds the viewing key; this page shows a lock instead), browsing shows site only</footer>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
@@ -360,7 +364,9 @@ async function load(){
   }
 
   // signed URLs for the images (private bucket)
-  const paths = rows.filter(r=>r.image_path).map(r=>r.image_path);
+  // Encrypted frames (.enc) are ciphertext: a browser <img> cannot show them, so they are not fetched here.
+  const isEnc = p => /\.enc$/i.test(p||"");
+  const paths = rows.filter(r=>r.image_path && !isEnc(r.image_path)).map(r=>r.image_path);
   const signed = {};
   if(paths.length){
     const { data:sd } = await sb.storage.from("frames").createSignedUrls(paths, 3600);
@@ -413,7 +419,9 @@ function card(r, dt, signed){
   const gcls = {Likely:"g-hi",Possible:"g-mid",Borderline:"g-lo"}[r.grade]||"";
   const grade = r.grade? `<span class="grade ${gcls}">${esc(r.grade)}</span>` : "";
   const url = r.image_path && signed[r.image_path];
-  const img = url? `<img class="thumb" src="${url}" loading="lazy">` : "";
+  const img = isEnc(r.image_path)
+    ? `<div class="thumb-enc"><b>&#128274; Image is encrypted</b><small>Opens only on a device that holds the viewing key</small></div>`
+    : (url? `<img class="thumb" src="${url}" loading="lazy">` : "");
   const detail = esc((rs.split(/—(.+)/)[1]||"").trim());
   const what = phone ? esc(rs.split(/:(.+)/)[1]||"").trim()+" ("+esc(r.app||"iPhone")+", via network)"
                    : tamper ? esc(rs.split(/:(.+)/)[1]||"").trim()+" — a possible attempt to defeat monitoring."
@@ -421,8 +429,8 @@ function card(r, dt, signed){
                    : vm ? esc(rs.split(/:(.+)/)[1]||"").trim()+" — review whether it's legitimate."
                    : txt ? "Explicit text on screen — "+detail
                    : sig ? "Explicit term in the URL / search — "+detail
-                   : red ? (r.is_nudity? "explicit nudity / exposed body — see image"
-                                 : "very revealing content — see image")
+                   : red ? (r.is_nudity? "explicit nudity / exposed body — image saved (encrypted)"
+                                 : "very revealing content — image saved (encrypted)")
                    : drm ? "Not a content flag — macOS blanks DRM-protected video, so EyeGuard couldn't view it. The title is logged so you can review it yourself."
                    : esc((r.reason||"").split(":").pop()||"suggestive content");
   return `<div class="card ${sevCls}">${img}<div class="body"><div class="rtop">`
