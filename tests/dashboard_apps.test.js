@@ -25,7 +25,7 @@ window.supabase={createClient:()=>({
    :t==="mdm_incidents"?{select:()=>({order:()=>({limit:async()=>window.__incres||({data:window.__inc})})})}:{select:()=>({order:()=>({limit:async()=>({data:[]})})})},
  storage:{from:()=>({createSignedUrls:async()=>({data:[]})})}})};
 </script>`;
-const html = page.replace(/<script src="https:\/\/cdn\.jsdelivr\.net[^"]*"><\/script>/, () => STUB);
+const html = page.replace(/<script src="vendor\/supabase-js[^"]*"[^>]*><\/script>/, () => STUB);
 
 async function boot(setup) {
   const dom = new JSDOM(html, { runScripts: "dangerously", url: "https://example.test/", pretendToBeVisual: true,
