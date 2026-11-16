@@ -78,6 +78,24 @@ THROTTLE = int(CONF.get("dnsnet_throttle_seconds", 1800))   # per client+class+t
 THROTTLE_MAX = int(CONF.get("dnsnet_throttle_max_seconds", 86400))
 THROTTLE_BACKOFF = int(CONF.get("dnsnet_throttle_backoff", 4))
 FLAT_THROTTLE_CLASSES = ("explicit-dns", "explicit-sni")
+
+# Burst grouping (2026-11-16). One Proton account page opens connections to several addresses in the VPN
+# list, and each new address was its own email (five in one minute). For the classes below, the FIRST alert from a
+# device still emails at once; further alerts of the same class from that device inside the window (any target) are
+# still sent to the backend but as yellow rows (shown on the dashboard, counted in the digest), not emailed.
+# Explicit-content rules and the tunnel/handshake/port classes are never grouped. 0 disables grouping.
+GROUP_SECONDS = int(CONF.get("dnsnet_group_seconds", 600))
+GROUP_CLASSES = ("vpn-ip", "doh-ip", "tor-guard")
+_GROUP: dict = {}                      # (client, cls) -> time of the last EMAILED alert
+
+# A VPN provider's own website / account API / CDN is not a VPN tunnel. A TCP/443 connection to an address in the
+# VPN list is therefore held for up to PENDING_SECONDS while its TLS ClientHello arrives: if the name the client asked
+# for (SNI) is one of these, it is only observed; any other name, no name, or no ClientHello in time alerts exactly as
+# before (a few seconds later). Node names (*.protonvpn.net) are deliberately NOT here. Set the list empty to disable.
+CONTROL_HOSTS = tuple(CONF.get("dnsnet_vpn_control_hosts",
+                               ["protonvpn.com", "protonvpn.ch", "protonweb.com", "proton.me", "protonmail.com", "pm.me"]))
+PENDING_SECONDS = 4
+_PENDING: dict = {}                    # (src, dst) -> time the TCP/443 connection to a VPN-list address was first seen
 STATS_PATH = Path(CONF.get("dnsnet_stats_file", "/tmp/dnsnet-stats.json"))
 STATS_LOG_SECONDS = int(CONF.get("dnsnet_stats_log_seconds", 3600))
 STATS_SECONDS = int(CONF.get("dnsnet_stats_seconds", 60))
@@ -896,16 +914,28 @@ def raise_event(client: str, cls: str, target: str, now: float | None = None) ->
             for k in [k for k, v in _SEEN.items() if now - v[0] > 2 * THROTTLE_MAX]:
                 del _SEEN[k]
         _STATS["alerts"][cls] = _STATS["alerts"].get(cls, 0) + 1
+        grouped = False
+        if GROUP_SECONDS > 0 and cls in GROUP_CLASSES:
+            first = _GROUP.get((client, cls))
+            if first is not None and now - first < GROUP_SECONDS:
+                grouped = True
+                _STATS["alerts_grouped"] = _STATS.get("alerts_grouped", 0) + 1
+            else:
+                _GROUP[(client, cls)] = now
+            if len(_GROUP) > 2000:
+                for k in [k for k, t in _GROUP.items() if now - t > 2 * GROUP_SECONDS]:
+                    del _GROUP[k]
     explicit = cls in ("explicit-dns", "explicit-sni")
     who = device_label(client)
     prefix = "net-signal" if explicit else "net-bypass"
     _emit({
-        "flagged_at": now_iso(), "verdict": "flagged",
-        "reason": f"{prefix}: {_TITLES.get(cls, cls)} {target} from {who}" + (f" [repeat #{repeat + 1}]" if repeat else ""),
+        "flagged_at": now_iso(), "verdict": "alert" if grouped else "flagged",
+        "reason": f"{prefix}: {_TITLES.get(cls, cls)} {target} from {who}" + (f" [repeat #{repeat + 1}]" if repeat else "")
+                  + (" [grouped: same device, same kind, already emailed]" if grouped else ""),
         "app": "Network", "url": None,
         "window_title": f"{_TITLES.get(cls, cls)}: {target} -- {identify(client).get('name') or client}",
-        "grade": "Likely", "risk": "high", "is_nudity": False})
-    return "alerted"
+        "grade": "Possible" if grouped else "Likely", "risk": "high", "is_nudity": False})
+    return "grouped" if grouped else "alerted"
 
 
 # ---- decisions for each parsed packet (pure given state) ---------------------
@@ -951,7 +981,12 @@ def on_flow(src: str, dst: str, dport: int, proto: str, local_ips: set,
     out = []
     expected = expected_tunnel(src, dst, dport, proto)
     if vpn_match(dst) and not expected:
-        out.append(raise_event(src, "vpn-ip", dst, now))
+        if proto == "tcp" and dport == 443 and CONTROL_HOSTS:
+            t_now = time.time() if now is None else now
+            with _LOCK:
+                _PENDING.setdefault((src, dst), t_now)     # decided by on_sni(), or by sweep_pending() after PENDING_SECONDS
+        else:
+            out.append(raise_event(src, "vpn-ip", dst, now))
     if proto == "tcp":
         if dst in tor_ips:
             out.append(raise_event(src, "tor-guard", dst, now))
@@ -975,6 +1010,40 @@ def on_flow(src: str, dst: str, dport: int, proto: str, local_ips: set,
 
 def on_sni(client: str, dst: str, sni: str | None, ech: bool, cut: bool, local_ips: set,
            now: float | None = None) -> list:
+    """Resolve a held VPN-list connection (see CONTROL_HOSTS), then apply the normal SNI rules."""
+    out = []
+    with _LOCK:
+        held = _PENDING.pop((client, dst), None)
+    if held is not None:
+        control = host_matches(sni, CONTROL_HOSTS) if sni else None
+        if control:   # the provider's own website / API: observed, never alerted
+            out.append(raise_event(client, "vpn-control-plane", control, now))
+        else:
+            out.append(raise_event(client, "vpn-ip", dst, now))
+    return out + _on_sni_rules(client, dst, sni, ech, cut, local_ips, now)
+
+
+def sweep_pending(now: float | None = None) -> list:
+    """Alert for held connections whose ClientHello never named a control-plane host in time."""
+    t_now = time.time() if now is None else now
+    with _LOCK:
+        due = [k for k, t in _PENDING.items() if t_now - t >= PENDING_SECONDS]
+        for k in due:
+            del _PENDING[k]
+    return [raise_event(src, "vpn-ip", dst, now) for src, dst in due]
+
+
+def pending_loop():
+    while True:
+        time.sleep(1)
+        try:
+            sweep_pending()
+        except Exception as e:   # noqa: BLE001  a bad sweep must never stop the sweeper
+            print(f"[eyeguard-dnsnet] {now_iso()} pending sweep error: {type(e).__name__}", flush=True)
+
+
+def _on_sni_rules(client: str, dst: str, sni: str | None, ech: bool, cut: bool, local_ips: set,
+                  now: float | None = None) -> list:
     """Rules for the server name in a TLS ClientHello. A name the device ALSO just looked up
     in DNS is skipped (the DNS rule already spoke); what is left is DNS that was cached,
     encrypted or bypassed."""
@@ -1339,7 +1408,7 @@ def main():
     load_vpn_ranges()
     print(f"[eyeguard-dnsnet] active on {IFACES}; alert classes: "
           f"{sorted(ALERT_CLASSES)}; excluded: {sorted(EXCLUDED)} + macs {sorted(EXCLUDED_MACS)}", flush=True)
-    for fn in (tor_refresh_loop, invariants_loop, stats_loop, sender_loop, lists_loop, trusted_names_loop):
+    for fn in (tor_refresh_loop, invariants_loop, stats_loop, sender_loop, lists_loop, trusted_names_loop, pending_loop):
         threading.Thread(target=fn, daemon=True).start()
     for iface in IFACES:
         for fn in (dns_loop, flow_loop, wg_loop, udp_loop, sni_loop):

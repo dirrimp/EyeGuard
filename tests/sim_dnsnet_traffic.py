@@ -11,7 +11,7 @@ the injected, known-bad events is a false alarm. Inputs are public: the Tranco t
 rule config (terms / noise / app map). NO real household traffic is used or needed.
 
 Usage:  python3 tests/sim_dnsnet_traffic.py [--days 7] [--seed 1] [--data DIR] [--worst-case]
-Needs network on first run (downloads into --data, default /tmp/simdata). Exit 1 if a baseline
+Needs a prior data dir (--data, default /tmp/simdata). Downloads lists on first run; it will NOT resolve names via live DNS unless --allow-live-dns (see the SAFETY note below). Exit 1 if a baseline
 household produces any false alert or misses an injected one.
 """
 import argparse, bisect, collections, concurrent.futures, importlib.util, json, math, os
@@ -24,6 +24,7 @@ ap.add_argument("--days", type=int, default=7)
 ap.add_argument("--seed", type=int, default=1)
 ap.add_argument("--data", default="/tmp/simdata")
 ap.add_argument("--sites", type=int, default=1500, help="top sites to resolve to real IPs")
+ap.add_argument("--allow-live-dns", action="store_true", help="resolve top-site names with the local resolver (ONLY from an unmonitored host: it triggers real alerts otherwise)")
 ap.add_argument("--worst-case", action="store_true", help="add misbehaving devices (DoH-to-8.8.8.8 TV, tunnel-ish app)")
 args = ap.parse_args()
 D = Path(args.data); D.mkdir(parents=True, exist_ok=True)
@@ -87,6 +88,12 @@ ipfile = D / "resolved.json"
 if ipfile.exists():
     resolved = json.load(open(ipfile))
 else:
+    # SAFETY (2026-11-16): this resolves ~1,500 top-site names with the machine's own resolver. On a monitored network
+    # that is 1,500 real DNS lookups from that machine, including adult sites, and the network monitor emails every
+    # explicit one to the partners. It happened. Never run this on a monitored machine/network; it refuses unless forced.
+    if not args.allow_live_dns:
+        sys.exit("refusing to resolve top-site names: those lookups would trigger real network-monitor alerts to the partners.\n"
+                 f"Provide {ipfile} (a prior resolution done on an UNMONITORED host), or pass --allow-live-dns from such a host.")
     def res(d):
         try:
             return d, sorted({a[4][0] for a in socket.getaddrinfo(d, 443, socket.AF_INET)})
@@ -246,6 +253,7 @@ print(f"(router public address changes on day 3; the phone keeps dialing the old
 # ---------------------------------------------------------------- replay
 for t, _, kind, kw in events:
     SIM[0] = t
+    dn.sweep_pending(now=t)          # the real daemon's pending_loop() does this every second (held TCP/443 VPN-list hits)
     LOCAL = dn.local_ips(ttl=60, now=t)
     if kind == "dns":
         dn.on_dns(kw["ip"], kw["resolver"], kw["name"], LOCAL, now=t, qtype=kw["qtype"])
@@ -257,6 +265,8 @@ for t, _, kind, kw in events:
         dn.on_flow(kw["ip"], kw["dst"], kw["port"], "udp", LOCAL, TOR, now=t)
     elif kind == "wg":
         dn.on_wg_handshake(kw["ip"], kw["dst"], kw["port"], LOCAL, now=t)
+
+dn.sweep_pending(now=events[-1][0] + 10)   # flush anything still held at the end of the run
 
 # ---------------------------------------------------------------- report
 CLS = {v: k for k, v in dn._TITLES.items()}
