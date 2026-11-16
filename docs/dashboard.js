@@ -7,6 +7,8 @@ const SUPABASE_KEY = "sb_publishable_y9pDf3aBNY4Le5u9tbUXzg_qCRvMn-b";
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const $ = (id) => document.getElementById(id);
+// Module scope: used by load() AND card(). (It was local to load(), so card() threw and the feed rendered empty.)
+const isEnc = (p) => /\.enc$/i.test(p||"");
 // ---- encrypted review images: per-device key (see frame-viewer.js, docs/BROWSER-IMAGE-VIEWING-DESIGN.md) ----
 let device = null;                 // { privateKey, keyId, fingerprint, pem } once this device is enrolled
 const frameCache = new Map();      // image_path -> blob: URL of the decrypted frame (memory only)
@@ -247,7 +249,6 @@ async function load(){
 
   // signed URLs for the images (private bucket)
   // Encrypted frames (.enc) are ciphertext: a browser <img> cannot show them, so they are not fetched here.
-  const isEnc = p => /\.enc$/i.test(p||"");
   const paths = rows.filter(r=>r.image_path && !isEnc(r.image_path)).map(r=>r.image_path);
   const signed = {};
   if(paths.length){
@@ -296,8 +297,10 @@ function card(r, dt, signed){
   const drm = rs.startsWith("drm"), tamper = rs.startsWith("tamper"), ext = rs.startsWith("extension");
   const vm = rs.startsWith("vm");
   const txt = rs.startsWith("text"), sig = rs.startsWith("signal"), phone = rs.startsWith("phone");
+  const net = rs.startsWith("net-");   // router network monitor: no image exists for these
   const sevCls = red?"red":"yellow";
   const sevTxt = phone ? "Phone"
+                     : net ? "Network"
                      : red ? (tamper?"Tamper":sig?"Search":(r.is_nudity?"Nudity":"Revealing"))
                      : (drm?"DRM Video":ext?"Extension":vm?"Virtualization":txt?"Text":sig?"Search":"Suggestive");
   const gcls = {Likely:"g-hi",Possible:"g-mid",Borderline:"g-lo"}[r.grade]||"";
@@ -311,6 +314,7 @@ function card(r, dt, signed){
                    : tamper ? esc(rs.split(/:(.+)/)[1]||"").trim()+" — a possible attempt to defeat monitoring."
                    : ext ? esc(rs.split(/:(.+)/)[1]||"").trim()+" — review whether it's legitimate."
                    : vm ? esc(rs.split(/:(.+)/)[1]||"").trim()+" — review whether it's legitimate."
+                   : net ? esc(rs.replace(/^net-[a-z]+:\s*/, ""))
                    : txt ? "Explicit text on screen — "+detail
                    : sig ? "Explicit term in the URL / search — "+detail
                    : red ? (r.is_nudity? "explicit nudity / exposed body — image saved (encrypted)"
