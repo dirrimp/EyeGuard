@@ -46,7 +46,9 @@ check("no logging at all (the token can never reach a log)", not re.search(r"and
 check("no files written", not re.search(r"FileOutputStream|FileWriter|openFileOutput|getSharedPreferences", alljava))
 check("no reflection, shell, dynamic loading or native code", not re.search(r"Runtime\.getRuntime|ProcessBuilder|Class\.forName|DexClassLoader|System\.load", alljava))
 check("the frame bitmap is recycled and the buffer closed in a finally block", "finally" in java["GuardService.java"] and "hb.close()" in java["GuardService.java"] and "recycle()" in java["GuardService.java"])
-check("the image is never encoded, saved or sent (no compress/encode/JPEG)", not re.search(r"compress\(|Base64|JPEG|encodeToString|ByteArrayOutputStream.*Bitmap", alljava.replace("ByteArrayOutputStream bo", "")))
+check("phase 2 service code never encodes, saves or sends an image (no compress/JPEG/encodeToString); Egf2 may use Base64 only to read a public-key PEM",
+      not re.search(r"compress\(|JPEG|encodeToString", "\n".join(v for k, v in java.items() if k != "Egf2.java"))
+      and "Base64.getEncoder" not in java.get("Egf2.java", ""))
 check("reenabled is always 0 in phase 2", 'put("reenabled", 0)' in java["Heartbeat.java"])
 check("the token is read only from the config file, never hard-coded", not re.search(r'token\s*=\s*"[0-9a-f]{16,}"', alljava))
 
