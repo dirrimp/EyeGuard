@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">EyeGuard TV monitor</string>
+    <string name="service_description">EyeGuard accountability monitor for this TV. It checks that the screen can be seen and reports its health to the family partners. It is set up and switched on by Jonah.</string>
+</resources>
