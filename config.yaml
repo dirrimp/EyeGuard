@@ -735,6 +735,19 @@ encryption:
         xxrLNb8d5Mr0gAIYJoUcRNsqzTucsk1nNAqkFEC6nmeYcXq/AVy8sDHd8PCNLXur
         LARhr4A5Sq25x7K826At6uVuHig8GSfrbdj0qYJZPtTrAgMBAAE=
         -----END PUBLIC KEY-----
+    - label: "Jada's browser key (enrolled 2026-11-17)"
+      public_key_pem: |
+        -----BEGIN PUBLIC KEY-----
+        MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAqmF9BNlVM3KwoW7Vod2z
+        DUkxICdAtROB2kYmOCVvCiXM7oUucj0j14opDzBKN8r/zjN2U+Uuy/6bCopbiCl4
+        CY3bk5BdBt4h3yFMxVG7IRo9GZRMzYdYyr7Cc1xmP3Z0neIGwnkEewx5tSXfX4KV
+        ILRzu3f+pi6ub2oYsDudtrDWgZhQ5Sgf0s/JyTtc0lTZCBDIWIrzOxEAoyXPxBEJ
+        vQ7VWFtiAVkhNvgjR0iUmBhpi5CkjLSFWR4sj905rrwbPQiAHui1RfmGVWoZ/kPp
+        d3dyb8QC5Q4WlrZroi7L0bfqrbJue1xF1dKPmTyc3jrRu56KBnz9vIRFEHaAQw32
+        l1WlzjBIxxBT+TUb8Yy9SSHPE4U7KYJolTdgsI+I8nmYXs2T63Hm1wW10V35RpW5
+        XJs2LJWdfPjYmSjZjtsctJCiD2HoE+mP5i75T7hJvVJ50E+seORyVn42dCf5GmGE
+        YjfSnqKYw08zEFBORG8J0Q2TFDB0r3GCq3ghuxrJCkj5AgMBAAE=
+        -----END PUBLIC KEY-----
 
 file_integrity:
   enabled: true
