@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- EyeGuard Onn FIT TEST (phase 3 gate 1). Throwaway: no permissions at all (not even INTERNET), no service, no receiver,
-     no provider, one non-exported activity started from adb. It never reports to the server and never touches the network. -->
+     no provider, one activity started from adb. It never reports to the server and never touches the network.
+     The activity MUST be exported: adb shell runs as uid 2000, and Android refuses `am start` of a non-exported component
+     ("not exported from uid ..."; found on the first real run, 2026-11-17). It has no intent filter, so only an explicit
+     component start reaches it, and it can only run the pinned model on synthetic data and write fit-result.json. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.eyeguard.onnfit">
     <application
@@ -8,6 +11,6 @@
         android:allowBackup="false"
         android:usesCleartextTraffic="false"
         android:extractNativeLibs="true">
-        <activity android:name=".FitActivity" android:exported="false" />
+        <activity android:name=".FitActivity" android:exported="true" />
     </application>
 </manifest>
