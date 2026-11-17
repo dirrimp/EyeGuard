@@ -27,7 +27,7 @@ The route is right: it is the only way to get real pixels on a TV box with no GM
 The Mac-side deploy watcher does not apply here. The Onn app is updated by hand over ADB until a signed-update path exists (see below).
 
 ## Gaps in the draft
-- **Android version unknown.** `canTakeScreenshot` needs API 30. If the box is older, this route does not work; check before any build.
+- **Android version: 14 (API 34), per Jonah 2026-11-17.** `canTakeScreenshot` needs API 30, so the route works. Still to confirm in the ADB session: the system WebView exists for TV Bro, and Android 14's accessibility restrictions for sideloaded apps ("restricted settings") do not block enabling the service via the one-time `WRITE_SECURE_SETTINGS` grant.
 - **Self-update.** A manual ADB install cannot be fixed remotely. Decide: a pinned-manifest self-update (hash checked by the app, as the Mac's) or a manual-only app. Prefer the manifest.
 - **Signing key.** The keystore is Jonah's, offline. The app must also verify its own signing-cert hash and report it, so a swapped APK is visible server-side.
 - **WRITE_SECURE_SETTINGS** is powerful. Granting it once via ADB is fine, but the app must use it only to re-enable its own accessibility service, and the heartbeat reports when it had to.
@@ -35,8 +35,8 @@ The Mac-side deploy watcher does not apply here. The Onn app is updated by hand 
 - **Both new router openings** (broad egress for the Onn, the tunnel choice, AdGuard mode switch) are Agent IT's lane. This design does not edit the router.
 
 ## Open questions (needed from Jonah / Dad)
-1. Android version and API level of the box (needs the ADB session).
-2. Retention of flagged Onn frames (same as the Mac?).
+1. ~~Android version~~ Answered: Android TV 14 (API 34). WebView and restricted-settings behaviour still to confirm in the ADB session.
+2. ~~Retention~~ Answered by Jonah: same as the Mac.
 3. Dad's sign-off on shared-TV monitoring.
 4. Is a phase-1 SQL run by Dad acceptable now, ahead of any app?
 
