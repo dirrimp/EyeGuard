@@ -1,4 +1,4 @@
-# EyeGuard Onn monitor (phase 3, version 0.2.0: health + on-box exposure detection)
+# EyeGuard Onn monitor (phase 3, version 0.2.1: health + on-box exposure detection)
 
 Design and conditions: `docs/ONN-SCREEN-MONITOR-REVIEW.md` (#162), `docs/ONN-PHASE3-DETECTION-DESIGN.md` (#166). Database side:
 `supabase/onn_monitor_phase1.sql` and `onn_monitor_phase3.sql` (both live).
@@ -15,6 +15,10 @@ self-test numbers to `eg_onn_heartbeat`; **the server** decides whether the dete
 no `WRITE_SECURE_SETTINGS` (it never re-enables itself), no self-update (manual ADB installs), no logging of anything, no files written, one
 permission (INTERNET), one server host (a constant in `Config.java`). Un-blurred pixels never leave the method that blurs them; the upload queue
 holds ciphertext only, in memory, at most 10 items and 12 minutes.
+
+**End-to-end self-test.** An empty file named `selftest-flag`, pushed over ADB into the app's folder during an install session, makes the service send ONE
+synthetic test flag (label `ONN_TEST`: a yellow dashboard row, no email) through the whole blur, encrypt, upload and record path. The picture is drawn in code
+(`TestFrame`), never a screenshot. Needs `supabase/onn_monitor_phase3b.sql`.
 
 **Telemetry.** ONNX Runtime's Android package registers a telemetry ContentProvider. This app never merges that manifest, the build **removes the
 13 telemetry classes** from the library jar and **fails** if any trace is left in the result, and the detector also sets `ORT_DISABLE_TELEMETRY`

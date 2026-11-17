@@ -9,6 +9,7 @@ import android.os.PowerManager;
 import android.os.SystemClock;
 import android.view.Display;
 import android.view.accessibility.AccessibilityEvent;
+import java.io.File;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
@@ -24,6 +25,11 @@ public class GuardService extends AccessibilityService {
     static final long BEAT_MS = 300_000;          // 5 minutes: the server alerts after 15 minutes of silence
     static final long SELFTEST_MS = 3_600_000;    // the detector self-test, hourly
     static final long RETRY_MS = 60_000;          // retry undelivered flags
+    static final long HOOK_MS = 10_000;           // look for the install-time test trigger file
+    /** An EMPTY file with this name, pushed over ADB during an install session, makes the service send ONE synthetic test flag (label ONN_TEST,
+     *  a yellow row, no email) through the whole encrypt-and-upload path. It is deleted first, so it fires once. It cannot suppress or create a
+     *  real detection, and no other app can write to this folder. */
+    static final String TEST_HOOK = "selftest-flag";
 
     private final ExecutorService io = Executors.newSingleThreadExecutor();   // frame callbacks, detector, stats, beat snapshots
     private final ExecutorService net = Executors.newSingleThreadExecutor();  // blocking HTTPS
@@ -72,6 +78,14 @@ public class GuardService extends AccessibilityService {
         }
     };
 
+    private final Runnable hookTask = new Runnable() {
+        @Override public void run() {
+            if (!connected) return;
+            io.execute(GuardService.this::checkTestHook);
+            main.postDelayed(this, HOOK_MS);
+        }
+    };
+
     private final Runnable retryTask = new Runnable() {
         @Override public void run() {
             if (!connected) return;
@@ -90,6 +104,7 @@ public class GuardService extends AccessibilityService {
         main.postDelayed(beatTask, 60_000);           // first beat after a minute, then every 5 minutes
         main.postDelayed(selfTestTask, SELFTEST_MS);
         main.postDelayed(retryTask, RETRY_MS);
+        main.postDelayed(hookTask, HOOK_MS);
     }
 
     @Override public void onAccessibilityEvent(AccessibilityEvent e) {
@@ -104,7 +119,7 @@ public class GuardService extends AccessibilityService {
         connected = false;
         if (main != null) {
             main.removeCallbacks(shotTask); main.removeCallbacks(beatTask);
-            main.removeCallbacks(selfTestTask); main.removeCallbacks(retryTask);
+            main.removeCallbacks(selfTestTask); main.removeCallbacks(retryTask); main.removeCallbacks(hookTask);
         }
         beat(false, screenState(), Math.max(1, (SystemClock.elapsedRealtime() - lastBeat) / 1000));
         return false;
@@ -198,6 +213,11 @@ public class GuardService extends AccessibilityService {
     }
 
     private void flag(Bitmap sw, Postprocess.Hit hit) {
+        queueFlag(sw, hit.labelName(), hit.score, FlagName.safeForeground(lastPackage));
+    }
+
+    /** io thread. The picture is named, BLURRED, JPEG-encoded, ENCRYPTED and only then queued: the queue and the uploader never see pixels. */
+    private void queueFlag(Bitmap sw, String label, float score, String fg) {
         byte[] jpeg = null;
         try {
             if (recipients == null || recipients.isEmpty()) throw new IllegalStateException("no recipients");
@@ -205,7 +225,7 @@ public class GuardService extends AccessibilityService {
             String name = FlagName.objectName(now);
             jpeg = FlagFrame.blurredJpeg(sw);                                    // blurred before it is encoded
             byte[] enc = Egf2.encrypt(jpeg, recipients, name);                   // and encrypted before it is held anywhere else
-            if (uploader.enqueue(new FlagUploader.Pending(name, enc, hit.labelName(), hit.score, FlagName.safeForeground(lastPackage), now))) {
+            if (uploader.enqueue(new FlagUploader.Pending(name, enc, label, score, fg, now))) {
                 deliverFlags();
             }
         } catch (Throwable t) {
@@ -213,6 +233,19 @@ public class GuardService extends AccessibilityService {
         } finally {
             if (jpeg != null) Arrays.fill(jpeg, (byte) 0);
         }
+    }
+
+    /** io thread: the end-to-end self-test trigger (see TEST_HOOK). The test picture is synthetic, never a screenshot. */
+    private void checkTestHook() {
+        try {
+            File dir = getExternalFilesDir(null);
+            if (dir == null) return;
+            File f = new File(dir, TEST_HOOK);
+            if (!f.exists()) return;
+            f.delete();                                                          // once only
+            Bitmap b = TestFrame.create();
+            try { queueFlag(b, "ONN_TEST", 1.0f, "selftest"); } finally { b.recycle(); }
+        } catch (Throwable ignored) { }
     }
 
     private void deliverFlags() {

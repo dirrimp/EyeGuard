@@ -46,11 +46,12 @@ print("a flagged frame: blur, then encrypt, then queue; plaintext pixels never l
 gs = C["GuardService"]
 check("the detector runs inside the screenshot callback, after the health stats and before the bitmaps are recycled",
       gs.index("stats.success(luma);") < gs.index("analyse(sw);") < gs.index("} finally {"))
-check("the screenshot bitmap goes ONLY to the detector and to FlagFrame.blurredJpeg",
-      sorted(set(re.findall(r"(\w+(?:\.\w+)*)\(sw\)", gs))) == ["FlagFrame.blurredJpeg", "analyse", "detector.detect"] or
-      sorted(set(re.findall(r"(\w+(?:\.\w+)*)\(sw[,)]", gs))) >= ["FlagFrame.blurredJpeg", "detector.detect"], str(re.findall(r"\w+(?:\.\w+)*\(sw[^)]*\)", gs)))
-body = gs[gs.index("private void flag(Bitmap sw"):gs.index("private void deliverFlags")]
-check("flag(): name, THEN blurred JPEG, THEN encrypt, THEN enqueue (in that order)",
+# "Bitmap.createScaledBitmap" below is the 32x32 health-stats thumbnail, which stays local on the box
+callees = set(re.findall(r"(\w+(?:\.\w+)*)\((?:sw|b)\b", gs))
+check("a bitmap is handed ONLY to the detector, the flag path and FlagFrame.blurredJpeg (never to the uploader, Egf2 or the heartbeat)",
+      callees <= {"analyse", "detector.detect", "flag", "queueFlag", "FlagFrame.blurredJpeg", "Bitmap.createScaledBitmap"} and "uploader.enqueue(new FlagUploader.Pending(name, enc" in gs, str(callees))
+body = gs[gs.index("private void queueFlag("):gs.index("private void checkTestHook")]
+check("queueFlag(): name, THEN blurred JPEG, THEN encrypt, THEN enqueue (in that order)",
       body.index("FlagName.objectName") < body.index("FlagFrame.blurredJpeg(sw)") < body.index("Egf2.encrypt(jpeg") < body.index("uploader.enqueue("))
 check("the JPEG is wiped after encryption", "Arrays.fill(jpeg" in body)
 check("the uploader only ever receives ciphertext (it is constructed with enc, never with the JPEG or the bitmap)",
@@ -89,6 +90,17 @@ check("the hourly self-test and the 60-second retry exist, and the beat period s
 check("the final 'service off' beat is queued before the detector and the network executor are closed",
       gs.index("beat(false") < gs.index("detector::close") < gs.index("net::shutdown"))
 
+print("the end-to-end self-test trigger (synthetic image, yellow row, no email)")
+hook = gs[gs.index("private void checkTestHook"):gs.index("private void deliverFlags")]
+sql3b = (ROOT / "supabase/onn_monitor_phase3b.sql").read_text()
+check("the trigger is a file in the app's own folder, DELETED before it acts (so it fires once)", 'TEST_HOOK = "selftest-flag"' in gs and hook.index("f.delete()") < hook.index("TestFrame.create()"))
+check("the test picture is drawn in code (TestFrame), never a screenshot, and says it is synthetic",
+      "TestFrame.create()" in hook and "takeScreenshot" not in hook and "SYNTHETIC - NOT A DETECTION" in J["TestFrame"] and "createBitmap(1280, 720" in J["TestFrame"])
+check("the test uses the label the SQL accepts for it, and the same blur/encrypt/upload path as a real flag",
+      'queueFlag(b, "ONN_TEST", 1.0f, "selftest")' in hook and "'ONN_TEST'" in sql3b)
+check("a test flag is not counted as a detection (frames_flagged is only incremented in analyse)", "framesFlagged++" in gs and "framesFlagged++" not in hook)
+check("the hook cannot send an image of the screen or touch anything but its own trigger file", not re.search(r"FileOutputStream|FileWriter|getSharedPreferences|openFileOutput|Settings\.", C["GuardService"]))
+
 print("manifest")
 perms = [p.get(A + "name") for p in man.findall("uses-permission")]
 check("INTERNET is still the only permission, one service, nothing else", perms == ["android.permission.INTERNET"] and [c.tag for c in man.find("application")] == ["service"])
@@ -109,7 +121,7 @@ check("the class path and the dex input are the STRIPPED jar; the original class
       and re.search(r'd8.*\$\(find "\$W/classes".*"\$STRIPPED"', build) is not None)
 check("libraries stored uncompressed, page-aligned and the zip date pinned (reproducible)", "--no-compress" in build and "zipalign\" -c -p 4" in build and "DATE=2026-01-01T00:00:00Z" in build)
 check("no network tool, keystore or signing in the script", not re.search(r"\bcurl\b|\bwget\b|keystore|apksigner|--key", build.replace("No keystore", "")))
-check("only armeabi-v7a, version 0.2.0 (code 2)", "native-code: 'armeabi-v7a'" in build and "VERSION_NAME=${VERSION_NAME:-0.2.0}" in build and "VERSION_CODE=${VERSION_CODE:-2}" in build and "arm64" not in build)
+check("only armeabi-v7a, version 0.2.1 (code 3)", "native-code: 'armeabi-v7a'" in build and "VERSION_NAME=${VERSION_NAME:-0.2.1}" in build and "VERSION_CODE=${VERSION_CODE:-3}" in build and "arm64" not in build)
 legacy = (APP / "build.sh").read_text()
 check("the phase 2 build.sh refuses to run unless explicitly asked (it can no longer compile this source)", "ALLOW_LEGACY_PHASE2" in legacy and "exit 2" in legacy)
 if fails: print("\nFAILED:", *fails, sep="\n  "); sys.exit(1)
