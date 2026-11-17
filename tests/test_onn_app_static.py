@@ -19,6 +19,7 @@ man = ET.parse(APP / "AndroidManifest.xml").getroot()
 java = {p.name: p.read_text() for p in (APP / "src/com/eyeguard/onn").glob("*.java")}
 alljava = "\n".join(java.values())
 sql = (ROOT / "supabase/onn_monitor_phase1.sql").read_text()
+sql3 = (ROOT / "supabase/onn_monitor_phase3.sql").read_text()   # the live heartbeat function since phase 3 (it replaces phase 1's)
 
 print("manifest")
 perms = [p.get(A + "name") for p in man.findall("uses-permission")]
@@ -46,18 +47,19 @@ check("no logging at all (the token can never reach a log)", not re.search(r"and
 check("no files written", not re.search(r"FileOutputStream|FileWriter|openFileOutput|getSharedPreferences", alljava))
 check("no reflection, shell, dynamic loading or native code", not re.search(r"Runtime\.getRuntime|ProcessBuilder|Class\.forName|DexClassLoader|System\.load", alljava))
 check("the frame bitmap is recycled and the buffer closed in a finally block", "finally" in java["GuardService.java"] and "hb.close()" in java["GuardService.java"] and "recycle()" in java["GuardService.java"])
-check("phase 2 service code never encodes, saves or sends an image (no compress/JPEG/encodeToString); Egf2 may use Base64 only to read a public-key PEM",
-      not re.search(r"compress\(|JPEG|encodeToString", "\n".join(v for k, v in java.items() if k != "Egf2.java"))
-      and "Base64.getEncoder" not in java.get("Egf2.java", ""))
+check("only FlagFrame encodes an image (JPEG), and it BLURS before it encodes; Egf2 may use Base64 only to read a public-key PEM",
+      not re.search(r"compress\(|JPEG|encodeToString", "\n".join(v for k, v in java.items() if k != "FlagFrame.java"))
+      and "Base64.getEncoder" not in java.get("Egf2.java", "")
+      and java["FlagFrame.java"].index("Blur.gaussian(") < java["FlagFrame.java"].index(".compress("))
 check("reenabled is always 0 in phase 2", 'put("reenabled", 0)' in java["Heartbeat.java"])
 check("the token is read only from the config file, never hard-coded", not re.search(r'token\s*=\s*"[0-9a-f]{16,}"', alljava))
 
 print("heartbeat matches the database function")
-fn = sql[sql.index("create or replace function public.eg_onn_heartbeat"):sql.index("-- ---- 5. the check")]
+fn = sql3[sql3.index("create or replace function public.eg_onn_heartbeat"):sql3.index("revoke execute on function public.eg_onn_heartbeat")]
 sql_fields = set(re.findall(r"p_info->>'([a-z_0-9]+)'", fn))
 java_fields = set(re.findall(r'o\.put\("([a-z_0-9]+)"', java["Heartbeat.java"]))
-check("every required field the database reads is sent (model_sha256 is optional until phase 3)",
-      (sql_fields - {"model_sha256"}) <= java_fields, str(sql_fields - java_fields))
+check("every field the phase 3 heartbeat function reads is sent (the model fields are required together)",
+      sql_fields <= java_fields, str(sql_fields - java_fields))
 check("nothing is sent that the database does not read", java_fields <= sql_fields, str(java_fields - sql_fields))
 check("the screen states the app can send are exactly the ones the database accepts",
       set(re.findall(r'return "([a-z]+)"', java["GuardService.java"])) == {"on", "off", "saver", "unknown"}
