@@ -3,7 +3,7 @@
 Answers one question on the real box: **does the Mac's NudeNet 320n model run on this 32-bit ARM TV, and how fast / how big?**
 Design: `docs/ONN-PHASE3-DETECTION-DESIGN.md`. This app is deleted afterwards.
 
-- **No permissions at all** (not even INTERNET), no service, no receiver, no provider. One non-exported activity started from adb. It cannot
+- **No permissions at all** (not even INTERNET), no service, no receiver, no provider. One activity started from adb, with no intent filter. It is **exported** because adb's shell (uid 2000) cannot start a non-exported activity. It cannot
   report anywhere and cannot reach the network, which also keeps ONNX Runtime's built-in telemetry (a ContentProvider in its AAR manifest,
   never merged by `build-fit.sh`) from ever running.
 - Benign synthetic input only (gradient frames and a seeded pseudo-random tensor). No real images, no screenshots, no captured content.

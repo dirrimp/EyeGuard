@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Static checks for the Onn fit test (android/onn-fit) and its Mac reference. No JDK or device needed. They prove the throwaway app's
-promises on paper (no permission, no network, pinned model, same input as the Mac reference, explicit labels match config.yaml).
+promises on paper (no permission, no network, an activity adb can start, pinned model, same input as the Mac reference, explicit labels match config.yaml).
 They do NOT prove it compiles or runs on the box: Agent IT's container and the ADB session do that.
 Run: python3 tests/test_onn_fit_static.py"""
 import json, re, sys
@@ -24,8 +24,9 @@ refpy = (ROOT / "tools/onn_fit_reference.py").read_text()
 
 print("manifest")
 check("no permission at all", man.findall("uses-permission") == [])
-check("one activity, not exported, and no service/receiver/provider",
-      [c.tag for c in app] == ["activity"] and app.find("activity").get(A + "exported") == "false")
+check("one activity, EXPORTED (adb's shell uid cannot start a non-exported one), no intent filter, no service/receiver/provider",
+      [c.tag for c in app] == ["activity"] and app.find("activity").get(A + "exported") == "true"
+      and app.find("activity").find("intent-filter") is None)
 check("backups and cleartext off", app.get(A + "allowBackup") == "false" and app.get(A + "usesCleartextTraffic") == "false")
 
 print("source promises")
@@ -37,6 +38,8 @@ check("the model hash pin equals the Mac model, the reference and IT's pin",
 check("a model that does not match the pin aborts before it is loaded", java.index("does not match the pin") < java.index("createSession"))
 check("the app never touches the screen of other apps (no accessibility, no screenshots)", "AccessibilityService" not in java and "takeScreenshot" not in java)
 
+check("build-fit.sh refuses an app whose activity is not exported or has an intent filter",
+      "exported(0x01010010)=true" in build and "intent-filter" in build)
 print("same input and labels as the Mac")
 lcg = lambda t: [int(v) for v in re.findall(r"\d+", t)]
 check("the pseudo-random input is identical in Java and in the Mac reference",

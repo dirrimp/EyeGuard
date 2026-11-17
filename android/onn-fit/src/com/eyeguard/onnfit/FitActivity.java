@@ -9,6 +9,7 @@ import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.os.Build;
 import android.os.Bundle;
+import android.view.WindowManager;
 import android.widget.TextView;
 import java.io.File;
 import java.io.FileInputStream;
@@ -34,6 +35,7 @@ public class FitActivity extends Activity {
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);   // no screensaver mid-run
         view = new TextView(this);
         view.setTextSize(28);
         view.setText("EyeGuard fit test running. Do not touch the remote.");

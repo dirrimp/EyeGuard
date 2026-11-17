@@ -27,6 +27,9 @@ PERMS=$("$BT/aapt2" dump permissions "$OUT/onn-fit-unsigned.apk" | grep -c '^use
 [ "$PERMS" = "0" ] || { echo "FAIL: expected 0 permissions, found $PERMS"; exit 1; }
 TREE=$("$BT/aapt2" dump xmltree --file AndroidManifest.xml "$OUT/onn-fit-unsigned.apk")
 case "$TREE" in *TelemetryInitializer*|*provider*|*receiver*|*"E: service"*) echo "FAIL: unexpected component or telemetry in the manifest"; exit 1;; esac
+# an activity started from adb (uid 2000) must be exported, or `am start` is refused on the box (found on the first real run)
+printf '%s' "$TREE" | grep -q 'exported(0x01010010)=true' || { echo "FAIL: FitActivity is not exported, so adb cannot start it"; exit 1; }
+printf '%s' "$TREE" | grep -q 'intent-filter' && { echo "FAIL: unexpected intent-filter (the activity must only be reachable by explicit component)"; exit 1; }
 LIB=$(jar tf "$OUT/onn-fit-unsigned.apk" | grep '^lib/' | grep -v '/$' | sort) || { echo "FAIL: cannot list the APK"; exit 1; }
 WANT=$(printf 'lib/armeabi-v7a/libonnxruntime.so\nlib/armeabi-v7a/libonnxruntime4j_jni.so\n')
 [ "$LIB" = "$WANT" ] || { echo "FAIL: lib/ must be exactly the two pinned armeabi-v7a libraries; found: $LIB"; exit 1; }
