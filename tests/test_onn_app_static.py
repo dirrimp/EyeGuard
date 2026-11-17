@@ -48,7 +48,7 @@ check("no files written", not re.search(r"FileOutputStream|FileWriter|openFileOu
 check("no reflection, shell, dynamic loading or native code", not re.search(r"Runtime\.getRuntime|ProcessBuilder|Class\.forName|DexClassLoader|System\.load", alljava))
 check("the frame bitmap is recycled and the buffer closed in a finally block", "finally" in java["GuardService.java"] and "hb.close()" in java["GuardService.java"] and "recycle()" in java["GuardService.java"])
 check("only FlagFrame encodes an image (JPEG), and it BLURS before it encodes; Egf2 may use Base64 only to read a public-key PEM",
-      not re.search(r"compress\(|JPEG|encodeToString", "\n".join(v for k, v in java.items() if k != "FlagFrame.java"))
+      not re.search(r"compress\(|JPEG|encodeToString", "\n".join(re.sub(r"//[^\n]*", "", re.sub(r"/\*.*?\*/", "", v, flags=re.S)) for k, v in java.items() if k != "FlagFrame.java"))
       and "Base64.getEncoder" not in java.get("Egf2.java", "")
       and java["FlagFrame.java"].index("Blur.gaussian(") < java["FlagFrame.java"].index(".compress("))
 check("reenabled is always 0 in phase 2", 'put("reenabled", 0)' in java["Heartbeat.java"])

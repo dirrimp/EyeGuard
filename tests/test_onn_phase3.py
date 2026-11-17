@@ -8,6 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SQL3 = (ROOT / "supabase/onn_monitor_phase3.sql").read_text()
+SQL3B = (ROOT / "supabase/onn_monitor_phase3b.sql").read_text()
 SQL1 = (ROOT / "supabase/onn_monitor_phase1.sql").read_text()
 fails = []
 def check(name, ok, detail=""):
@@ -33,6 +34,7 @@ ref = json.loads((ROOT / "android/onn-fit/reference-mac.json").read_text())
 check("the golden values in the SQL equal the Mac reference run", f"{ref['argmax']}, {ref['max']!r}" in SQL3.replace("319.69696044921875", repr(ref["max"])) and str(ref["argmax"]) in SQL3 and "319.69696044921875" in SQL3 and repr(ref["max"]) == "319.69696044921875")
 check("the object-name pattern matches the uploader's naming (timestamp with ':' replaced by '-', _flagged_d1.jpg.enc)",
       "_flagged_d1\\.jpg\\.enc$" in SQL3 and "+00-00" in SQL3)
+check("phase 3b adds only the ONN_TEST label (no placeholder, no key material, grants kept)", "CHANGE-ME" not in SQL3B and ".invalid" not in SQL3B and "grant execute on function public.eg_onn_flag(text, jsonb) to anon" in SQL3B and not re.search(r"BEGIN [A-Z ]*PRIVATE KEY|eyJ[A-Za-z0-9_-]{20,}", SQL3B))
 check("nothing is dropped: the volume rule demotes to yellow, it never skips the insert", "case when recent then 'alert' else 'flagged' end" in SQL3)
 
 print("B. real Postgres")
@@ -220,6 +222,36 @@ grant usage on schema public, extensions, auth to anon, authenticated, service_r
         check("a non-partner account reads nothing", err == "" and out == "0", err + out)
         out, err = psql(f"set role authenticated; set request.jwt.claim.sub = '{DAD}'; update public.onn_flag_log set label = 'x';", err_ok=True)
         check("even a partner cannot change the flag log", "permission denied" in err, err)
+
+        print("B7. phase 3b: the end-to-end self-test label ONN_TEST")
+        o_t = obj(); put(o_t)
+        out, err = flag(o_t, label="ONN_TEST", score=1.0, fg="selftest")
+        check("before phase 3b, ONN_TEST is refused", "bad info" in err, err)
+        p3b = SQL3B.replace("create extension if not exists pg_net;", "")
+        psql(p3b); psql(p3b)
+        verify = psql(p3b)[0].splitlines()[-1]
+        check("phase 3b applies on top of phase 3, re-runs cleanly, and its own verify select is all true", set(verify.split("|")) == {"t"}, verify)
+        psql("delete from public.onn_flag_log; delete from public.flags; delete from public.red_emails;")
+        o_t = obj(); put(o_t)
+        out, err = flag(o_t, label="ONN_TEST", score=1.0, fg="selftest")
+        check("a test flag is accepted and is YELLOW", '"verdict": "alert"' in out, out + err)
+        row = val("select app||'|'||is_nudity||'|'||grade||'|'||risk||'|'||verdict||'|'||window_title from public.flags")
+        check("it is clearly labelled: not nudity, grade Test, risk low, verdict alert", row == "Onn TV|false|Test|low|alert|selftest", row)
+        check("its reason says it is a synthetic self-test", val("select reason like 'onn-test:%synthetic%' from public.flags") == "t")
+        check("it sends NO email", val("select count(*) from public.red_emails") == "0")
+        o_r = obj(1); put(o_r)
+        out, _ = flag(o_r, label="FEMALE_BREAST_EXPOSED", score=0.9)
+        check("a test flag does not use up the 10-minute RED window: the next REAL detection is still RED and emails", '"verdict": "flagged"' in out and val("select count(*) from public.red_emails") == "1", out)
+        o_r2 = obj(2); put(o_r2)
+        out, _ = flag(o_r2, label="ONN_TEST", score=1.0, fg="selftest")
+        check("and a test flag after a real one is still yellow and still silent", '"verdict": "alert"' in out and val("select count(*) from public.red_emails") == "1")
+        check("the real labels and the 0.80 floor are unchanged", "bad info" in flag(obj(3), label="MALE_GENITALIA_EXPOSED")[1] and "bad info" in flag(obj(3), label="ONN_TEST", score=0.5)[1])
+        out, err = flag(o_t, label="ONN_TEST", score=1.0, fg="selftest")
+        check("the same test frame again is a duplicate", '"duplicate": true' in out, out + err)
+        o_bad = obj(4)
+        check("a test flag still needs its frame to exist", "frame not uploaded" in flag(o_bad, label="ONN_TEST", score=1.0)[1])
+        out, err = psql("set role anon; select public.eg_onn_flag('" + "00" * 32 + "', '{}'::jsonb);", err_ok=True)
+        check("anon can still only call it with a valid token", "unauthorized" in err, err)
     finally:
         subprocess.run(dock + ["rm", "-f", name], capture_output=True)
 
