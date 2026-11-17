@@ -110,6 +110,13 @@ with tempfile.TemporaryDirectory() as t:
     check("a name built like FlagName's matches the pattern, and the Mac uploader's own naming style would too",
           bool(nm.match("onn/2026-11-17T19-06-40.123000+00-00_flagged_d1.jpg.enc")) and bool(nm.match("onn/2026-11-17T19-06-40+00-00_flagged_d1.jpg.enc")))
 
+print("the JVM test's expected time string is right (it was once wrong by 40 minutes: computed by hand, not by a tool)")
+from datetime import datetime, timezone
+jt = (ROOT / "android/onn-monitor/test/com/eyeguard/onn/FramePrepTest.java").read_text()
+ms = int(re.search(r"FlagName\.objectName\((\d+)L\)", jt).group(1))
+want = "onn/" + datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%dT%H-%M-%S.%f")[:-3] + "000+00-00_flagged_d1.jpg.enc"
+check("the string FramePrepTest expects equals Python's formatting of the epoch value it passes in", f'name.equals("{want}")' in jt, want)
+
 print("the JVM test is not in the APK")
 b = (ROOT / "android/onn-monitor/build.sh").read_text()
 check("build.sh compiles only src/ (the JVM tests live in test/)", "find \"$SRC/src\"" in b and "/test" not in b)

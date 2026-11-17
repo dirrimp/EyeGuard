@@ -70,7 +70,7 @@ public class FramePrepTest {
         Pattern server = Pattern.compile(new String(Files.readAllBytes(d.resolve("server_pattern.txt")), StandardCharsets.UTF_8).trim());
         String name = FlagName.objectName(1794940000123L);
         check("the object name matches the pattern eg_onn_flag enforces: " + name, server.matcher(name).matches());
-        check("it is 2026-11-17T... in UTC with micro-style fraction", name.equals("onn/2026-11-17T19-06-40.123000+00-00_flagged_d1.jpg.enc"));
+        check("it is 2026-11-17T18-26-40 UTC (epoch 1794940000123 ms) with a micro-style fraction", name.equals("onn/2026-11-17T18-26-40.123000+00-00_flagged_d1.jpg.enc"));
         check("a name with no fraction digits still matches the pattern", server.matcher("onn/2026-11-17T19-06-40+00-00_flagged_d1.jpg.enc").matches());
         check("foreground text keeps only letters, digits . _ -", FlagName.safeForeground("com.x/<b>y z!").equals("com.xbyz"));
         check("foreground text is capped at 120 characters and null is empty", FlagName.safeForeground("a".repeat(300)).length() == 120 && FlagName.safeForeground(null).isEmpty());
