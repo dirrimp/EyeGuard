@@ -299,6 +299,11 @@ def _clear_needs_setup(cfg: dict) -> None:
 _DEFAULT_SETUP_WARN_DAYS = 21
 _WARN_REPEAT_SECONDS = 24 * 3600
 SESSION_AGE_REASON_PREFIX = "findmy: session aging"
+# The exact steps for renewing the session. Shown in the heads-up so nobody has to look them up (the 2026-11-17 renewal needed them).
+SETUP_STEPS = ('In Terminal: cd "/Library/Application Support/EyeGuard" then '
+               '/Applications/EyeGuard.app/Contents/Resources/python/bin/python3.12 -m eyeguard.findmy_watcher --setup '
+               '(needs your Apple password and a 2FA code; wait for the prompt before typing; '
+               'if Apple answers 503, wait 45-60 minutes)')
 
 
 def _setup_info_path(cfg: dict) -> Path:
@@ -516,9 +521,8 @@ class FindMyWatcher:
                 "flagged_at": datetime.now(timezone.utc).isoformat(),
                 "verdict": "alert",
                 "reason": (f"{SESSION_AGE_REASON_PREFIX}: {days} days ({basis}); "
-                           f"heads-up at {limit:g}. Re-run findmy_watcher.py "
-                           f"--setup (needs a 2FA code) before Apple expires "
-                           f"it (last one lasted ~30 days)"),
+                           f"heads-up at {limit:g}. Renew it before Apple expires "
+                           f"it (the last one lasted ~30 days). {SETUP_STEPS}"),
                 "app": "Find My", "url": None,
                 "window_title": "Find My session aging",
                 "grade": "Possible", "risk": "neutral", "is_nudity": False})

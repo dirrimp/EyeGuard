@@ -51,6 +51,11 @@ check("verdict alert (yellow), not flagged", r["verdict"] == "alert")
 check("distinct reason, not session_expired",
       r["reason"].startswith("findmy: session aging") and "session_expired" not in r["reason"])
 check("states 21 days", "21 days" in r["reason"])
+check("gives the exact renewal command and the two traps (wait for the prompt, 503 means wait)",
+      'cd "/Library/Application Support/EyeGuard"' in r["reason"]
+      and "-m eyeguard.findmy_watcher --setup" in r["reason"] and "wait for the prompt" in r["reason"] and "503" in r["reason"])
+check("the command in the heads-up is the one deploy/findmy-cron.txt documents",
+      "-m eyeguard.findmy_watcher --setup" in (Path(__file__).resolve().parent.parent / "deploy/findmy-cron.txt").read_text())
 
 print("-- debounce: once per 24 h --")
 check("10 min later debounced", w._session_age_heads_up(day(21) + timedelta(minutes=10)) == "debounced")
