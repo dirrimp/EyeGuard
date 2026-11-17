@@ -23,6 +23,9 @@ The route is right: it is the only way to get real pixels on a TV box with no GM
 13. **Everyone who uses the TV is told in writing, not only Jonah and Dad.** Jada and any regular household viewer are told before phase 2. A small persistent on-screen indicator is a phase 2 option for guests; Jonah and Dad decide. (Replaces the narrower wording of condition 7.)
 14. **State the router cost of the direct path.** Allowing the Supabase host puts its Cloudflare edge IPs into the Onn's allow set, and those IPs serve unrelated sites. Agent IT pins the allow to 443/TCP and keeps the AdGuard deny rule. Routed to Agent IT when phase 2 is approved, not before. I do not edit the router.
 
+15. **The box is 32-bit ARM (armeabi-v7a), reported by Jonah/Agent IT 2026-11-17.** The app and the detection model must run on 32-bit: build the APK with an `armeabi-v7a` ABI, use an inference runtime that ships 32-bit libraries, and take the model size and speed numbers for condition 11 **on the real box**, not from a 64-bit phone. This is UNCHECKED until proven: before any phase 3 work, a throwaway test app runs the chosen model on the Onn and reports load time, per-frame time and memory. If no NudeNet-class model fits at an acceptable interval, that is a finding for Jonah and Dad, not a reason to fall back to keywords or to skip frames quietly (condition 1 stands).
+16. **Android 14: the accessibility service is enabled through ADB, not the Settings menu.** Nobody can turn it on from the TV's menus, and the app must not ask for that. The install session grants `WRITE_SECURE_SETTINGS` once and sets `enabled_accessibility_services` for the app's own service (condition 4's honest limit is unchanged: a viewer can still turn it off in Settings). **This needs a second ADB session when the monitor is installed**, beyond the earlier session that installs and locks down TV Bro. Plan for two sessions, each with Jonah present, a temporary Mac-to-Onn firewall rule that Agent IT removes afterwards, and wireless debugging switched off at the end. Phase 2 also tests: reboot, power pull and force-stop each bring the service back or raise the silence alert.
+
 ## Phases (each ships separately, each reviewed by Dad)
 | # | What | Who | Gate |
 |---|------|-----|------|
@@ -38,6 +41,7 @@ The Mac-side deploy watcher does not apply here. **Updates are manual over ADB, 
 - **Android version: 14 (API 34), per Jonah 2026-11-17.** `canTakeScreenshot` needs API 30, so the route works. Still to confirm in the ADB session: the system WebView exists for TV Bro, and Android 14's accessibility restrictions for sideloaded apps ("restricted settings") do not block enabling the service via the one-time `WRITE_SECURE_SETTINGS` grant.
 - **Self-update: decided, manual only** (see Phases).
 - **Signing key.** The keystore is Jonah's, offline. The app must also verify its own signing-cert hash and report it, so a swapped APK is visible server-side.
+- **32-bit ARM and Android 14 enabling:** see conditions 15 and 16.
 - **WRITE_SECURE_SETTINGS** is powerful. Granting it once via ADB is fine, but the app must use it only to re-enable its own accessibility service, and the heartbeat reports when it had to.
 - **TV Bro Incognito** bypasses history. History is not the signal here (pixels are), so this is acceptable, but the app must also monitor the TV Bro window like any other.
 - **Both new router openings** (broad egress for the Onn, the tunnel choice, AdGuard mode switch) are Agent IT's lane. This design does not edit the router.
