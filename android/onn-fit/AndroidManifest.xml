@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- EyeGuard Onn FIT TEST (phase 3 gate 1). Throwaway: no permissions at all (not even INTERNET), no service, no receiver,
+     no provider, one non-exported activity started from adb. It never reports to the server and never touches the network. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.eyeguard.onnfit">
+    <application
+        android:label="@string/app_name"
+        android:allowBackup="false"
+        android:usesCleartextTraffic="false"
+        android:extractNativeLibs="true">
+        <activity android:name=".FitActivity" android:exported="false" />
+    </application>
+</manifest>
