@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- EyeGuard Onn monitor, phase 2 (health only, no detection). INTERNET is the ONLY permission.
-     Version name/code are supplied by build.sh at link time. -->
+<!-- EyeGuard Onn monitor, phase 3 (health + on-box exposure detection). INTERNET is the ONLY permission.
+     Version name/code are supplied by the build script at link time. extractNativeLibs is true because the 32-bit ONNX Runtime
+     library is installed normally (the fit test proved this path on the real box). -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.eyeguard.onn">
 
@@ -10,7 +11,7 @@
         android:label="@string/app_name"
         android:allowBackup="false"
         android:usesCleartextTraffic="false"
-        android:extractNativeLibs="false">
+        android:extractNativeLibs="true">
 
         <!-- The only component. It is exported only because Android requires the system to bind it;
              BIND_ACCESSIBILITY_SERVICE restricts binding to the system. -->

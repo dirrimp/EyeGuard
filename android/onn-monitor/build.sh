@@ -4,6 +4,9 @@
 #   output : /out/onn-guard-unsigned.apk and /out/BUILD.txt (hashes)
 # No keystore is ever present here: signing happens on Jonah's Mac (see README.md).
 set -eu
+# LEGACY (phase 2, version 0.1.0). Since 0.2.0 the source needs ONNX Runtime and the bundled model: use build-phase3.sh. To rebuild 0.1.0
+# itself, check out commit 6b232fad8112d181fa5a1b95d52b780c8389a917 and set ALLOW_LEGACY_PHASE2=1.
+[ "${ALLOW_LEGACY_PHASE2:-}" = 1 ] || { echo "build.sh is the phase 2 (0.1.0) build; use build-phase3.sh for 0.2.0"; exit 2; }
 SRC=${SRC:-/src}; SDK=${SDK:-/sdk}; OUT=${OUT:-/out}
 BT=${BT:-$SDK/build-tools/34.0.0}; JAR=${ANDROID_JAR:-$SDK/platforms/android-34/android.jar}
 VERSION_NAME=${VERSION_NAME:-0.1.0}; VERSION_CODE=${VERSION_CODE:-1}

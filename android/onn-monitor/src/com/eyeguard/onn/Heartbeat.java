@@ -29,9 +29,19 @@ final class Heartbeat {
         return c.getPackageManager().getPackageInfo(c.getPackageName(), 0).versionName;
     }
 
+    /** What the detector reports with each beat. The SERVER decides from selftestArgmax/selftestMax whether the detector works
+     *  (it compares them with the Mac's golden values); a detector that could not start sends 0 / 0.0, which fails that comparison. */
+    static final class DetectorStatus {
+        final String modelSha256; final int selftestArgmax; final double selftestMax; final long modelMs; final int framesFlagged; final int flagsDropped;
+        DetectorStatus(String modelSha256, int selftestArgmax, double selftestMax, long modelMs, int framesFlagged, int flagsDropped) {
+            this.modelSha256 = modelSha256; this.selftestArgmax = selftestArgmax; this.selftestMax = selftestMax;
+            this.modelMs = modelMs; this.framesFlagged = framesFlagged; this.flagsDropped = flagsDropped;
+        }
+    }
+
     /** Field names and bounds MUST match eg_onn_heartbeat (tests/test_onn_app_static.py checks the names). */
     static JSONObject info(Context c, boolean svcEnabled, String screenState, long screenOnS, long windowS, int intervalS,
-                           FrameStats s) throws Exception {
+                           FrameStats s, DetectorStatus d) throws Exception {
         JSONObject o = new JSONObject();
         o.put("app_version", versionName(c));
         o.put("cert_sha256", certSha256(c));
@@ -45,7 +55,15 @@ final class Heartbeat {
         o.put("analysed", s.analysed);
         o.put("black", s.black);
         o.put("distinct_hashes", s.distinct());
-        o.put("reenabled", 0);                    // phase 2 never self-re-enables (no WRITE_SECURE_SETTINGS)
+        o.put("reenabled", 0);                    // never self-re-enables (no WRITE_SECURE_SETTINGS)
+        if (d != null) {                          // phase 3: the model hash must come with its self-test, or the server refuses the beat
+            o.put("model_sha256", d.modelSha256);
+            o.put("selftest_argmax", d.selftestArgmax);
+            o.put("selftest_max", d.selftestMax);
+            o.put("model_ms", (int) Math.max(1, Math.min(600000, d.modelMs)));
+            o.put("frames_flagged", d.framesFlagged);
+            o.put("flags_dropped", d.flagsDropped);
+        }
         return o;
     }
 
