@@ -14,11 +14,15 @@ mkdir -p "$W/classes" "$W/dex" "$OUT"
   --min-sdk-version 30 --target-sdk-version 34 --version-code "$VERSION_CODE" --version-name "$VERSION_NAME" "$W/res.zip"
 javac --release 11 -Xlint:all -classpath "$JAR" -d "$W/classes" $(find "$SRC/src" -name '*.java')
 "$BT/d8" --release --min-api 30 --lib "$JAR" --output "$W/dex" $(find "$W/classes" -name '*.class')
-( cd "$W/dex" && jar --update --no-manifest --file "$W/base.apk" classes.dex )
+# --date pins the zip entry time so two builds of the same source are byte-identical (found by Agent IT 2026-11-17)
+( cd "$W/dex" && jar --update --no-manifest --date 2026-01-01T00:00:00Z --file "$W/base.apk" classes.dex )
 "$BT/zipalign" -f -p 4 "$W/base.apk" "$OUT/onn-guard-unsigned.apk"
 { echo "version $VERSION_NAME ($VERSION_CODE)"; sha256sum "$OUT/onn-guard-unsigned.apk"; "$BT/aapt2" dump permissions "$OUT/onn-guard-unsigned.apk"; } > "$OUT/BUILD.txt"
 # fail the release on any extra permission or any native library (phase 2 is pure Java)
 PERMS=$("$BT/aapt2" dump permissions "$OUT/onn-guard-unsigned.apk" | grep -c '^uses-permission')
 [ "$PERMS" = "1" ] || { echo "FAIL: expected exactly 1 permission, found $PERMS"; exit 1; }
-unzip -l "$OUT/onn-guard-unsigned.apk" | grep -q ' lib/' && { echo "FAIL: native libraries present"; exit 1; }
+# list with jar (always present in the JDK image; unzip is not), and fail if the listing itself fails: a pipe's status comes from
+# grep, so a missing lister used to let this check pass silently (found by Agent IT 2026-11-17)
+LIST=$(jar tf "$OUT/onn-guard-unsigned.apk") || { echo "FAIL: cannot list the APK"; exit 1; }
+case "$LIST" in *lib/*) echo "FAIL: native libraries present"; exit 1;; esac
 cat "$OUT/BUILD.txt"

@@ -70,6 +70,8 @@ b = (APP / "build.sh").read_text()
 check("build.sh stops on any error", "set -eu" in b)
 check("build.sh uses no network tool and no keystore", not re.search(r"\bcurl\b|\bwget\b|keystore|apksigner|--key", b.replace("# No keystore", "").replace("No keystore", "")))
 check("build.sh fails the release on an extra permission or a native library", 'PERMS" = "1"' in b and "native libraries present" in b)
+check("build.sh cannot pass the native-library check silently (lists with jar, fails if listing fails) and pins the zip date",
+      "jar tf" in b and "cannot list the APK" in b and "unzip" not in b.replace("unzip is not", "") and "--date 2026-01-01T00:00:00Z" in b)
 check("minSdk 30 (takeScreenshot) and targetSdk 34", "--min-sdk-version 30" in b and "--target-sdk-version 34" in b)
 if fails: print("\nFAILED:", *fails, sep="\n  "); sys.exit(1)
 print("\nALL OK")
