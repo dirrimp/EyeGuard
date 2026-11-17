@@ -68,8 +68,10 @@ import fcntl
 import getpass
 import json
 import os
+import re
 import signal
 import socket
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -396,6 +398,38 @@ def _token_only_reauth(api) -> None:
     api._update_state()
 
 
+_CODE_TRIES = 3
+
+
+def _clean_code(raw: str) -> str:
+    """Keep only the digits of what was typed at the 2FA prompt. Anything typed ahead of the prompt (arrow keys arrive as
+    escape sequences like ESC[B, a stray space, a pasted dash) used to be sent to Apple as part of the code, which Apple
+    then rejected even though the digits were right (2026-11-17)."""
+    return re.sub(r"\D", "", raw or "")
+
+
+def _flush_typeahead() -> None:
+    """Drop keys pressed before a prompt appears, so they cannot become part of the answer. No-op when stdin is not a
+    terminal (tests, pipes) or termios is unavailable."""
+    try:
+        import termios
+        if sys.stdin.isatty():
+            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+    except Exception:
+        pass
+
+
+def _login_failure_message(exc: BaseException) -> str:
+    """A plain-words message for a failed Apple sign-in. A 503 or rate-limit answer comes from Apple's server before the
+    password is even looked at, so it must not read like a wrong password."""
+    text = repr(exc)
+    if "503" in text or "Service Temporarily Unavailable" in text or "429" in text or "Too Many" in text:
+        return ("Apple is temporarily refusing sign-in requests (HTTP 503/429). That is Apple's server, not your password "
+                "and not this program, and nothing was changed. Wait 45 to 60 minutes before trying again: retrying right "
+                "away makes the throttling last longer, and every attempt sends new codes to your devices.")
+    return f"Login failed: {exc}"
+
+
 def setup(cfg: dict):
     """Interactive one-time login. Must be run by Jonah himself in a real
     terminal -- the 2FA code is sent to his own trusted devices, nothing
@@ -418,13 +452,34 @@ def setup(cfg: dict):
             api = PyiCloudService(apple_id, password,
                                    cookie_directory=str(_cookie_dir(cfg)))
         except PyiCloudFailedLoginException as e:
-            print(f"Login failed: {e}")
+            print(_login_failure_message(e))
+            return
+        except Exception as e:   # e.g. Apple answering 503 outside the login-failed path: never a traceback in setup
+            print(_login_failure_message(e))
             return
 
         if api.requires_2fa:
-            code = input("Enter the 2FA code Apple just sent to your device: ").strip()
-            if not api.validate_2fa_code(code):
-                print("That code didn't validate -- nothing was saved, try again.")
+            accepted = False
+            for attempt in range(1, _CODE_TRIES + 1):
+                _flush_typeahead()
+                code = _clean_code(input("Enter the 2FA code Apple just sent to your device: "))
+                if len(code) != 6:
+                    print("That does not look like a 6-digit code (anything that was not a digit was ignored), so it was "
+                          "not sent to Apple. Try again with the newest code." if attempt < _CODE_TRIES else
+                          "That does not look like a 6-digit code.")
+                    continue
+                try:
+                    accepted = bool(api.validate_2fa_code(code))
+                except Exception as e:
+                    print(_login_failure_message(e))
+                    return
+                if accepted:
+                    break
+                if attempt < _CODE_TRIES:
+                    print("Apple did not accept that code. Codes work for only a few minutes and a newer code replaces an "
+                          "older one: use the newest code on your device. Try again.")
+            if not accepted:
+                print("That code didn't validate -- nothing was saved. Run --setup again (wait a few minutes first).")
                 return
             # Reduces how often future runs need a fresh 2FA challenge --
             # this trusts the SESSION, not the device, and only lasts as
