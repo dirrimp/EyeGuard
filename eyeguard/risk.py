@@ -67,6 +67,14 @@ def assess(verdict: str, reason: str, ctx: dict, rules: dict) -> dict:
     if hit("suppress"):
         return {"keep": False, "risk": "suppressed", "grade": "", "score": score}
 
+    # SHOW MUTE (2026-11-17, approved by Jonah and Dad): a named TV show's image flags are dropped
+    # EXCEPT NudeNet's own detections. NudeNet (a trained exposure detector) is the one signal that
+    # still alerts, at full strength, on a muted show. Only CLIP yellow/red (and CLIP tile reds) are
+    # dropped, because that is what misreads faces/skin tones in a sitcom. The text (OCR) layer is
+    # not touched by this rule.
+    if hit("show_mute") and not (reason or "").startswith("nudenet"):
+        return {"keep": False, "risk": "show-muted", "grade": "", "score": score}
+
     if hit("high_risk"):
         risk = "high"
     elif hit("low_risk"):

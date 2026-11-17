@@ -427,6 +427,13 @@ context_risk:
   # Entries written "app:Name" match ONLY when the frontmost app's name is exactly Name (a page title
   # or URL with the word "code" / "striped" / "barcode" cannot trigger them). Every other entry is a
   # case-insensitive substring of app + window title + URL, as before.
+  # SHOW MUTE (2026-11-17; Jonah + Dad): a named TV show's CLIP flags (yellow, red, tile red) are dropped, and ONLY
+  # NudeNet's own detections ("nudenet:LABEL=score") still alert on it, at full strength and never discounted. Matches a
+  # case-insensitive substring of app + window title + URL. A page that merely puts the show's name in its title
+  # therefore loses its CLIP flags too, but NudeNet still catches exposure there. The text (OCR) layer is unchanged.
+  show_mute:
+    - "gilmore girls"
+
   # SUPPRESS — drop flags here (suggestive content effectively can't occur).
   suppress:
     - "app:loginwindow"
