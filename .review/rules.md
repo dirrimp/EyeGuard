@@ -110,11 +110,12 @@ A new binary or interpreter path means Screen Recording / FDA must be re-granted
 Why: TCC GOTCHA #2 (2026-06); `brew pin python@3.12` to keep the TCC-keyed path stable.
 Check: grep the diff for `~/Desktop`, `/Desktop/`, `Documents`, `Downloads` in plists and installers; flag a changed interpreter path.
 
-### EG-OPS-04 · major · scope: all PRs
+### EG-OPS-04 · minor · scope: deploy/**, supabase/**, router/**, g11/** (was major, all PRs; demoted by the 2026-11 replay)
 Every PR has a Rollback section and a "how we know it is live" check (process start time vs
 deploy time, not only the file on disk), and states any restart needed.
 Why: PR #17 was "merged + deployed" yet did not fix the gray icon; live proof beats a merged PR.
 Check: PR body headings.
+Replay 2026-11: 0 of 35 PRs had a Rollback section and no escape traced to its absence; it fired on every PR, so it is minor.
 
 ### EG-OPS-05 · minor · scope: supabase/** alert paths
 Async alert paths (pg_net) are verified in the real inbox after a 2-minute wait before calling them failed.
@@ -126,6 +127,12 @@ State files survive a full disk and a crash mid-write (write temp, fsync, rename
 Why: 3508a83 (state files survive ENOSPC).
 Check: new state writers use the atomic helper, not `open(path, "w")`.
 Pre-pass: a write-mode open() in eyeguard/, router/ or g11/ Python whose file has no fsync is flagged. Why: #114 -> #120.
+
+### EG-OPS-07 · major · scope: router/**, deploy/*router*, deploy/*phone*, deploy/*dnsnet*
+Processes a monitor starts (tcpdump, curl, logread) die with it: a SIGTERM handler stops the children, and start-up
+sweeps orphans that match only its own command shapes. Router installers use commands the router has (no `pkill`).
+Why: #109 (installer `pkill` absent on the router; 10-15 orphaned captures per restart), #136 (no SIGTERM handler).
+Check: new subprocess.Popen in router code is registered for cleanup; grep router installers for `pkill`.
 
 ## Tests
 
