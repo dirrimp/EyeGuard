@@ -121,7 +121,7 @@ check("the class path and the dex input are the STRIPPED jar; the original class
       and re.search(r'd8.*\$\(find "\$W/classes".*"\$STRIPPED"', build) is not None)
 check("libraries stored uncompressed, page-aligned and the zip date pinned (reproducible)", "--no-compress" in build and "zipalign\" -c -p 4" in build and "DATE=2026-01-01T00:00:00Z" in build)
 check("no network tool, keystore or signing in the script", not re.search(r"\bcurl\b|\bwget\b|keystore|apksigner|--key", build.replace("No keystore", "")))
-check("only armeabi-v7a, version 0.2.1 (code 3)", "native-code: 'armeabi-v7a'" in build and "VERSION_NAME=${VERSION_NAME:-0.2.1}" in build and "VERSION_CODE=${VERSION_CODE:-3}" in build and "arm64" not in build)
+check("only armeabi-v7a, version 0.2.2 (code 4)", "native-code: 'armeabi-v7a'" in build and "VERSION_NAME=${VERSION_NAME:-0.2.2}" in build and "VERSION_CODE=${VERSION_CODE:-4}" in build and "arm64" not in build)
 legacy = (APP / "build.sh").read_text()
 check("the phase 2 build.sh refuses to run unless explicitly asked (it can no longer compile this source)", "ALLOW_LEGACY_PHASE2" in legacy and "exit 2" in legacy)
 if fails: print("\nFAILED:", *fails, sep="\n  "); sys.exit(1)
