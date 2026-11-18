@@ -25,7 +25,7 @@ Bad: `except Exception: pass` around a signal read.
 Good: `except Exception: log.exception("phone liveness read failed"); state.mark_degraded()`
 Check: grep the diff for `except` with `pass`, `continue`, or a bare return inside loops.
 
-### EG-COV-03 · major · scope: eyeguard/**, router/**, supabase/**
+### EG-COV-03 · major · scope: eyeguard/**, router/**, g11/**, supabase/**
 "Nothing changed on screen" must never be confused with "capture failed". A new or changed
 liveness, dark or stale check names its signal, its false-positive case, and its false-negative case.
 Why: Screen Recording TCC gotcha (a denied permission returns a static wallpaper frame, not an error); 3b21ad7 and 068cf94 (screen_ok alerts during display sleep).
@@ -72,6 +72,8 @@ The Mac agent holds NO secret: public anon key only, through RPCs that cannot be
 (server-stamped heartbeat, append-only flag insert via RLS). Never add a service_role key,
 private key, password or token to the repo, config.yaml, the Mac, or the router bundle.
 New RPCs get `revoke ... from anon` unless the anon grant is deliberate and reasoned in the PR.
+`revoke ... from public` alone is NOT enough on Supabase (anon is granted directly). Why: #108/#110 -> #112.
+Pre-pass: a new `create function` in supabase/ with no revoke-from-anon or grant-to-anon is flagged (major).
 Why: admin-trust pivot 2026-08-24 (PRs #37-#49); supabase/revoke_anon_on_new_functions.sql; harden_functions.sql.
 Check: grep the diff for key-shaped strings; for each new SQL function, find its grant/revoke.
 
@@ -119,10 +121,11 @@ Async alert paths (pg_net) are verified in the real inbox after a 2-minute wait 
 Why: pg_net sends are queued, not synchronous.
 Check: PR body names the inbox check.
 
-### EG-OPS-06 · major · scope: eyeguard/**, router/**
+### EG-OPS-06 · major · scope: eyeguard/**, router/**, g11/**
 State files survive a full disk and a crash mid-write (write temp, fsync, rename; recover from the last good copy).
 Why: 3508a83 (state files survive ENOSPC).
 Check: new state writers use the atomic helper, not `open(path, "w")`.
+Pre-pass: a write-mode open() in eyeguard/, router/ or g11/ Python whose file has no fsync is flagged. Why: #114 -> #120.
 
 ## Tests
 
