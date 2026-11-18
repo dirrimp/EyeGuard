@@ -40,3 +40,11 @@ Everything below is **router, DNS or the Onn's own settings: Agent IT's lane, no
 - **Dad:** approve this page (review or merge on GitHub).
 - **Jonah:** per-item OK for each router/AdGuard change IT proposes; a ten-minute 4K playback test on day one.
 - **IT:** the four items above, with backups, verification and the rollback commands.
+
+## Addendum 2026-11-17 (evening): YouTube TV installed, gate 2 first result
+Source: Agent IT's report `it-20261117-2130-youtubetv.md` (per IT; Jonah chose each step) and Dad's `onn_beats` rows.
+- **What changed:** YouTube TV 3.83.03 was sideloaded from a verified bundle, and Google Play services plus the services framework were restored for the TV user (the Play Store stays removed, no Google account on the box, location off). This reverses part of the 2026-10-29 lockdown, at Jonah's request, with IT's muzzling and the limits IT could not block (system-fixed location permissions, tracking components) listed in IT's report.
+- **Gate 2 (first data):** while YouTube TV played, `model_ms` rose from about 285 to 355, 465 and 529 ms, every screenshot still succeeded, and Jonah saw no stutter. Playback smoothness passes on this sample; a 10-minute 4K title is still the full test.
+- **New blind spot (known, now observed):** the streaming window had 20 of 20 screenshots black with one distinct frame. This is consistent with protected (DRM) video, which Android returns as black; I have not proven the cause. While a protected stream is on screen, the detector sees nothing. Menus, search and thumbnails are not protected and are still captured.
+- **What covers it today:** the server's `onn_black` alert emails after about 30 minutes of mostly black frames with the screen on. That is the designed signal, not a false alarm. Long YouTube TV sessions will produce it.
+- **Coverage impact:** no monitoring is removed. The blind spot comes from the app being installed, and is disclosed here. A possible mitigation (reading the on-screen title) is a separate proposal: `docs/ONN-DRM-TITLE-DESIGN.md`.
