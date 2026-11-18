@@ -120,12 +120,76 @@ def jwt_service_role(line):
     return False
 
 
+# Replay tuning (2026-11-17, PRs #100-#137): every pre-pass hit on that set was a false alarm, all of one of
+# three kinds: (1) tests/ that plant or assert on the very pattern; (2) the SQL files the mail guard itself
+# allows to name Resend or a sender; (3) a print() whose STRING merely says "token"/"password".
+TEST_EXEMPT = {"EG-COV-02", "EG-COV-04", "EG-SEC-01"}
+# Mirrors LITERAL_OK in tests/test_mail_sender_guard.py (read, never edited here).
+MAIL_OK = {"alerts.sql", "jada_phone.sql", "mdm_app_events.sql",
+           "switch_sender_to_orthanc.sql", "central_mail_sender.sql", "align_alert_senders.sql"}
+_STR = re.compile(r"""(?P<q>'|")(?:\\.|(?!(?P=q)).)*(?P=q)""")
+
+
+def _code_only(line):
+    """Drop string-literal text but keep f-string {expressions}: "token" in a message is not a token value."""
+    return _STR.sub(lambda m: " " + " ".join(re.findall(r"\{([^{}]*)\}", m.group(0))), line)
+
+
+def _skip(rid, path):
+    if rid in TEST_EXEMPT and path.startswith("tests/"):
+        return True
+    return rid == "EG-COV-04" and path.rsplit("/", 1)[-1] in MAIL_OK
+
+
+def _head_text(path):
+    f = ROOT / path
+    try:
+        return f.read_text(errors="replace") if f.is_file() and not denied(path) else ""
+    except OSError:
+        return ""
+
+
+_FN = re.compile(r"create\s+(?:or\s+replace\s+)?function\s+(?:public\.)?(\w+)\s*\(", re.I)
+
+
+def anon_unhandled(path, added):
+    """EG-SEC-02 (last line): a NEW function in supabase/ with no revoke-from-anon and no deliberate grant to anon.
+    `revoke ... from public` alone leaves anon able to call it on Supabase (the #108/#110 -> #112 escape)."""
+    if not path.startswith("supabase/") or not path.endswith(".sql"):
+        return []
+    text = "\n".join(added) + "\n" + _head_text(path)
+    out = []
+    for name in dict.fromkeys(_FN.findall("\n".join(added))):
+        if not re.search(rf"(revoke[^;]*\b{name}\b[^;]*\bfrom\b[^;]*\banon\b|grant[^;]*\b{name}\b[^;]*\bto\b[^;]*\banon\b)", text, re.I | re.S):
+            out.append(name)
+    return out
+
+
+def unsafe_state_write(path, added):
+    """EG-OPS-06: a write-mode open() in runtime Python whose file has no fsync (the #114 -> #120 escape)."""
+    if path.startswith("tests/") or not path.endswith(".py") or not path.startswith(("eyeguard/", "router/", "g11/")):
+        return []
+    w = [l for l in added if re.search(r"""open\([^)]*,\s*['"]w""", l)]
+    if not w or "fsync" in "\n".join(added) + _head_text(path):
+        return []
+    return w
+
+
 def mechanical(files):
     hits = []
     for path, added in files.items():
+        for name in anon_unhandled(path, added):
+            hits.append(("EG-SEC-02", "major", path, f"function {name}",
+                         "new RPC without `revoke ... from anon` (or a reasoned `grant ... to anon`)"))
+        for l in unsafe_state_write(path, added)[:3]:
+            hits.append(("EG-OPS-06", "major", path, l.strip()[:140],
+                         "state write without fsync; use write-temp/fsync/rename and keep a last good copy"))
         for l in added:
             for rid, sev, glob, rx, msg in MECH:
-                if fnmatch.fnmatch(path.rsplit("/", 1)[-1], glob) and re.search(rx, l, re.I):
+                if _skip(rid, path):
+                    continue
+                probe = _code_only(l) if rid == "EG-SEC-01" else l
+                if fnmatch.fnmatch(path.rsplit("/", 1)[-1], glob) and re.search(rx, probe, re.I):
                     if ALLOW_MARK in l and rid in l:
                         msg += " (author marked review-ok; severity unchanged, justify in PR body)"
                     shown = "[line withheld: possible key material]" if rid == "EG-SEC-02" else l.strip()[:140]

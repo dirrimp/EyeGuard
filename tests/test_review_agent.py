@@ -62,6 +62,27 @@ check("a key hit never echoes the line (redacted in the review input)",
 check("EG-SEC-02 still a blocker", all(h[1] == "blocker" for h in hit))
 check("EG-SEC-01 secret logged", "EG-SEC-01" in ids(diff("eyeguard/x.py", "log.info(f'auth with {password}')")))
 # clean diff passes
+# Replay tuning (2026-11-17): real escapes from #100-#137 are caught; the replay's false-alarm shapes are not.
+RS = "api.re" + "send.com"
+check("EG-SEC-02 new RPC revoked only from public (the #108/#110 -> #112 escape)",
+      "EG-SEC-02" in ids(diff("supabase/zz_new.sql", "create or replace function public.eg_zz_check() returns void as $$ $$;",
+                              "revoke all on function public.eg_zz_check() from public;")))
+check("EG-SEC-02 RPC revoked from anon passes",
+      "EG-SEC-02" not in ids(diff("supabase/zz_new.sql", "create function public.eg_zz_ok() returns void as $$ $$;",
+                                  "revoke execute on function public.eg_zz_ok() from public, anon, authenticated;")))
+check("EG-SEC-02 deliberate grant to anon passes",
+      "EG-SEC-02" not in ids(diff("supabase/zz_new.sql", "create function public.eg_zz_beat() returns void as $$ $$;",
+                                  "grant execute on function public.eg_zz_beat() to anon;")))
+check("EG-OPS-06 state write without fsync (the #114 -> #120 escape)",
+      "EG-OPS-06" in ids(diff("g11/mdm/zz.py", "    json.dump(data, open(p + '.tmp', 'w'))", "    os.replace(p + '.tmp', p)")))
+check("EG-OPS-06 atomic write with fsync passes",
+      "EG-OPS-06" not in ids(diff("g11/mdm/zz.py", "    with open(t, 'w') as f:", "        f.write(x); f.flush(); os.fsync(f.fileno())")))
+check("tests/ may plant a swallowed except", "EG-COV-02" not in ids(diff("tests/test_x.py", "    except Exception: pass")))
+check("tests/ may name the mail API", "EG-COV-04" not in ids(diff("tests/test_x.py", f"assert '{RS}' not in sql")))
+check("an allowed sender file may name the mail API", "EG-COV-04" not in ids(diff("supabase/jada_phone.sql", f"url := 'https://{RS}/emails',")))
+check("any other SQL naming the mail API still blocks", "EG-COV-04" in ids(diff("supabase/zz_new.sql", f"url := 'https://{RS}/emails',")))
+check("a print whose TEXT says token is not flagged", "EG-SEC-01" not in ids(diff("eyeguard/x.py", "print('-- no saved session token: alert --')")))
+check("a log of the token VALUE still blocks", "EG-SEC-01" in ids(diff("eyeguard/x.py", "log.info('token=%s', token)")))
 clean = diff("eyeguard/x.py", "def add(a, b):", "    return a + b")
 check("clean diff has no hits", not ids(clean))
 check("clean diff exit-code path: no blockers", not [h for h in rc.mechanical(rc.split_diff(clean)[0]) if h[1] == "blocker"])
