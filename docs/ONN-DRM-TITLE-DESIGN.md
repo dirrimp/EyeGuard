@@ -34,6 +34,17 @@ DRM blocks pixels, not text. Ask the app on the box for *what is playing* (a tit
 - Whoever holds the TV can still switch the service off. This is detection, not prevention; the server alerts when the service goes silent or is turned off.
 - Some players may expose nothing usable. The spike answers that before any build.
 
+## Jonah's answers (2026-11-17, his words in chat; Dad's review is still the approval)
+1. Collect titles: **yes**. 2. **Only during black frames.** 3. Keep **30 days**: "30 is fine". 4. Spike: pending his OK after reading the spike plan below.
+
+## The spike, concretely (one ADB session, about 20 minutes)
+- **What it is:** a throwaway test app with its own package name (not `com.eyeguard.onn`), signed with a disposable key, **no INTERNET permission** (it cannot upload anything), enabled alongside the real monitor. The real 0.2.1 keeps running and no approved-build row is touched.
+- **What it logs (on the box only, to logcat):** for each window-change event, the app package, whether a title string exists, its length, whether it is just the app's generic name, and a short hash. It never logs the text itself, so no agent sees any title.
+- **What Jonah does:** play two different YouTube TV videos (one protected, one not if possible), then a Jellyfin title.
+- **What it answers:** does a title-like string exist, and does the hash change from video to video (a real title) or stay the same (generic label)? Only those yes/no facts go in IT's report.
+- **How it ends:** uninstall the spike, remove it from the enabled-service list, ADB off, temporary router rule deleted, as in IT's earlier closeouts. Needs Jonah's per-item OK for the temporary rule.
+- **If the answer is no:** option B gets its own spike and its own approval; nothing is built on a guess.
+
 ## Open questions for Jonah (yes/no or a value)
 1. Do you want titles collected at all, knowing Dad (and Jada's key) can read them?
 2. Only during black/protected video, or whenever YouTube TV is open? (Recommended: only during black.)
