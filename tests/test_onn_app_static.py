@@ -19,7 +19,7 @@ man = ET.parse(APP / "AndroidManifest.xml").getroot()
 java = {p.name: p.read_text() for p in (APP / "src/com/eyeguard/onn").glob("*.java")}
 alljava = "\n".join(java.values())
 sql = (ROOT / "supabase/onn_monitor_phase1.sql").read_text()
-sql3 = (ROOT / "supabase/onn_monitor_phase3.sql").read_text()   # the live heartbeat function since phase 3 (it replaces phase 1's)
+sql3 = (ROOT / "supabase/onn_monitor_phase5a_titlefacts.sql").read_text()   # the live heartbeat function since phase 5a (phase 3 body + 4 title counts)
 
 print("manifest")
 perms = [p.get(A + "name") for p in man.findall("uses-permission")]
@@ -40,7 +40,16 @@ print("source promises")
 check("one server host, a constant, equal to the Supabase host in config.yaml",
       re.search(r'HOST = "([a-z0-9.]+)"', java["Config.java"]).group(1) ==
       re.search(r"url: https://([a-z0-9.]+)", (ROOT / "config.yaml").read_text()).group(1))
-check("no other URL or host literal in the source", not re.findall(r'"https?://', alljava) and len(re.findall(r'"[a-z0-9-]+(?:\.[a-z0-9-]+){2,}"', alljava)) == 1)
+nontitle = "\n".join(v for k, v in java.items() if k != "TitleFacts.java")
+check("no other URL or host literal in the source (the media-app allowlist in TitleFacts is package names, checked below)",
+      not re.findall(r'"https?://', alljava) and len(re.findall(r'"[a-z0-9-]+(?:\.[a-z0-9-]+){2,}"', nontitle)) == 1)
+check("TitleFacts: only the three media-app packages are read, nothing is logged or sent from it, and text never leaves the class",
+      set(re.findall(r'"([a-z]+(?:\.[a-z]+){2,})"', java["TitleFacts.java"])) ==
+      {"com.google.android.youtube.tvunplugged", "com.google.android.youtube.tv", "org.jellyfin.androidtv"}
+      and not re.search(r"Log\.|System\.(out|err)|JSONObject|URL|Socket|File", java["TitleFacts.java"])
+      and "TitleFacts.watched(pkg)" in java["GuardService.java"] and java["GuardService.java"].index("TitleFacts.watched(pkg)") < java["GuardService.java"].index("e.getText()"))
+check("the four title counts are integers only (the heartbeat sends t.events/withText/specific/distinct(), never text)",
+      sorted(re.findall(r'o\.put\("(title_[a-z_]+)", (t\.[A-Za-z]+(?:\(\))?)\)', java["Heartbeat.java"])) == sorted([("title_events", "t.events"), ("title_with_text", "t.withText"), ("title_specific", "t.specific"), ("title_distinct", "t.distinct()")]))
 check("the connection is HTTPS to Config.HOST and never follows redirects",
       'new URL("https", Config.HOST, Config.PATH)' in java["Heartbeat.java"] and "setInstanceFollowRedirects(false)" in java["Heartbeat.java"])
 check("no logging at all (the token can never reach a log)", not re.search(r"android\.util\.Log|\bLog\.[a-z]\(|System\.(out|err)|printStackTrace", alljava))

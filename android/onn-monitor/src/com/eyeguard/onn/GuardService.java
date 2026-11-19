@@ -34,6 +34,7 @@ public class GuardService extends AccessibilityService {
     private final ExecutorService io = Executors.newSingleThreadExecutor();   // frame callbacks, detector, stats, beat snapshots
     private final ExecutorService net = Executors.newSingleThreadExecutor();  // blocking HTTPS
     private final FrameStats stats = new FrameStats();                        // io thread only
+    private final TitleFacts titles = new TitleFacts();                       // io thread only; counts, never text
     private final Detector detector = new Detector();                         // io thread only
     private final FlagUploader uploader = new FlagUploader();
     private List<Egf2.Recipient> recipients;                                  // io thread only
@@ -110,6 +111,16 @@ public class GuardService extends AccessibilityService {
     @Override public void onAccessibilityEvent(AccessibilityEvent e) {
         CharSequence p = e.getPackageName();
         if (p != null) lastPackage = p.toString();
+        // Phase 5a facts: only allowlisted media apps are read at all; the text is turned into counts on the io thread and dropped.
+        String pkg = p == null ? null : p.toString();
+        if (!TitleFacts.watched(pkg)) return;
+        StringBuilder sb = new StringBuilder();
+        List<CharSequence> parts = e.getText();
+        if (parts != null) for (CharSequence c : parts) if (c != null) sb.append(c).append(' ');
+        CharSequence cd = e.getContentDescription();
+        if (cd != null) sb.append(cd);
+        final String text = sb.toString(), cls = String.valueOf(e.getClassName());
+        try { io.execute(() -> titles.event(pkg, cls, text)); } catch (Throwable ignored) { }
     }
 
     @Override public void onInterrupt() { }
@@ -264,8 +275,9 @@ public class GuardService extends AccessibilityService {
                     long onS = stats.screenOnMs / 1000;
                     Heartbeat.DetectorStatus d = new Heartbeat.DetectorStatus(Detector.MODEL_SHA256, selfArgmax, selfMax,
                             detector.medianMs(), framesFlagged, uploader.takeDropped());
-                    org.json.JSONObject info = Heartbeat.info(this, svcEnabled, state, onS, windowS, SHOT_MS / 1000, stats, d);
+                    org.json.JSONObject info = Heartbeat.info(this, svcEnabled, state, onS, windowS, SHOT_MS / 1000, stats, d, titles);
                     stats.reset();
+                    titles.reset();
                     framesFlagged = 0;
                     if (cfg == null) return;                                      // not configured: report nothing
                     net.execute(() -> Heartbeat.send(cfg, info));

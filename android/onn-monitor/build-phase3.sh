@@ -1,5 +1,5 @@
 #!/bin/sh
-# Builds the UNSIGNED phase 3 (0.2.1) APK with raw SDK tools, in Agent IT's network-less, hash-pinned container.
+# Builds the UNSIGNED phase 3 (0.2.2) APK with raw SDK tools, in Agent IT's network-less, hash-pinned container.
 #   inputs : /src (this folder, ro), /sdk (build-tools r34 + platform-34), /pins (pinned ONNX Runtime pieces + the NudeNet model, ro)
 #   output : /out/onn-guard-unsigned.apk and /out/BUILD-PHASE3.txt (every hash)
 # No keystore is ever present: Jonah signs on his Mac. Checks FAIL the build (see the end): one permission, one service, exactly the two
@@ -9,7 +9,7 @@ SRC=${SRC:-/src}; SDK=${SDK:-/sdk}; OUT=${OUT:-/out}; PINS=${PINS:-/pins}
 BT=${BT:-$SDK/build-tools/34.0.0}; JAR=${ANDROID_JAR:-$SDK/platforms/android-34/android.jar}
 ORT=${ORT:-$PINS/ort-1.31.1-armeabi-v7a}; MODEL=${MODEL:-$PINS/nudenet-3.4.2/320n.onnx}
 MODEL_SHA=c15d8273adad2d0a92f014cc69ab2d6c311a06777a55545f2c4eb46f51911f0f
-VERSION_NAME=${VERSION_NAME:-0.2.1}; VERSION_CODE=${VERSION_CODE:-3}
+VERSION_NAME=${VERSION_NAME:-0.2.2}; VERSION_CODE=${VERSION_CODE:-4}
 DATE=2026-01-01T00:00:00Z
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 ( cd "$PINS" && sha256sum -c SHA256SUMS ) || { echo "FAIL: pinned inputs do not verify"; exit 1; }

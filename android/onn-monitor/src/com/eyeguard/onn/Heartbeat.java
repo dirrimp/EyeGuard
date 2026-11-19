@@ -41,7 +41,7 @@ final class Heartbeat {
 
     /** Field names and bounds MUST match eg_onn_heartbeat (tests/test_onn_app_static.py checks the names). */
     static JSONObject info(Context c, boolean svcEnabled, String screenState, long screenOnS, long windowS, int intervalS,
-                           FrameStats s, DetectorStatus d) throws Exception {
+                           FrameStats s, DetectorStatus d, TitleFacts t) throws Exception {
         JSONObject o = new JSONObject();
         o.put("app_version", versionName(c));
         o.put("cert_sha256", certSha256(c));
@@ -63,6 +63,12 @@ final class Heartbeat {
             o.put("model_ms", (int) Math.max(1, Math.min(600000, d.modelMs)));
             o.put("frames_flagged", d.framesFlagged);
             o.put("flags_dropped", d.flagsDropped);
+        }
+        if (t != null) {                          // phase 5a: four counts, never text (supabase/onn_monitor_phase5a_titlefacts.sql)
+            o.put("title_events", t.events);
+            o.put("title_with_text", t.withText);
+            o.put("title_specific", t.specific);
+            o.put("title_distinct", t.distinct());
         }
         return o;
     }
