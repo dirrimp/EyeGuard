@@ -38,7 +38,15 @@ are longer. If this file disagrees with the code, the code wins and this file ge
 
 ## Approved outbound hosts (EG-SEC-03)
 Supabase project (anon RPC/REST/Storage), Resend (via Supabase SQL only), GitHub API (deploy_watcher poll,
-public), the G11 on the LAN, the router on the LAN. Anything else needs a line here and Jonah's OK.
+public), the G11 on the LAN, the router on the LAN. 
+Approved 2026-11 (already live, listed after the 2026-11 replay):
+- Router network monitor (#135/#137), daily list downloads by curl; a failed fetch keeps the last good copy:
+  - raw.githubusercontent.com (X4BNet lists_vpn): known VPN server ranges, to alert when a device routes around monitoring through a VPN.
+  - gitlab.torproject.org (tor-browser-build pt_config.json): Tor default bridges, same purpose for Tor.
+  - onionoo.torproject.org: running Tor relays, same purpose.
+  These are detection DATA from third parties: a bad or emptied list can hide a VPN/Tor bypass. A change that
+  drops a list, or accepts a much smaller one without a log line, is EG-COV-01.
+- G11 NanoMDM to Apple's push service (APNs, #114): wakes the supervised iPhone for MDM checks.
 
 ## Things that look like bugs but are not
 - The anon key in config.yaml is public by design.
