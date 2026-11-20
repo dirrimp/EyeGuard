@@ -139,6 +139,11 @@ class EyeGuardApp(rumps.App):
         self._screen_ok = True          # False = blind (black or frozen wallpaper)
         self._last_probe_ok = True      # edge tracking for _log_diag transitions
         self._uploader = None           # set once the detection loop starts
+        # Power events (sleep / wake / display sleep) that arrive BEFORE the uploader exists are remembered here and replayed by
+        # _install_uploader(), instead of being dropped (2026-11-19: a deploy restart 4 s before a lid close lost the sleep event).
+        self._power_lock = threading.Lock()
+        self._deferred_power = None     # last of "suspend" / "resume"
+        self._deferred_screen = None    # last of "asleep" / "awake"
         self._log_seen = False          # have we ever seen a non-empty flag log?
         self._log_missing = 0           # consecutive checks the log was missing
         self._log_lines = None          # tamper baseline: last known line count
@@ -451,8 +456,12 @@ class EyeGuardApp(rumps.App):
         detection caught what IOKit didn't. Logging the notification firing
         itself (not just success/failure, which _heartbeat_failed()/_ok()
         already route to the same log) closes that specific gap."""
-        up = self._uploader
+        with self._power_lock:
+            up = self._uploader
+            if up is None:
+                self._deferred_power = action
         if up is None:
+            self._log_diag(f"power event: {name} -> {action} (uploader not ready yet; will replay)")
             return
         self._log_diag(f"power event: {name} -> {action}")
         try:
@@ -465,8 +474,12 @@ class EyeGuardApp(rumps.App):
         """Display-only wake -- see _register_power_observers()'s docstring.
         Only extends the grace window; never touches _suspended or posts a
         beacon, since the Mac was never actually offline."""
-        up = self._uploader
+        with self._power_lock:
+            up = self._uploader
+            if up is None:
+                self._deferred_screen = "awake"
         if up is None:
+            self._log_diag("screens woke (uploader not ready yet; will replay)")
             return
         try:
             up.note_screen_resumed()
@@ -481,8 +494,12 @@ class EyeGuardApp(rumps.App):
         screen_ok=false reporting for the whole sleep, not just a post-wake
         grace window; never touches _suspended or posts a beacon, since the
         Mac isn't actually offline."""
-        up = self._uploader
+        with self._power_lock:
+            up = self._uploader
+            if up is None:
+                self._deferred_screen = "asleep"
         if up is None:
+            self._log_diag("screen went to sleep (uploader not ready yet; will replay)")
             return
         try:
             up.note_screen_asleep()
@@ -531,6 +548,32 @@ class EyeGuardApp(rumps.App):
         print("[uploader] cloud sync on", flush=True)
         return up
 
+    def _install_uploader(self, uploader):
+        """Publish the uploader and replay any power event that arrived before it existed. Setting the uploader and taking the
+        deferred events happen under one lock, so an event is either deferred (and replayed here) or applied directly, never lost
+        and never applied twice. Only the LAST state of each kind is replayed (a sleep followed by a wake replays as a wake)."""
+        with self._power_lock:
+            self._uploader = uploader
+            power, screen = self._deferred_power, self._deferred_screen
+            self._deferred_power = self._deferred_screen = None
+        if uploader is None:
+            return
+        try:
+            if power == "suspend":
+                self._log_diag("replaying a sleep that arrived before the uploader was ready")
+                uploader.suspend()
+            elif power == "resume":
+                self._log_diag("replaying a wake that arrived before the uploader was ready")
+                uploader.resume()
+            if screen == "asleep":
+                uploader.note_screen_asleep()
+                self._log_diag("replayed: screen went to sleep before the uploader was ready")
+            elif screen == "awake":
+                uploader.note_screen_resumed()
+                self._log_diag("replayed: screens woke before the uploader was ready")
+        except Exception:
+            self._log_diag("replay of a deferred power event failed:\n" + traceback.format_exc())
+
     # ---- detection (background thread) --------------------------------------
 
     def _detection_loop(self):
@@ -549,7 +592,6 @@ class EyeGuardApp(rumps.App):
                 blur_red_frames=log_cfg.get("blur_red_frames", True),
                 blur_strength=log_cfg.get("blur_strength", 50))
             uploader = self._build_uploader()
-            self._uploader = uploader
             if uploader is not None:
                 # Stamp each heartbeat with screen health + frame count so the
                 # server can alert if the agent goes blind or its analysis stalls.
@@ -559,6 +601,8 @@ class EyeGuardApp(rumps.App):
                                 "frames_analyzed": self._frames_analyzed,
                                 "detector_ok": self._detector_ok}
                 uploader.set_status_provider(_status)
+                # Publish it last of these, so a replayed wake sends a heartbeat that already carries the status.
+                self._install_uploader(uploader)
 
                 # Deployed-code/config integrity: runs in this same process
                 # now (admin-trust-model pivot, 2026-08-24 -- there is no
@@ -578,6 +622,8 @@ class EyeGuardApp(rumps.App):
                             check_seconds=int(fi_cfg.get("check_seconds", 300)),
                         ).run,
                         daemon=True).start()
+            else:
+                self._install_uploader(None)
             interval = cap["interval_seconds"]
         except Exception as e:
             with self._lock:
