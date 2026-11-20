@@ -129,6 +129,35 @@ fire, dark_secs, _, _ = phone._evaluate_liveness(
 check("a tie is not treated as 'recently left home' -- fires at the "
       "original 150s, matching pre-fix behavior on a fresh start", fire)
 
+print("— dark-context logging (2026-11-19) is log-only and never blocks the flag —")
+st = fresh_state(last_home_seen=t0 - 1000, last_wg_seen=t0)
+ctx = phone._dark_context(st, t0 + 168, False, 168, DARK, GRACE)
+check("a phone whose freshest signal was WireGuard is reported last=wg, grace not applied, threshold 150",
+      "last=wg" in ctx and "grace_applied=False" in ctx and "threshold=150" in ctx and "wg_age=168s" in ctx, ctx)
+st = fresh_state(last_home_seen=t0, last_wg_seen=t0 - 1000)
+ctx = phone._dark_context(st, t0 + 100, False, 100, DARK, GRACE)
+check("a phone that just left home is reported last=home, grace applied, threshold 190",
+      "last=home" in ctx and "grace_applied=True" in ctx and "threshold=190" in ctx, ctx)
+before = dict(st)
+phone._dark_context(st, t0 + 100, False, 100, DARK, GRACE)
+check("building the context does not change the state", st == before)
+_real_run = phone.subprocess.run
+def _boom(*a, **k): raise OSError("no such binary")
+phone.subprocess.run = _boom
+try:
+    probe = phone._dark_probe()
+finally:
+    phone.subprocess.run = _real_run
+check("a failing probe returns text and never raises (so the flag is still sent)",
+      isinstance(probe, str) and "neigh=" in probe and "handshake_age=" in probe, probe)
+src = (ROOT / "router" / "eyeguard-phone.py").read_text()
+i = src.index("if fire_dark:\n            try:")
+j = src.index("sb_post(\"/rest/v1/flags\"", i)
+check("the context code sits inside try/except BEFORE the flag post, and the flag payload keeps its reason and verdict",
+      "except Exception" in src[i:j] and "DARK_VERDICT" in src[j:j + 400] and "phone-dark: silent for" in src[j:j + 700])
+check("no secret is logged: the context line carries no key, token or address",
+      not any(w in src[src.index("def _dark_context"):src.index("def heartbeat_loop")] for w in ("API_KEY", "TOKEN", "WG_PEER}", "endpoint")))
+
 print()
 if fails:
     print(f"FAILED — {len(fails)} check(s) failed: {fails}")

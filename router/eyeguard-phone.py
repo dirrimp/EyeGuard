@@ -912,6 +912,41 @@ def send_mdm_poke(dark_secs):
               flush=True)
 
 
+def _dark_context(state, now, ping_ok, dark_secs, dark, grace):
+    """One log line saying WHICH signal was last alive when a phone-dark flag fires (2026-11-19). Pure: no I/O, reads `state` only.
+    Log-only diagnostics for the Jada flood: it changes no threshold, no flag and no email. `last` is whichever of the home / WireGuard
+    signals confirmed alive most recently; `grace_applied` is the same recently_left_home test _evaluate_liveness used."""
+    home_age = now - state["last_home_seen"]
+    wg_age = now - state["last_wg_seen"]
+    left_home = state["last_home_seen"] > state["last_wg_seen"] and home_age <= (dark + grace)
+    last = "home" if state["last_home_seen"] > state["last_wg_seen"] else "wg"
+    return (f"last={last} home_age={int(home_age)}s wg_age={int(wg_age)}s ping_ok={ping_ok} "
+            f"grace_applied={left_home} dark_secs={int(dark_secs)} threshold={dark + grace if left_home else dark}")
+
+
+def _dark_probe():
+    """Read-only extras gathered ONLY when a dark flag fires: the phone's neighbour-cache state on the home LAN and the age of the
+    peer's last WireGuard handshake. Never raises; a failed probe is reported as 'unknown' so it cannot stop the flag being sent."""
+    neigh, hs = "unknown", "unknown"
+    try:
+        if HOME_IP:
+            out = subprocess.run(["ip", "neigh", "show", HOME_IP], capture_output=True, text=True, timeout=3).stdout.split()
+            neigh = out[-1] if out else "none"
+    except Exception as ex:
+        neigh = f"error:{type(ex).__name__}"
+    try:
+        if WG_IFACE and WG_PEER:
+            out = subprocess.run(["awg", "show", WG_IFACE, "latest-handshakes"], capture_output=True, text=True, timeout=5).stdout
+            for line in out.splitlines():
+                pk, _, ts = line.partition("\t")
+                if pk == WG_PEER and ts.strip().isdigit():
+                    t = int(ts.strip())
+                    hs = "never" if t == 0 else f"{int(time.time() - t)}s"
+    except Exception as ex:
+        hs = f"error:{type(ex).__name__}"
+    return f"neigh={neigh} handshake_age={hs}"
+
+
 def heartbeat_loop():
     """phone liveness = ANY of three signals, whichever is fresher:
       (a) DNS packets seen on the home interface -> covers active browsing
@@ -994,6 +1029,12 @@ def heartbeat_loop():
             send_mdm_poke(dark_secs)
 
         if fire_dark:
+            try:    # log-only context for diagnosing false dark flags; must never block or alter the flag below
+                with _LOCK:
+                    ctx = _dark_context(_STATE, tick, ping_ok, dark_secs, DARK, TRANSITION_GRACE)
+                print(f"[eyeguard-phone] {now_iso()} dark-context: {ctx} {_dark_probe()}", flush=True)
+            except Exception as ex:
+                print(f"[eyeguard-phone] {now_iso()} dark-context failed: {ex!r}", flush=True)
             sb_post("/rest/v1/flags", {
                 "flagged_at": now_iso(), "verdict": DARK_VERDICT,
                 "reason": REASON_PREFIX + f"phone-dark: silent for {int(dark_secs)}s "
