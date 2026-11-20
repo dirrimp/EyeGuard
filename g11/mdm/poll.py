@@ -441,6 +441,10 @@ def main():
         else:
             try:
                 log(f"enqueue {udid[:8]}… -> {enqueue(udid, key)}")
+                try:        # battery rides along with the app-list request (same check-in); never blocks it
+                    enqueue_command(udid, key, {"RequestType": "DeviceInformation", "Queries": ["BatteryLevel"]})
+                except Exception as e:
+                    log(f"battery query FAILED {e!r}")
                 # whole seconds: the hook stamps last_apps_at in whole seconds, so a sub-second
                 # answer must still count as an answer (microseconds would make it look unanswered)
                 ps[udid] = dict(ps.get(udid, {}), last_enqueue_at=now.replace(microsecond=0).isoformat())
@@ -515,6 +519,36 @@ def heartbeat():
     return info
 
 
+def report_battery(devices=None):
+    """Hand the phone's last battery reading to the server (supabase/phone_battery.sql), once per reading. Evidence only: the server
+    uses it to word the "phone went dark" email ("Phone dead") when the last reading was 5% or lower; it suppresses nothing."""
+    devices = devices if devices is not None else load("devices.json", {})
+    ps = load(POLL_STATE, {})
+    now = datetime.now(timezone.utc)
+    for udid, d in devices.items():
+        if not d.get("enrolled") or d.get("battery") is None or not d.get("battery_at"):
+            continue
+        if ps.get(udid, {}).get("battery_reported_at") == d["battery_at"]:
+            continue
+        try:
+            age = int((now - datetime.fromisoformat(d["battery_at"])).total_seconds())
+        except ValueError:
+            continue
+        if age < 0 or age > 6 * 3600:
+            continue
+        if not os.access(SENDER, os.X_OK):
+            log("battery report skipped: sender not installed")
+            return
+        rc, _, err = sender("--battery", str(int(d["battery"])), str(age))
+        if rc == 0:
+            ps[udid] = dict(ps.get(udid, {}), battery_reported_at=d["battery_at"])
+            save(POLL_STATE, ps)
+            log(f"battery {int(d['battery'])}% reported (read {age}s ago)")
+        else:
+            log(f"battery report FAILED rc={rc} {err[:120]}")
+        return
+
+
 def file_hash(path):
     try:
         with open(path, "rb") as f:
@@ -575,6 +609,10 @@ if __name__ == "__main__":
         sys.exit(0)
     main()
     heartbeat()
+    try:
+        report_battery()                     # after the heartbeat so a failure here never blocks it
+    except Exception as e:
+        log(f"battery ERROR {e!r}")
     try:
         send_attestation()                   # after the heartbeat so a failure here never blocks it
     except Exception as e:
