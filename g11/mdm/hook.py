@@ -147,6 +147,12 @@ def handle_ack(ev):
     qr = pl.get("QueryResponses")
     if isinstance(qr, dict) and "IsSupervised" in qr:
         d = touch_device(udid, supervised=bool(qr["IsSupervised"]))
+    if isinstance(qr, dict) and "BatteryLevel" in qr:
+        # 0.0..1.0, or -1.0 when iOS cannot tell. Kept as a whole percent with the time the phone answered; only the poller
+        # reports it (poll.report_battery), and only the last value is stored (no history).
+        lvl = qr["BatteryLevel"]
+        if isinstance(lvl, (int, float)) and not isinstance(lvl, bool) and 0.0 <= float(lvl) <= 1.0:
+            d = touch_device(udid, battery=int(round(float(lvl) * 100)), battery_at=now_iso())
     if pl.get("Status") != "Acknowledged" or "InstalledApplicationList" not in pl:
         return
     apps = []

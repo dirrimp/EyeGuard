@@ -188,6 +188,11 @@ def main_oneshot(cmd, args):
             if not isinstance(rep, dict) or not isinstance(rep.get("items"), dict):
                 raise ValueError("attest report needs an items object")
             fn, payload = "eg_mdm_attest", {"p_report": rep}
+        elif cmd == "--battery" and len(args) == 2:
+            pct, age = int(args[0]), int(args[1])
+            if not 0 <= pct <= 100 or not 0 <= age <= 21600:
+                raise ValueError("battery percent 0..100 and age 0..21600 seconds")
+            fn, payload = "eg_mdm_battery", {"p_pct": pct, "p_age_s": age}
         elif cmd == "--block-result" and len(args) >= 2 and args[0] in ("ok", "fail"):
             fn, payload = "eg_mdm_block_result", {"p_ok": args[0] == "ok", "p_count": int(args[1]),
                                                   "p_detail": " ".join(args[2:])[:300]}
@@ -278,10 +283,10 @@ def main_heartbeat(raw):
 def main(argv):
     if len(argv) == 3 and argv[1] == "--heartbeat":
         return main_heartbeat(argv[2])
-    if len(argv) >= 2 and argv[1] in ("--sync", "--action-result", "--block-result", "--attest"):
+    if len(argv) >= 2 and argv[1] in ("--sync", "--action-result", "--block-result", "--attest", "--battery"):
         return main_oneshot(argv[1], argv[2:])
     if len(argv) != 2:
-        err("usage: eg-report.sh '<event-json>' | --flush | --status | --heartbeat '<json>' | --sync | --action-result | --block-result | --attest")
+        err("usage: eg-report.sh '<event-json>' | --flush | --status | --heartbeat '<json>' | --sync | --action-result | --block-result | --attest | --battery <pct> <age_s>")
         return 2
     arg = argv[1]
     if arg == "--status":

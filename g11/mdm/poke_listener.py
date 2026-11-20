@@ -123,7 +123,7 @@ def do_poke(action, key, now=None):
         return False
     if action == "command+push":
         try:
-            poll.enqueue_command(udid, key, {"RequestType": "DeviceInformation", "Queries": ["IsSupervised"]})
+            poll.enqueue_command(udid, key, {"RequestType": "DeviceInformation", "Queries": ["IsSupervised", "BatteryLevel"]})
             QUIET.ok("enqueue")
         except Exception as e:
             QUIET.fail("enqueue", repr(e), now)       # keep going: still push
