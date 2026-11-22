@@ -502,11 +502,45 @@ def setup(cfg: dict):
           "The background watcher will pick this up on its next cycle.")
 
 
+def _collect_last_seen(devices, primary: str, extras: dict | None = None):
+    """Walk Find My devices once. Returns (primary_candidates, {key: candidates}); each candidate is
+    (epoch_ms, name) for a device that matches AND has live location data. `primary` is a lowercase
+    substring (Jonah's own phone, unchanged behaviour). `extras` maps a key to a LIST of lowercase
+    substrings that must ALL appear in the device name (Jada's phone, 2026-11-21: the iPhone 16 is
+    listed under Jonah's Apple ID as 'Jonah Dirrim...' + 'iPhone 16'; Dad's or anyone else's phone
+    must not match, so one word is not enough). A device is asked for its location only when it
+    matches something, same as before."""
+    extras = extras or {}
+    prim, ext = [], {k: [] for k in extras}
+    for device in devices:
+        name = (device.status().get("name") or "") + " " + \
+               (device.status().get("deviceDisplayName") or "")
+        low = name.lower()
+        hit_primary = bool(primary) and primary in low
+        hit_extra = [k for k, needles in extras.items() if needles and all(n in low for n in needles)]
+        if not hit_primary and not hit_extra:
+            continue
+        loc = device.location
+        if loc and "timeStamp" in loc:
+            if hit_primary:
+                prim.append((loc["timeStamp"], name))
+            for k in hit_extra:
+                ext[k].append((loc["timeStamp"], name))
+    return prim, ext
+
+
+# extra phone key -> the server function that records its Find My last-seen time
+_EXTRA_PHONE_RPC = {"jada": "eg_report_findmy_status_jada"}
+
+
 class FindMyWatcher:
     def __init__(self, cfg: dict, url: str, api_key: str,
                  device_name_contains: str, check_seconds: int = 600,
-                 check_timeout_seconds: int = _DEFAULT_CHECK_TIMEOUT_SECONDS):
+                 check_timeout_seconds: int = _DEFAULT_CHECK_TIMEOUT_SECONDS,
+                 extra_phones: dict | None = None):
         self.cfg = cfg
+        self.extra_phones = {k: [n.lower() for n in v] for k, v in (extra_phones or {}).items()}
+        self.extra_last_seen: dict = {}     # key -> datetime, filled by _find_my_last_seen() each cycle
         self.base = url.rstrip("/")
         self.api_key = api_key
         self.device_name_contains = device_name_contains.lower()
@@ -619,6 +653,7 @@ class FindMyWatcher:
         has no location data for it right now (e.g. it's genuinely offline
         with no recent mesh contact either -- itself meaningful, handled by
         the caller reporting nothing rather than a stale/wrong value)."""
+        self.extra_last_seen = {}
         creds = _load_credentials(self.cfg)
         if creds is None:
             print(f"[findmy_watcher] {datetime.now().isoformat()} no saved "
@@ -701,14 +736,12 @@ class FindMyWatcher:
                     _dead("session_expired", "2FA required")
                     return None
 
-                candidates: list[tuple[float, str]] = []
-                for device in api.devices:
-                    name = (device.status().get("name") or "") + " " + \
-                           (device.status().get("deviceDisplayName") or "")
-                    if self.device_name_contains in name.lower():
-                        loc = device.location
-                        if loc and "timeStamp" in loc:
-                            candidates.append((loc["timeStamp"], name))
+                candidates, extra_candidates = _collect_last_seen(
+                    api.devices, self.device_name_contains, self.extra_phones)
+                for k, cands in extra_candidates.items():
+                    if cands:
+                        self.extra_last_seen[k] = datetime.fromtimestamp(
+                            max(c[0] for c in cands) / 1000, tz=timezone.utc)
             except PyiCloudAcceptTermsException as e:
                 print(f"[findmy_watcher] {datetime.now().isoformat()} {e} "
                       f"-- accept the updated terms at icloud.com, no "
@@ -803,6 +836,17 @@ class FindMyWatcher:
                 if last_seen is not None:
                     self._rpc("eg_report_findmy_status",
                               {"p_last_seen": last_seen.isoformat()})
+                # Jada's phone (same Apple ID listing). Reported ONLY when a matching device with
+                # live location was found; failure here never affects Jonah's report above.
+                for key, seen in list(self.extra_last_seen.items()):
+                    rpc = _EXTRA_PHONE_RPC.get(key)
+                    if not rpc:
+                        continue
+                    try:
+                        self._rpc(rpc, {"p_last_seen": seen.isoformat()})
+                    except Exception as e:
+                        print(f"[findmy_watcher] {datetime.now().isoformat()} {key} phone report failed "
+                              f"({type(e).__name__}: {e}) -- Jonah's report is unaffected", flush=True)
         except WatcherTimeout as e:
             print(f"[findmy_watcher] {datetime.now().isoformat()} TIMED "
                   f"OUT -- {e} -- aborting this cycle, nothing reported "
@@ -865,6 +909,8 @@ def main():
         check_seconds=int(fm.get("check_seconds", 600)),
         check_timeout_seconds=int(fm.get("check_timeout_seconds",
                                           _DEFAULT_CHECK_TIMEOUT_SECONDS)),
+        extra_phones=({"jada": list(fm["jada_device_name_contains"])}
+                      if fm.get("jada_device_name_contains") else None),
     )
     # Non-blocking lock covers BOTH entry points (see _try_acquire_lock()'s
     # docstring) -- --once is cron's mode and the one that was actually
