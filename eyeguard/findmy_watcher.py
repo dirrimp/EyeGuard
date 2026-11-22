@@ -823,6 +823,31 @@ class FindMyWatcher:
             self.check_once()
             time.sleep(self.check_seconds)
 
+# The installed code tree is root-owned and is what launchd runs. A second,
+# older copy under a user's home (left from the first install, Sep 2026) has no
+# marker-clearing or setup-recording code: running --setup from it saves a
+# login but silently leaves the back-off marker in place, so the watcher never
+# uses the new session (seen 2026-11-21). Refuse, and say what to run instead.
+SYSTEM_TREE = Path("/Library/Application Support/EyeGuard")
+
+
+def _setup_tree_problem(base: Path, system_tree: Path = SYSTEM_TREE) -> str | None:
+    """None if --setup may run from `base`; otherwise a message saying why not.
+    Pure (no I/O beyond resolving paths) so it is testable."""
+    try:
+        if not system_tree.is_dir():
+            return None          # no installed tree on this machine (dev box): nothing to compare with
+        if base.resolve() == system_tree.resolve():
+            return None
+    except OSError:
+        return None
+    return ("This copy of EyeGuard (%s) is not the installed one. The installed copy, which the watcher "
+            "actually runs, is %s. --setup run from here saves a login but skips clearing the back-off "
+            "marker and recording the setup, so the watcher keeps ignoring the new session. Nothing was "
+            "changed. Run instead:\n  cd \"%s\"\n  /Applications/EyeGuard.app/Contents/Resources/python/bin/python3.12 "
+            "-m eyeguard.findmy_watcher --setup\n(or pass --allow-any-tree if you really mean this copy)"
+            % (base, system_tree, system_tree))
+
 
 def main():
     import argparse
@@ -847,7 +872,15 @@ def main():
                         "before giving up on diagnosing it further and "
                         "switching to cron, which doesn't go through "
                         "launchd/Background Task Management at all.")
+    p.add_argument("--allow-any-tree", action="store_true",
+                   help="Let --setup run from a copy of the code that is not the installed one "
+                        "(not normally wanted; see _setup_tree_problem).")
     args = p.parse_args()
+    if args.setup and not args.allow_any_tree:
+        problem = _setup_tree_problem(_BASE)
+        if problem:
+            print(problem, file=sys.stderr)
+            sys.exit(2)
     cfg = load_config(args.config)
 
     if args.setup:
