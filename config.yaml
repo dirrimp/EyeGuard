@@ -857,6 +857,11 @@ findmy:
   # inspection, if this ever needs editing again -- the two characters are
   # visually near-identical in most fonts/terminals.
   device_name_contains: "Jonah’s iPhone"
+  # Jada's iPhone 16 is listed under this same Apple ID as "Jonah Dirrim...'s iPhone" /
+  # "iPhone 16" (read from the --setup device list, 2026-11-21). BOTH words must appear, so
+  # Dad's phone, Jonah's SE and anyone else's never match. Matched lowercase. Remove the line
+  # to switch the Jada cross-check off (her dark email then goes back to the 30-minute debounce).
+  jada_device_name_contains: ["jonah dirrim", "iphone 16"]
 
 # Auto-deploy watcher: polls the public GitHub repo for main's latest
 # commit and deploys it the moment it changes -- the merge into main
