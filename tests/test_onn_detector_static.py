@@ -103,7 +103,9 @@ check("the hook cannot send an image of the screen or touch anything but its own
 
 print("manifest")
 perms = [p.get(A + "name") for p in man.findall("uses-permission")]
-check("INTERNET is still the only permission, one service, nothing else", perms == ["android.permission.INTERNET"] and [c.tag for c in man.find("application")] == ["service"])
+check("INTERNET is still the only permission; the only components are the monitor and the notification-listener shell (0.3.0), nothing else",
+      perms == ["android.permission.INTERNET"] and [c.tag for c in man.find("application")] == ["service", "service"]
+      and sorted(c.get(A + "name") for c in man.find("application")) == [".GuardService", ".MediaListener"])
 check("no secure-settings permission, no provider (so ONNX Runtime's telemetry provider can never be registered)",
       "WRITE_SECURE_SETTINGS" not in (APP / "AndroidManifest.xml").read_text() and "provider" not in (APP / "AndroidManifest.xml").read_text().replace("no provider", ""))
 check("native libraries are extracted (the path the fit test proved on the box)", man.find("application").get(A + "extractNativeLibs") == "true")
@@ -121,7 +123,7 @@ check("the class path and the dex input are the STRIPPED jar; the original class
       and re.search(r'd8.*\$\(find "\$W/classes".*"\$STRIPPED"', build) is not None)
 check("libraries stored uncompressed, page-aligned and the zip date pinned (reproducible)", "--no-compress" in build and "zipalign\" -c -p 4" in build and "DATE=2026-01-01T00:00:00Z" in build)
 check("no network tool, keystore or signing in the script", not re.search(r"\bcurl\b|\bwget\b|keystore|apksigner|--key", build.replace("No keystore", "")))
-check("only armeabi-v7a, version 0.2.2 (code 4)", "native-code: 'armeabi-v7a'" in build and "VERSION_NAME=${VERSION_NAME:-0.2.2}" in build and "VERSION_CODE=${VERSION_CODE:-4}" in build and "arm64" not in build)
+check("only armeabi-v7a, version 0.3.0 (code 5)", "native-code: 'armeabi-v7a'" in build and "VERSION_NAME=${VERSION_NAME:-0.3.0}" in build and "VERSION_CODE=${VERSION_CODE:-5}" in build and "arm64" not in build)
 legacy = (APP / "build.sh").read_text()
 check("the phase 2 build.sh refuses to run unless explicitly asked (it can no longer compile this source)", "ALLOW_LEGACY_PHASE2" in legacy and "exit 2" in legacy)
 if fails: print("\nFAILED:", *fails, sep="\n  "); sys.exit(1)

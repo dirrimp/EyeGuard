@@ -15,7 +15,7 @@
   const RSA = { name: "RSA-OAEP", modulusLength: 3072, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" };
 
   class ViewError extends Error {
-    // code: legacy | not-recipient | bad-format | auth | mismatch | not-image
+    // code: legacy | not-recipient | bad-format | auth | mismatch | not-image | not-title
     constructor(code, message) { super(message || code); this.code = code; }
   }
 
@@ -61,23 +61,44 @@
 
   const isJpeg = (u8) => u8.length > 3 && u8[0] === 0xff && u8[1] === 0xd8 && u8[2] === 0xff;
 
-  // Decrypt one frame. `device` = { privateKey: CryptoKey, keyId: Uint8Array(8) }. Returns JPEG bytes.
-  async function decryptFrame(bytes, device, objectName) {
+  // Open one EGF2 envelope: returns the plaintext bytes. `device` = { privateKey: CryptoKey, keyId: Uint8Array(8) }.
+  async function openEnvelope(bytes, device, objectName) {
     const f = parse(bytes);
     const mine = f.entries.find((e) => sameBytes(e.kid, device.keyId));
-    if (!mine) throw new ViewError("not-recipient", "this device is not a recipient of this frame");
+    if (!mine) throw new ViewError("not-recipient", "this device is not a recipient of this record");
     let aesRaw;
     try { aesRaw = new Uint8Array(await subtle.decrypt({ name: "RSA-OAEP" }, device.privateKey, mine.wrapped)); }
-    catch (e) { throw new ViewError("auth", "could not unwrap the frame key"); }
+    catch (e) { throw new ViewError("auth", "could not unwrap the record key"); }
     let plain;
     try {
       const aes = await subtle.importKey("raw", aesRaw, "AES-GCM", false, ["decrypt"]);
       plain = new Uint8Array(await subtle.decrypt(
         { name: "AES-GCM", iv: f.nonce, additionalData: new TextEncoder().encode("EGF2|" + objectName) }, aes, f.ct));
-    } catch (e) { throw new ViewError("auth", "frame failed authentication (wrong name, or altered)"); }
+    } catch (e) { throw new ViewError("auth", "record failed authentication (wrong name, or altered)"); }
     finally { aesRaw.fill(0); }
+    return plain;
+  }
+
+  // Decrypt one frame. Returns JPEG bytes.
+  async function decryptFrame(bytes, device, objectName) {
+    const plain = await openEnvelope(bytes, device, objectName);
     if (!isJpeg(plain)) throw new ViewError("not-image", "decrypted bytes are not a JPEG");
     return plain;
+  }
+
+  // Decrypt one Onn "what YouTube TV was playing" record (2026-11-24; the same keys and envelope as a frame). The plaintext is
+  // {"v":1,"pkg":"com.google.android.youtube.tvunplugged","at":<epoch ms>,"title":"..."}; anything else is refused. The caller must show
+  // the title with textContent (never as HTML).
+  const YT_PKG = "com.google.android.youtube.tvunplugged";
+  async function decryptTitle(bytes, device, objectName) {
+    const plain = await openEnvelope(bytes, device, objectName);
+    let o;
+    try { o = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(plain)); }
+    catch (e) { throw new ViewError("not-title", "decrypted bytes are not a title record"); }
+    if (!o || typeof o !== "object" || o.v !== 1 || o.pkg !== YT_PKG || typeof o.title !== "string"
+        || o.title.length < 1 || o.title.length > 400 || typeof o.at !== "number" || !Number.isFinite(o.at))
+      throw new ViewError("not-title", "decrypted bytes are not a title record");
+    return { title: o.title, at: o.at, pkg: o.pkg };
   }
 
   // The uploader names a frame <timestamp with ':' -> '-'>_<verdict>_d<N>.jpg(.enc); the flag row carries the same
@@ -122,7 +143,7 @@
   }
   async function removeDevice() { await tx("readwrite", (s) => s.delete(ID)); }
 
-  root.EGViewer = { ViewError, generateDeviceKey, keyIdOf, fingerprintOf, publicKeyPem, parse, decryptFrame,
+  root.EGViewer = { ViewError, generateDeviceKey, keyIdOf, fingerprintOf, publicKeyPem, parse, decryptFrame, decryptTitle,
                     nameMatchesFlag, enroll, loadDevice, removeDevice, isJpeg };
   if (typeof module !== "undefined" && module.exports) module.exports = root.EGViewer;
 })(typeof window !== "undefined" ? window : globalThis);

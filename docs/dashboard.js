@@ -132,7 +132,7 @@ function showApp(session){
   $("app").classList.remove("hidden");
   $("who").textContent = session.user.email;
   history.replaceState(null,"",location.pathname); // strip auth tokens from URL
-  if(window.EGViewer) EGViewer.loadDevice().then(d=>{ device = d; renderViewKey(); hydrateFrames(); }).catch(()=>renderViewKey());
+  if(window.EGViewer) EGViewer.loadDevice().then(d=>{ device = d; renderViewKey(); hydrateFrames(); loadTitles().catch(()=>{}); }).catch(()=>renderViewKey());
   renderViewKey();
   load();
   if(pollTimer) clearInterval(pollTimer);
@@ -230,8 +230,62 @@ document.addEventListener("click", async (e)=>{
   await loadApps();
 });
 
+// ---------- Onn TV: what YouTube TV was playing while the screen was black ----------
+// YouTube TV video is copy-protected, so the TV's screenshot of it is black. The TV box records the title that YouTube TV says is playing,
+// ENCRYPTED for the same keys as the review images; this device decrypts it with its own non-exportable key. Titles are shown as text only
+// (textContent, never HTML) and kept in memory only. If this account is not a partner, or no record exists yet, the panel stays empty.
+const titleCache = new Map();   // record id -> {title, at} (memory only)
+const TITLE_MSG = {
+  none: "Opens only on a device that holds the viewing key",
+  "not-recipient": "Not shared with this device",
+  legacy: "Opens on Dad's device only",
+  auth: "Can't verify this record",
+  "not-title": "Can't verify this record",
+  "bad-format": "Unrecognised format",
+  mismatch: "Not shown (time does not match)",
+};
+function b64bytes(s){ const bin = atob(s); const u = new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) u[i] = bin.charCodeAt(i); return u; }
+async function titleFor(r){
+  if(titleCache.has(r.id)) return titleCache.get(r.id);
+  if(!device) return { err: "none" };
+  try{
+    const t = await EGViewer.decryptTitle(b64bytes(r.ciphertext), device, r.object_name);
+    if(Math.abs(t.at - Date.parse(r.received_at)) > 20*60*1000) return { err: "mismatch" };
+    titleCache.set(r.id, t);
+    return t;
+  }catch(e){ return { err: e && e.code || "auth" }; }
+}
+async function loadTitles(){
+  const box = $("onntitles");
+  if(!box) return;
+  const { data, error } = await sb.from("onn_titles").select("id,received_at,object_name,ciphertext").order("received_at",{ascending:false}).limit(60);
+  if(error || !data || !data.length){ box.replaceChildren(); return; }
+  const keep = new Set(data.map(r=>r.id));
+  for(const id of titleCache.keys()) if(!keep.has(id)) titleCache.delete(id);
+  const panel = document.createElement("div"); panel.className = "apanel";
+  const h = document.createElement("h2"); h.textContent = "TV: what YouTube TV was playing";
+  const sub = document.createElement("div"); sub.className = "asub";
+  sub.textContent = "Recorded only while the screen was black (YouTube TV video is copy-protected, so no picture can be checked). Kept 30 days. This is what the app says is playing, not what is on screen.";
+  panel.append(h, sub);
+  const list = document.createElement("div"); list.className = "asec";
+  panel.append(list);
+  for(const r of data){
+    const t = await titleFor(r);
+    const row = document.createElement("div"); row.className = "arow";
+    const left = document.createElement("div");
+    const name = document.createElement("div"); name.className = "aname";
+    const when = document.createElement("div"); when.className = "asub";
+    when.textContent = new Date(r.received_at).toLocaleString([],{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"});
+    if(t.err){ name.textContent = "\u{1F512} " + (TITLE_MSG[t.err] || TITLE_MSG.auth); }
+    else { name.textContent = t.title; }
+    left.append(name, when); row.append(left); list.append(row);
+  }
+  box.replaceChildren(panel);
+}
+
 async function load(){
   loadApps().catch(console.error);
+  loadTitles().catch(()=>{});
   const { data, error } = await sb.from("flags")
     .select("*").order("flagged_at",{ascending:false}).limit(1200);
   if(error){ console.error(error); return; }

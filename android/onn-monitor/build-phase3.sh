@@ -1,15 +1,15 @@
 #!/bin/sh
-# Builds the UNSIGNED phase 3 (0.2.2) APK with raw SDK tools, in Agent IT's network-less, hash-pinned container.
+# Builds the UNSIGNED phase 3 + media-exempt (0.3.0) APK with raw SDK tools, in Agent IT's network-less, hash-pinned container.
 #   inputs : /src (this folder, ro), /sdk (build-tools r34 + platform-34), /pins (pinned ONNX Runtime pieces + the NudeNet model, ro)
 #   output : /out/onn-guard-unsigned.apk and /out/BUILD-PHASE3.txt (every hash)
-# No keystore is ever present: Jonah signs on his Mac. Checks FAIL the build (see the end): one permission, one service, exactly the two
+# No keystore is ever present: Jonah signs on his Mac. Checks FAIL the build (see the end): one permission, exactly two services (the monitor and the media listener), exactly the two
 # pinned armeabi-v7a libraries, the pinned model bundled, and NO ONNX Runtime telemetry code anywhere in the result.
 set -eu
 SRC=${SRC:-/src}; SDK=${SDK:-/sdk}; OUT=${OUT:-/out}; PINS=${PINS:-/pins}
 BT=${BT:-$SDK/build-tools/34.0.0}; JAR=${ANDROID_JAR:-$SDK/platforms/android-34/android.jar}
 ORT=${ORT:-$PINS/ort-1.31.1-armeabi-v7a}; MODEL=${MODEL:-$PINS/nudenet-3.4.2/320n.onnx}
 MODEL_SHA=c15d8273adad2d0a92f014cc69ab2d6c311a06777a55545f2c4eb46f51911f0f
-VERSION_NAME=${VERSION_NAME:-0.2.2}; VERSION_CODE=${VERSION_CODE:-4}
+VERSION_NAME=${VERSION_NAME:-0.3.0}; VERSION_CODE=${VERSION_CODE:-5}
 DATE=2026-01-01T00:00:00Z
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 ( cd "$PINS" && sha256sum -c SHA256SUMS ) || { echo "FAIL: pinned inputs do not verify"; exit 1; }
@@ -44,7 +44,10 @@ PERMS=$("$BT/aapt2" dump permissions "$APK" | grep '^uses-permission' || true)
   || { echo "FAIL: permissions must be exactly INTERNET; found: $PERMS"; exit 1; }
 TREE=$("$BT/aapt2" dump xmltree --file AndroidManifest.xml "$APK")
 case "$TREE" in *TelemetryInitializer*|*provider*|*receiver*|*"E: activity"*|*WRITE_SECURE_SETTINGS*) echo "FAIL: unexpected component or permission in the manifest"; exit 1;; esac
-[ "$(printf '%s' "$TREE" | grep -c 'E: service')" = "1" ] || { echo "FAIL: the manifest must declare exactly one service"; exit 1; }
+[ "$(printf '%s' "$TREE" | grep -c 'E: service')" = "2" ] || { echo "FAIL: the manifest must declare exactly two services (GuardService, MediaListener)"; exit 1; }
+printf '%s' "$TREE" | grep -q '"\.GuardService"' && printf '%s' "$TREE" | grep -q '"\.MediaListener"' \
+  || { echo "FAIL: the two services must be .GuardService and .MediaListener"; exit 1; }
+[ "$(printf '%s' "$TREE" | grep -c 'BIND_NOTIFICATION_LISTENER_SERVICE')" = "1" ] || { echo "FAIL: exactly one notification-listener service is allowed"; exit 1; }
 LIST=$(jar tf "$APK") || { echo "FAIL: cannot list the APK"; exit 1; }
 LIB=$(printf '%s\n' "$LIST" | grep '^lib/' | grep -v '/$' | sort)
 WANT=$(printf 'lib/armeabi-v7a/libonnxruntime.so\nlib/armeabi-v7a/libonnxruntime4j_jni.so\n')

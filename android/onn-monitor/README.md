@@ -1,4 +1,4 @@
-# EyeGuard Onn monitor (phase 3, version 0.2.1: health + on-box exposure detection)
+# EyeGuard Onn monitor (version 0.3.0: health + on-box exposure detection + YouTube TV black-frame exemption)
 
 Design and conditions: `docs/ONN-SCREEN-MONITOR-REVIEW.md` (#162), `docs/ONN-PHASE3-DETECTION-DESIGN.md` (#166). Database side:
 `supabase/onn_monitor_phase1.sql` and `onn_monitor_phase3.sql` (both live).
@@ -26,6 +26,20 @@ and calls `setTelemetry(false)`. The router's deny log would show any attempt.
 
 **Honest limits.** The counts and the self-test numbers come from the box, so a modified app could report anything: detection, not proof.
 DRM video comes back black and is reported as such. The detector's recall on this box's content is unmeasured.
+
+## 0.3.0: YouTube TV black-frame exemption (design: `docs/ONN-MEDIA-SESSION-ADDENDUM.md`; server: `supabase/onn_media_exempt.sql`)
+YouTube TV video is copy-protected, so the screenshot of it is black. When a frame is black, YouTube TV is the foreground app, **and YouTube TV's own media
+session says it is PLAYING**, the frame is counted in `black_exempt` and the title is encrypted (same `Egf2` envelope and recipients as a flagged frame,
+object name `onn-title/<UTC>+00:00_title.enc` as the additional data) and sent to `eg_onn_title`. The server honours `black_exempt` only if `listener_ok` is true
+and an encrypted record arrived in the beat window; otherwise the frames count as black exactly as before. **Every other app (SmartTube, Jellyfin, the browser, the
+home screen) is never excused.**
+- `MediaListener`: an EMPTY notification-listener shell. Android requires one before an app may read media sessions. It overrides no callback, so it never receives a
+  notification. The app cannot enable it; the ADB install step does (`cmd notification allow_listener com.eyeguard.onn/com.eyeguard.onn.MediaListener`).
+- `MediaProbe`: reads only the session whose package is exactly YouTube TV (all others are skipped by package name before anything about them is read) and the title only while PLAYING.
+- `MediaFacts`: the rules (pure JDK, tested in `test/.../MediaFactsTest.java`). `TitleUploader`: ciphertext only, in memory, at most 5 items and 12 minutes.
+- Heartbeat gains `black_exempt`, `titles_sent` (numbers) and `listener_ok` (flag). The manifest now has two services; the build fails on any other component.
+- Titles are read in the dashboard (`docs/dashboard.js`, panel "TV: what YouTube TV was playing") by the same per-device key that opens review images (`EGViewer.decryptTitle`).
+- Plain-JVM test: `javac --release 11 ... MediaFacts.java MediaFactsTest.java`. Not compiled here: Agent IT's build container compiles the Android classes (`build-phase3.sh`).
 
 ## Files
 - `src/com/eyeguard/onn/`: `GuardService` (loop), `Detector` (model + self-test), `Postprocess`, `FlagFrame` + `Blur`, `Egf2` + `Recipients`
