@@ -28,12 +28,12 @@ public class MediaFactsTest {
         check("empty, blank or null -> null", MediaFacts.cleanTitle("") == null && MediaFacts.cleanTitle("   \n") == null && MediaFacts.cleanTitle(null) == null);
         String longT = "x".repeat(500);
         check("a long title is cut to " + MediaFacts.MAX_TITLE, MediaFacts.cleanTitle(longT).length() == MediaFacts.MAX_TITLE);
-        StringBuilder emoji = new StringBuilder(); for (int i = 0; i < 150; i++) emoji.append("😀");
+        StringBuilder emoji = new StringBuilder(); for (int i = 0; i < 150; i++) emoji.append("\ud83d\ude00");
         String cut = MediaFacts.cleanTitle(emoji);
         check("never ends on half a surrogate pair", cut != null && !Character.isHighSurrogate(cut.charAt(cut.length() - 1)));
         String json = new String(MediaFacts.titlePlain("He said \"hi\" \\ ok", 1700000000000L), StandardCharsets.UTF_8);
         check("the plaintext is JSON with the package and escaped quotes", json.equals("{\"v\":1,\"pkg\":\"" + yt + "\",\"at\":1700000000000,\"title\":\"He said \\\"hi\\\" \\\\ ok\"}"));
-        check("non-ASCII survives as UTF-8", new String(MediaFacts.titlePlain("Café 日本", 1L), StandardCharsets.UTF_8).contains("Café 日本"));
+        check("non-ASCII survives as UTF-8", new String(MediaFacts.titlePlain("Caf\u00e9 \u65e5\u672c", 1L), StandardCharsets.UTF_8).contains("Caf\u00e9 \u65e5\u672c"));
 
         System.out.println("object name (must match eg_onn_title)");
         String n = MediaFacts.titleObjectName(1700000000123L);
