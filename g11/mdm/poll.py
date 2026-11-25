@@ -24,6 +24,8 @@ UNREACHABLE_AFTER = timedelta(minutes=30)   # was 2 h; 6 missed 5-minute checks.
 POLL_STATE = "poll-state.json"          # poller-owned (the hook owns devices.json: no write races)
 ANSWER_WAIT = float(os.environ.get("MDM_ANSWER_WAIT", "25"))   # seconds to wait for the phone's answer
 AWAIT_REPOLL = timedelta(minutes=30)    # re-QUEUE a command only after this (the first one may have been lost)
+REPOLL_ON_CONTACT = timedelta(minutes=10)   # ...or after this when the phone has connected since we asked (2026-11-24): a phone that
+                                            # connects on every push but never answers should be asked again, not left for 30 minutes
 POLLER_DOWN_AFTER = timedelta(minutes=12)   # no poller run for this long = the G11/poller was down, not the phone
 RUNMARK = "poller-run.json"    # don't stack commands for a phone that has not answered
 CMDS = "pending-cmds.json"          # commands this poller sent; hook records their outcome
@@ -452,6 +454,15 @@ def main():
         answered = d.get("last_apps_at")
         awaiting = bool(sent_at) and now - datetime.fromisoformat(sent_at) < AWAIT_REPOLL and (
             not answered or datetime.fromisoformat(answered) < datetime.fromisoformat(sent_at))
+        if awaiting and now - datetime.fromisoformat(sent_at) >= REPOLL_ON_CONTACT:
+            try:
+                seen = datetime.fromisoformat(d.get("last_seen") or "")
+                if seen.tzinfo is None:
+                    seen = seen.replace(tzinfo=timezone.utc)
+            except Exception:
+                seen = None
+            if seen and seen > datetime.fromisoformat(sent_at):
+                awaiting = False   # it IS connecting but has not answered: ask again (an offline phone still waits the full 30 minutes)
         if awaiting:
             # A request is already queued and unanswered. Do NOT queue another, but do NOT go quiet
             # either: wake the phone again now. (Staying silent for the whole 30 minutes made one
