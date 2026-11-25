@@ -495,6 +495,7 @@ context_risk:
     # CLIP misreads. Discount it (yellow only surfaces if very confident); RED
     # nudity still always surfaces here. Plus common esports/game terms.
     - "youtube"
+    - "freetube"        # 2026-11-24: FreeTube is a YouTube client whose window title has no "youtube" in it, so it never got the YouTube discount
     - "rlcs"
     - "esports"
     - "tournament"
