@@ -1399,6 +1399,8 @@ class QueryLogCrossCheck:
         self._pending = []            # [(ts, client, domain)] wire queries awaiting the log
         self._log = {}                # (client, domain) -> [ts...]
         self._last_log_t = {}         # client -> newest log entry timestamp
+        self._any_entry_t = 0.0       # newest log entry timestamp from ANY device (diagnostic only)
+        self._any_read_at = 0.0       # wall clock when the reader last got ANY new log line (diagnostic only)
 
     @staticmethod
     def _norm(raw_name):
@@ -1413,6 +1415,31 @@ class QueryLogCrossCheck:
             self._pending.append((ts, client, d))
             if len(self._pending) > self.cap:
                 del self._pending[: len(self._pending) - self.cap]
+
+    def note_any(self, entry_ts, read_at):
+        """Diagnostic only: any device's log line, so a stall report can say whether
+        AdGuard's file stopped moving altogether or only the phone's entries are late.
+        Judges nothing; numbers only (no names)."""
+        with self._lock:
+            if entry_ts > self._any_entry_t:
+                self._any_entry_t = entry_ts
+            self._any_read_at = read_at
+
+    def diagnostics(self, now):
+        """-> short numbers-only string for a stall report. Never raises."""
+        try:
+            with self._lock:
+                pend = len(self._pending)
+                oldest = int(now - min(t for t, _, _ in self._pending)) if self._pending else 0
+                any_entry = int(now - self._any_entry_t) if self._any_entry_t else -1
+                any_read = int(now - self._any_read_at) if self._any_read_at else -1
+            def f(v):
+                return "never seen" if v < 0 else f"{v}s"
+            return (f"diagnostic: {pend} phone queries waiting (oldest {oldest}s); newest log "
+                    f"entry from any device is {f(any_entry)} old; the log file last gained "
+                    f"lines {f(any_read)} ago")
+        except Exception:
+            return "diagnostic unavailable"
 
     def record_log(self, ts, client, raw_name):
         d = self._norm(raw_name)
@@ -1477,6 +1504,7 @@ def querylog_loop():
                 if not parsed:
                     continue
                 ts, ip, qname = parsed
+                QUERYLOG_XCHECK.note_any(ts, time.time())
                 if ip in answer_only:      # connlog device that isn't the phone:
                     connlog_answers_from_querylog(ip, raw)   # answers only, no flags
                     continue
@@ -1503,7 +1531,9 @@ def querylog_watch_loop():
                 if "stalled" not in alerted:
                     who = ", ".join(f"{c} (oldest unlogged query {int(a)}s ago)"
                                     for c, a in res["stalled"])
-                    _querylog_flag(f"the log has stopped recording the phone: {who}")
+                    diag = QUERYLOG_XCHECK.diagnostics(time.time())
+                    print(f"[eyeguard-phone] querylog stalled: {who}; {diag}", flush=True)
+                    _querylog_flag(f"the log has stopped recording the phone: {who} ({diag})")
                     alerted.add("stalled")
             else:
                 alerted.discard("stalled")
