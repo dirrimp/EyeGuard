@@ -12,4 +12,8 @@
 {"rule":"EG-COV-01","pr":192,"verdict":"accepted","reason":"Delays secondary 'monitor went quiet' emails by up to 10 minutes after the first one in a pile-up; nothing is dropped, content preserved in a digest, first alert immediate. PR is marked REDUCES COVERAGE and needs Dad's review. Mac, phone-dark, content, tamper, unmonitored and G11 emails are never held (tested)."}
 {"rule":"EG-OPS-04","pr":192,"verdict":"fixed","reason":"Wrappers patched in place from the live text with exactly-once guards; refuses if the labelling wrapper is absent; re-run is a no-op."}
 {"rule":"EG-COV-02","pr":192,"verdict":"fixed","reason":"Fail-open gate (any gate error sends the email at once), held items released by the minute job, by the next email through any sender, and after 15 minutes regardless; a failed send keeps items held for retry. Each tested, plus a documented one-statement rollback."}
+<<<<<<< HEAD
 {"rule":"none","pr":"195","verdict":"missed","reason":"Router stall tamper alert (Nov 22 03:47, 977s lag vs 900s limit) carried no evidence to tell AdGuard batching from a stopped log; added numbers-only diagnostic. Proposed rule: a tamper alert that can be a timing artifact must carry the timing evidence."}
+=======
+{"rule":"none","pr":"194","verdict":"missed","reason":"Find My death was unrecorded: no line for the last good cycle or session age; added a per-cycle trace. Proposed rule: any watcher that can silently lose a credential logs last-good-cycle and credential age."}
+>>>>>>> origin/main
