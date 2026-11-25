@@ -308,6 +308,42 @@ SETUP_STEPS = ('In Terminal: cd "/Library/Application Support/EyeGuard" then '
                'if Apple answers 503, wait 45-60 minutes)')
 
 
+def _last_ok_path(cfg: dict) -> Path:
+    return _data_dir(cfg) / ".findmy_last_ok"
+
+
+def _session_trace(cfg: dict, now: datetime | None = None) -> str:
+    """One line of session facts for the log: hours since --setup and minutes
+    since the last cycle that reached Apple and got a device list. Times only
+    (no tokens, no device names). Never raises. Added 2026-11-24: the Apple
+    session died ~9 h after login twice (2026-11-20, 2026-11-22) with no record
+    of the last good cycle."""
+    now = now or datetime.now()
+    parts = []
+    try:
+        info = _read_setup_info(cfg)
+        if info:
+            h = (now - datetime.fromisoformat(info["setup_at"])).total_seconds() / 3600
+            parts.append(f"{h:.1f} h since --setup")
+        else:
+            parts.append("setup age unknown")
+    except Exception:
+        parts.append("setup age unknown")
+    try:
+        t = datetime.fromisoformat(_last_ok_path(cfg).read_text().strip())
+        parts.append(f"last good cycle {(now - t).total_seconds() / 60:.0f} min ago")
+    except Exception:
+        parts.append("no good cycle on record")
+    return "; ".join(parts)
+
+
+def _note_ok(cfg: dict) -> None:
+    try:
+        _last_ok_path(cfg).write_text(datetime.now().isoformat())
+    except Exception:
+        pass
+
+
 def _setup_info_path(cfg: dict) -> Path:
     # Beside (not inside) the session dir; holds timestamps only -- no
     # credential or session contents.
@@ -685,6 +721,8 @@ class FindMyWatcher:
                   f"saved session unusable; backing off until 'findmy_watcher"
                   f".py --setup' is re-run (no password sign-in attempted)",
                   flush=True)
+            print(f"[findmy_watcher] {datetime.now().isoformat()} death trace: "
+                  f"{_session_trace(self.cfg)}", flush=True)
             _write_needs_setup(self.cfg, reason)
             self._alert_session_expired(reason)
 
@@ -767,6 +805,9 @@ class FindMyWatcher:
                 # accountLogin rejected the session token (really expired).
                 _dead("session_expired", f"token re-auth rejected ({e!r})")
                 return None
+        _note_ok(self.cfg)
+        print(f"[findmy_watcher] {datetime.now().isoformat()} cycle ok "
+              f"({_session_trace(self.cfg)})", flush=True)
         # Confirmed live (2026-09-02): this Apple ID has visibility into
         # a large shared/family group -- device_name_contains alone is
         # NOT enough to identify the right phone. Two real hazards

@@ -104,6 +104,20 @@ print("— regression: real detection untouched —")
 check("explicit domain still classifies flagged", ph.classify("www.badterm.com")[0] == "flagged")
 
 print()
+
+print("— stall diagnostic (2026-11-24): numbers only, judges nothing —")
+x = ph.QueryLogCrossCheck(LAG)
+x.record_wire(100, C, "a.example.com")
+x.note_any(150, 160)
+d = x.diagnostics(1100)
+check("diagnostic reports pending count and ages", "1 phone queries waiting (oldest 1000s)" in d and "950s old" in d and "940s ago" in d, d)
+check("diagnostic carries no domain or client name", "example.com" not in d and C not in d, d)
+check("before any line is read it says so, no crash", "never seen" in ph.QueryLogCrossCheck(LAG).diagnostics(5))
+check("diagnostic does not change the verdict", x.evaluate(100 + LAG + 5)["stalled"] != [] )
+src_ = (ROOT / "router" / "eyeguard-phone.py").read_text()
+check("the stall flag carries the diagnostic", "the log has stopped recording the phone: {who} ({diag})" in src_)
+check("the reader feeds note_any for every device's line", "QUERYLOG_XCHECK.note_any(ts, time.time())" in src_)
+
 if fails:
     print(f"FAILED — {len(fails)}: {fails}"); sys.exit(1)
 print("PASSED — querylog reader/watcher behave as expected.")
