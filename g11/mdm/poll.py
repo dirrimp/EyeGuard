@@ -409,6 +409,30 @@ def wait_for_answers(asked):
     return not pending
 
 
+def last_contact(d):
+    """Newest sign of life from the phone: an app list OR any other check-in the hook saw (it stamps
+    last_seen on every acknowledgement, including the 'Idle' connect a push causes). 2026-11-24: a locked,
+    idle iPhone connects on every push but cannot hand over its app list for 35-65 minutes; judging by the
+    app list alone called a phone that WAS answering 'unreachable', then 'reachable again' 2 seconds later,
+    every 5 minutes. A phone that really is off, out of signal or un-enrolled makes no contact at all, so it
+    still goes unreachable after UNREACHABLE_AFTER. A stale app list from a reachable phone is covered by the
+    server's separate 'app list is stale' alert (3 hours)."""
+    best = None
+    for k in ("last_apps_at", "last_seen"):
+        v = d.get(k)
+        if not v:
+            continue
+        try:
+            t = datetime.fromisoformat(v)
+        except Exception:
+            continue
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        if best is None or t > best:
+            best = t
+    return best.isoformat() if best else None
+
+
 def main():
     key = api_key()
     devices = load("devices.json", {})
@@ -452,12 +476,12 @@ def main():
                 asked[udid] = now.replace(microsecond=0)
             except Exception as e:
                 log(f"enqueue {udid[:8]}… FAILED {e}")
-        last = d.get("last_apps_at") or d.get("last_seen")
+        last = last_contact(d)
         if last and not d.get("unreachable_reported"):
             if now - datetime.fromisoformat(last) > UNREACHABLE_AFTER and not was_down:
                 emit({"type": "device_unreachable", "detected_at": now.replace(microsecond=0).isoformat(),
                       "window_start": last, "device": d.get("name", "Jonah iPhone"),
-                      "reason": f"no app list received since {last}"})
+                      "reason": f"no contact from the phone since {last}"})
                 d["unreachable_reported"] = True
                 save("devices.json", devices)
                 log(f"device {udid[:8]}… unreachable since {last}")
