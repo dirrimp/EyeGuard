@@ -31,6 +31,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
+from . import sleep_marker
 from .net import opener as _opener
 
 _BASE = Path(__file__).resolve().parent.parent
@@ -100,6 +101,7 @@ class DeployWatcher:
         self.code_dir = Path(code_dir)
         self.monitored_user = monitored_user
         self.check_seconds = check_seconds
+        self._deferred = False    # logged once per wait, not every cycle
 
     def _rpc(self, name: str, params: dict):
         req = urllib.request.Request(
@@ -179,7 +181,19 @@ class DeployWatcher:
         deployed = _deployed_sha(self.code_dir)
         latest = _latest_main_sha(self.owner, self.repo)
         if deployed is None or latest is None or latest == deployed:
+            self._deferred = False
             return
+        # Never restart the monitor while the Mac is in a real sleep (2026-11-25): a deploy during a Maintenance DarkWake restarted it with no
+        # memory of the sleep, it sent an "alive" heartbeat, the Mac slept again, and "monitoring went dark" fired. Nothing can be watched while
+        # the Mac sleeps, so the update simply waits for the next check after a real wake. The marker is written by session_watcher's IOKit
+        # handler, is ignored after a reboot or after 24 hours, and a missing marker means awake (see sleep_marker.py).
+        if sleep_marker.is_asleep(boot_epoch=sleep_marker.boot_epoch()):
+            if not getattr(self, "_deferred", False):
+                print(f"[deploy_watcher] {datetime.now().isoformat()} update {latest[:9]} waiting: the Mac is in a real sleep; "
+                      f"will deploy after it wakes", flush=True)
+                self._deferred = True
+            return
+        self._deferred = False
         summary = _commit_summary(self.owner, self.repo, deployed, latest)
         self._deploy(latest, summary)
 

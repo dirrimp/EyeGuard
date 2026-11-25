@@ -84,6 +84,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
+from . import sleep_marker
 from .net import opener as _opener
 
 _BASE = Path(__file__).resolve().parent.parent
@@ -453,6 +454,9 @@ class SleepWatcher:
     def _handle(self, refcon, service, message_type, message_arg):
         try:
             if message_type == _K_WILL_SLEEP:
+                # FIRST, and local-only (a file write), so it cannot eat the OS's sleep deadline: tell deploy_watcher a real sleep has
+                # started, so it does not restart the monitor during a DarkWake (eyeguard/sleep_marker.py, 2026-11-25).
+                sleep_marker.mark_asleep()
                 self._report_sleep("WillSleep")
                 _IOKit.IOAllowPowerChange(self._root_port, message_arg)
             elif message_type == _K_CAN_SLEEP:
@@ -464,9 +468,10 @@ class SleepWatcher:
                 # happened; if the Mac never actually slept, the watcher's
                 # own next heartbeat lands normally within check_seconds and
                 # nothing was ever at risk of a false "recovered" state.
-                pass
+                sleep_marker.clear_asleep()          # the Mac stayed awake: deploys may proceed
             elif message_type == _K_HAS_POWERED_ON:
                 ts = datetime.now().isoformat()
+                sleep_marker.clear_asleep()          # a real full wake: the Mac is awake, deploys may proceed
                 print(f"[session_watcher] {ts} IOKit: HasPoweredOn -- "
                       f"forcing an immediate check-in", flush=True)
                 # Don't wait for the next scheduled check_seconds tick --
