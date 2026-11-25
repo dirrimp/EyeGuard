@@ -41,7 +41,8 @@ final class Heartbeat {
 
     /** Field names and bounds MUST match eg_onn_heartbeat (tests/test_onn_app_static.py checks the names). */
     static JSONObject info(Context c, boolean svcEnabled, String screenState, long screenOnS, long windowS, int intervalS,
-                           FrameStats s, DetectorStatus d, TitleFacts t) throws Exception {
+                           FrameStats s, DetectorStatus d, TitleFacts t,
+                           int titlesSent, boolean listenerOk) throws Exception {
         JSONObject o = new JSONObject();
         o.put("app_version", versionName(c));
         o.put("cert_sha256", certSha256(c));
@@ -54,6 +55,9 @@ final class Heartbeat {
         o.put("succeeded", s.succeeded);
         o.put("analysed", s.analysed);
         o.put("black", s.black);
+        o.put("black_exempt", s.blackExempt);     // 0.3.0: black frames excused as YouTube TV playing; the server honours it only with a title record
+        o.put("titles_sent", titlesSent);         // encrypted title records delivered in this window (a count, never text)
+        o.put("listener_ok", listenerOk);         // the media listener is enabled (the server alerts if it is off)
         o.put("distinct_hashes", s.distinct());
         o.put("reenabled", 0);                    // never self-re-enables (no WRITE_SECURE_SETTINGS)
         if (d != null) {                          // phase 3: the model hash must come with its self-test, or the server refuses the beat

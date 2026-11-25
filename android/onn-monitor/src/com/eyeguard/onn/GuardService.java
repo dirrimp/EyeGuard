@@ -37,6 +37,8 @@ public class GuardService extends AccessibilityService {
     private final TitleFacts titles = new TitleFacts();                       // io thread only; counts, never text
     private final Detector detector = new Detector();                         // io thread only
     private final FlagUploader uploader = new FlagUploader();
+    private final TitleUploader titleUploader = new TitleUploader();            // ciphertext only
+    private final MediaFacts.TitleGate titleGate = new MediaFacts.TitleGate();  // io thread only
     private List<Egf2.Recipient> recipients;                                  // io thread only
     private volatile int selfArgmax;
     private volatile double selfMax;
@@ -91,6 +93,7 @@ public class GuardService extends AccessibilityService {
         @Override public void run() {
             if (!connected) return;
             if (uploader.size() > 0) deliverFlags();
+            if (titleUploader.size() > 0) deliverTitles();
             main.postDelayed(this, RETRY_MS);
         }
     };
@@ -193,6 +196,7 @@ public class GuardService extends AccessibilityService {
                             luma[i] = (int) (0.299 * Color.red(px[i]) + 0.587 * Color.green(px[i]) + 0.114 * Color.blue(px[i]));
                         }
                         stats.success(luma);
+                        if (stats.lastBlack) noteBlack();
                         analyse(sw);
                     } catch (Throwable t) {
                         stats.failure();
@@ -246,6 +250,40 @@ public class GuardService extends AccessibilityService {
         }
     }
 
+    /** io thread, right after a BLACK frame: is YouTube TV (and only YouTube TV) playing? If so the frame is excused and, when due, the title is
+     *  encrypted and queued. Copy-protected video is black to the screenshot call, which is the one case this excuses. */
+    private void noteBlack() {
+        try {
+            MediaProbe.Reading r = MediaProbe.youtubeTv(this);
+            if (!MediaFacts.exempt(true, lastPackage, r.ok && r.playing)) return;
+            stats.exemptLastBlack();
+            sendTitle(r.title);
+        } catch (Throwable ignored) { }      // a failure here only means the frame counts as black, which is the safe direction
+    }
+
+    /** io thread. The title is encrypted for Dad's key and the approved browser keys BEFORE it is held anywhere else. */
+    private void sendTitle(String title) {
+        byte[] plain = null;
+        try {
+            long now = System.currentTimeMillis();
+            if (recipients == null || recipients.isEmpty() || !titleGate.shouldSend(title, now)) return;
+            String name = MediaFacts.titleObjectName(now);
+            plain = MediaFacts.titlePlain(title, now);
+            byte[] enc = Egf2.encrypt(plain, recipients, name);
+            titleGate.sent(title, now);
+            if (titleUploader.enqueue(new TitleUploader.Pending(name, enc, now))) deliverTitles();
+        } catch (Throwable ignored) {
+        } finally {
+            if (plain != null) Arrays.fill(plain, (byte) 0);
+        }
+    }
+
+    private void deliverTitles() {
+        try {
+            net.execute(() -> titleUploader.drain(Config.load(this)));
+        } catch (Throwable ignored) { }
+    }
+
     /** io thread: the end-to-end self-test trigger (see TEST_HOOK). The test picture is synthetic, never a screenshot. */
     private void checkTestHook() {
         try {
@@ -275,9 +313,11 @@ public class GuardService extends AccessibilityService {
                     long onS = stats.screenOnMs / 1000;
                     Heartbeat.DetectorStatus d = new Heartbeat.DetectorStatus(Detector.MODEL_SHA256, selfArgmax, selfMax,
                             detector.medianMs(), framesFlagged, uploader.takeDropped());
-                    org.json.JSONObject info = Heartbeat.info(this, svcEnabled, state, onS, windowS, SHOT_MS / 1000, stats, d, titles);
+                    org.json.JSONObject info = Heartbeat.info(this, svcEnabled, state, onS, windowS, SHOT_MS / 1000, stats, d, titles,
+                            titleUploader.takeSent(), MediaListener.granted(this));
                     stats.reset();
                     titles.reset();
+                    titleGate.newWindow();
                     framesFlagged = 0;
                     if (cfg == null) return;                                      // not configured: report nothing
                     net.execute(() -> Heartbeat.send(cfg, info));
