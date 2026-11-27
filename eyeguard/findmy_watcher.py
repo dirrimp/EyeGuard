@@ -344,6 +344,76 @@ def _note_ok(cfg: dict) -> None:
         pass
 
 
+# --- Per-cycle session facts (2026-11-27) ----------------------------------
+# The saved Apple session died four times in a row, at 05:00-06:30 and 8-12 h
+# after login, though Apple's own cookies promise 30+ days. Suspects: (1) Apple
+# rotates the session token every cycle and a rotation was not saved or was
+# overwritten by an overlapping run; (2) a network change; (3) something Apple
+# does at a fixed hour. These lines separate (1) from the rest. Facts only:
+# yes/no answers and minutes. No token value is ever logged; the file below
+# holds an 8-hex-char SHA-256 prefix of the token (not usable as a credential).
+def _facts_path(cfg: dict) -> Path:
+    return _data_dir(cfg) / ".findmy_cycle_facts.json"
+
+
+def _token_fp(token) -> str | None:
+    import hashlib
+    return hashlib.sha256(token.encode()).hexdigest()[:8] if token else None
+
+
+def _mac_wake_age_min(now_epoch: float | None = None) -> str:
+    """Minutes since the Mac's last wake (sysctl kern.waketime), or 'unknown'."""
+    try:
+        import re, subprocess, time as _t
+        out = subprocess.run(["/usr/sbin/sysctl", "-n", "kern.waketime"], capture_output=True, text=True, timeout=5).stdout
+        m = re.search(r"sec\s*=\s*(\d+)", out)
+        if not m:
+            return "unknown"
+        return f"{((now_epoch or _t.time()) - int(m.group(1))) / 60:.0f}"
+    except Exception:
+        return "unknown"
+
+
+def _cycle_facts_line(cfg: dict, start_fp, end_fp, saved, now: datetime | None = None) -> str:
+    """One log line. 'start token = previous end' is the key fact: NO means the
+    token we loaded is not the one the last cycle finished with (a lost or
+    overwritten save). 'rotated' = Apple issued a new token this cycle.
+    'saved' = the token on disk equals the one in memory after the cycle.
+    Stores this cycle's end fingerprint for the next cycle. Never raises."""
+    now = now or datetime.now()
+    try:
+        prev = None
+        gap = "unknown"
+        try:
+            d = json.loads(_facts_path(cfg).read_text())
+            prev = d.get("end_fp")
+            gap = f"{(now - datetime.fromisoformat(d['at'])).total_seconds() / 60:.0f}"
+        except Exception:
+            pass
+        link = "unknown" if (prev is None or start_fp is None) else ("yes" if prev == start_fp else "NO")
+        rot = "unknown" if (start_fp is None or end_fp is None) else ("yes" if start_fp != end_fp else "no")
+        sv = "n/a" if saved is None else ("yes" if saved else "NO")
+        try:
+            _facts_path(cfg).write_text(json.dumps({"end_fp": end_fp, "at": now.isoformat()}))
+        except Exception:
+            pass
+        return (f"facts: start token = previous cycle's end: {link}; token rotated this cycle: {rot}; "
+                f"saved to disk after cycle: {sv}; {gap} min since previous cycle; Mac woke {_mac_wake_age_min()} min ago")
+    except Exception:
+        return "facts: unavailable"
+
+
+def _saved_matches(api) -> bool | None:
+    try:
+        path = getattr(api.session, "session_path", None)
+        if not path:
+            return None
+        on_disk = json.loads(Path(path).read_text()).get("session_token")
+        return on_disk == api.session.data.get("session_token")
+    except Exception:
+        return None
+
+
 def _setup_info_path(cfg: dict) -> Path:
     # Beside (not inside) the session dir; holds timestamps only -- no
     # credential or session contents.
@@ -716,6 +786,8 @@ class FindMyWatcher:
                                           PyiCloudAuthRequiredException,
                                           PyiCloudAcceptTermsException)
 
+        facts = {"start": None}
+
         def _dead(reason: str, why: str):
             print(f"[findmy_watcher] {datetime.now().isoformat()} {why} -- "
                   f"saved session unusable; backing off until 'findmy_watcher"
@@ -723,6 +795,8 @@ class FindMyWatcher:
                   flush=True)
             print(f"[findmy_watcher] {datetime.now().isoformat()} death trace: "
                   f"{_session_trace(self.cfg)}", flush=True)
+            print(f"[findmy_watcher] {datetime.now().isoformat()} death "
+                  f"{_cycle_facts_line(self.cfg, facts['start'], facts['start'], None)}", flush=True)
             _write_needs_setup(self.cfg, reason)
             self._alert_session_expired(reason)
 
@@ -743,6 +817,7 @@ class FindMyWatcher:
                 api = PyiCloudService(apple_id, None,
                                        cookie_directory=str(_cookie_dir(self.cfg)),
                                        authenticate=False)
+                facts["start"] = _token_fp(api.session.data.get("session_token"))
                 if not (api.session.data.get("session_token")
                         and api.session.cookies.get("X-APPLE-WEBAUTH-TOKEN")):
                     _dead("session_expired", "no saved session token")
@@ -808,6 +883,9 @@ class FindMyWatcher:
         _note_ok(self.cfg)
         print(f"[findmy_watcher] {datetime.now().isoformat()} cycle ok "
               f"({_session_trace(self.cfg)})", flush=True)
+        print(f"[findmy_watcher] {datetime.now().isoformat()} cycle "
+              f"{_cycle_facts_line(self.cfg, facts['start'], _token_fp(api.session.data.get('session_token')), _saved_matches(api))}",
+              flush=True)
         # Confirmed live (2026-09-02): this Apple ID has visibility into
         # a large shared/family group -- device_name_contains alone is
         # NOT enough to identify the right phone. Two real hazards
